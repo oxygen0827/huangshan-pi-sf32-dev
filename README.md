@@ -12,9 +12,9 @@ sensor, audio, storage, USB, or board-control applications.
 Upstream references:
 
 - Official SiFli SDK: https://gitee.com/SiFli/sifli-sdk (`release/v2.4`)
-  - Local path: `/Users/wq/sifli-sdk`
+  - Local path: `/Users/wq/huangshan-pi-workspace/sifli-sdk`
 - LCKFB Huangshan Pi examples: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
-  - Local path: `/Users/wq/lckfb-hspi-ulp_example`
+  - Local path: `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 
 The board target is:
 
@@ -32,6 +32,17 @@ sf32lb52-lchspi-ulp
 - macOS port used during bring-up: `/dev/cu.usbserial-110`
 
 ## Project Layout
+
+Recommended local workspace:
+
+```text
+/Users/wq/huangshan-pi-workspace/
+  sifli-sdk/                  Official SDK dependency
+  lckfb-hspi-ulp_example/     LCKFB reference examples
+  huangshan-pi-sf32-dev/      This board application workspace
+```
+
+Repository layout:
 
 ```text
 project/                 SCons project files
@@ -53,9 +64,13 @@ Equivalent manual command:
 
 ```bash
 cd project
-source /Users/wq/sifli-sdk/export.sh
+source ../../sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
+
+The helper scripts default to the sibling SDK path
+`../sifli-sdk`. Override it with `SIFLI_SDK_PATH` when using another SDK
+location.
 
 ## Flash
 
@@ -92,7 +107,7 @@ It displays:
 This board only worked reliably after patching the SDK CO5300 driver in:
 
 ```text
-/Users/wq/sifli-sdk/customer/peripherals/co5300/co5300.c
+/Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c
 ```
 
 Required behavior:

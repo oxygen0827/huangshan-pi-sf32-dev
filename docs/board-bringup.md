@@ -3,9 +3,9 @@
 ## Known Good Inputs
 
 - Official SDK: https://gitee.com/SiFli/sifli-sdk, branch `release/v2.4`
-- SDK local path: `/Users/wq/sifli-sdk`
+- SDK local path: `/Users/wq/huangshan-pi-workspace/sifli-sdk`
 - LCKFB example repository: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
-- LCKFB example local path: `/Users/wq/lckfb-hspi-ulp_example`
+- LCKFB example local path: `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 - Board: `sf32lb52-lchspi-ulp`
 - Serial port on this Mac: `/dev/cu.usbserial-110`
 - Baud rate for logs: `1000000`

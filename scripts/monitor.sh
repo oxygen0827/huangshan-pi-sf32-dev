@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SDK_DIR="${SIFLI_SDK_PATH:-/Users/wq/sifli-sdk}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_DIR="$(cd "$ROOT_DIR/.." && pwd)"
+SDK_DIR="${SIFLI_SDK_PATH:-$WORKSPACE_DIR/sifli-sdk}"
 PORT="${1:-${PORT:-/dev/cu.usbserial-110}}"
 SECONDS_TO_CAPTURE="${SECONDS_TO_CAPTURE:-12}"
 
