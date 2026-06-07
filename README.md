@@ -1,11 +1,20 @@
-# Huangshan Watch App
+# Huangshan Pi SF32 Development Base
 
-Independent LVGL watch application project for the LCKFB Huangshan Pi board.
+Independent development project for the LCKFB Huangshan Pi / 立创黄山派
+SF32LB52x board.
 
-This project is based on the verified `lvgl/watch` flow from:
+The current verified runtime starts from the LCKFB `lvgl/watch` example because
+that path proves the CO5300 AMOLED panel, FT6146 touch, launcher, resources, and
+LVGL integration on this board. The repository is not limited to watch products:
+the watch UI is one development outlet for this hardware, alongside other GUI,
+sensor, audio, storage, USB, or board-control applications.
 
-- Official SiFli SDK: `/Users/wq/sifli-sdk`
-- LCKFB examples: `/Users/wq/lckfb-hspi-ulp_example`
+Upstream references:
+
+- Official SiFli SDK: https://gitee.com/SiFli/sifli-sdk (`release/v2.4`)
+  - Local path: `/Users/wq/sifli-sdk`
+- LCKFB Huangshan Pi examples: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
+  - Local path: `/Users/wq/lckfb-hspi-ulp_example`
 
 The board target is:
 
@@ -26,7 +35,7 @@ sf32lb52-lchspi-ulp
 
 ```text
 project/                 SCons project files
-src/gui_apps/            GUI app modules registered into the watch launcher
+src/gui_apps/            GUI app modules registered into the current launcher
 src/gui_apps/Codex_Test/ First verified custom app
 src/resource/images/     Image assets converted by SiFli resource tools
 src/resource/strings/    Multilingual string resources
@@ -95,5 +104,10 @@ Details are in `docs/board-bringup.md`.
 
 ## Development Rule
 
-Keep official SDK and LCKFB examples as references. Put new application code in
-this project unless a board-driver fix must be made in the SDK.
+Treat this repository as the board-level application workspace. Keep official
+SDK and LCKFB examples as upstream references, and put new product/application
+code here unless a board-driver fix must be made in the SDK.
+
+The full official SDK is not vendored into this repository. The verified LCKFB
+`lvgl/watch` application structure is copied in as the current working base.
+See `docs/upstream.md` for source repositories and dependency boundaries.

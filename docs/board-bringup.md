@@ -2,8 +2,10 @@
 
 ## Known Good Inputs
 
-- SDK branch: `/Users/wq/sifli-sdk`, `release/v2.4`
-- Example reference: `/Users/wq/lckfb-hspi-ulp_example`
+- Official SDK: https://gitee.com/SiFli/sifli-sdk, branch `release/v2.4`
+- SDK local path: `/Users/wq/sifli-sdk`
+- LCKFB example repository: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
+- LCKFB example local path: `/Users/wq/lckfb-hspi-ulp_example`
 - Board: `sf32lb52-lchspi-ulp`
 - Serial port on this Mac: `/dev/cu.usbserial-110`
 - Baud rate for logs: `1000000`
@@ -90,7 +92,8 @@ Reset and monitor:
 
 ## App Pattern
 
-Each watch app lives under `src/gui_apps/<AppName>/` and has its own
+The currently copied LCKFB UI shell uses the watch launcher pattern. Each app
+lives under `src/gui_apps/<AppName>/` and has its own
 `SConscript`. It is registered with:
 
 ```c
@@ -99,3 +102,7 @@ BUILTIN_APP_EXPORT(LV_EXT_STR_ID(app_string_key), LV_EXT_IMG_GET(icon_name), APP
 
 The launcher automatically scans `src/gui_apps` subdirectories that contain a
 `SConscript`.
+
+This pattern is a proven starting point, not a product constraint. Future work
+can keep this launcher, replace it with another LVGL shell, or build non-watch
+board demos while preserving the same board target and SDK bring-up facts.
