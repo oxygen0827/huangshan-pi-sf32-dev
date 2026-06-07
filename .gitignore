@@ -1,0 +1,6 @@
+project/build_*/
+project/.sconsign.dblite
+project/__pycache__/
+*.pyc
+compile_commands.json
+.DS_Store
