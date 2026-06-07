@@ -1,66 +1,75 @@
-# Huangshan Pi SF32 Development Base
+# 黄山派 SF32 开发基座
 
-Independent development project for the LCKFB Huangshan Pi / 立创黄山派
-SF32LB52x board.
+这是一个面向立创黄山派 / LCKFB Huangshan Pi 的独立应用开发仓库。
 
-The current verified runtime starts from the LCKFB `lvgl/watch` example because
-that path proves the CO5300 AMOLED panel, FT6146 touch, launcher, resources, and
-LVGL integration on this board. The repository is not limited to watch products:
-the watch UI is one development outlet for this hardware, alongside other GUI,
-sensor, audio, storage, USB, or board-control applications.
+本仓库的目标不是只做手表。当前代码基于立创例程里的 `lvgl/watch`
+路径，因为这条路径已经验证了这块板子的 AMOLED 屏幕、触摸、LVGL、
+资源系统、启动器和烧录流程。手表 UI 只是这块板子的一个开发出口；
+后续也可以继续开发传感器、音频、存储、USB、低功耗、板级控制或其他
+GUI 应用。
 
-Upstream references:
+## 开发板
 
-- Official SiFli SDK: https://gitee.com/SiFli/sifli-sdk (`release/v2.4`)
-  - Local path: `/Users/wq/huangshan-pi-workspace/sifli-sdk`
-- LCKFB Huangshan Pi examples: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
-  - Local path: `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+- 开发板：立创黄山派 / LCKFB Huangshan Pi
+- 目标板型：`sf32lb52-lchspi-ulp`
+- 模组：SF32LB52x-MOD-1-N16R8
+- 屏幕：CO5300 AMOLED，390x450，QADSPI
+- 触摸：FT6146
+- 串口：CH340 USB UART
+- 本机验证串口：`/dev/cu.usbserial-110`
 
-The board target is:
+## 上游来源
 
-```text
-sf32lb52-lchspi-ulp
-```
+本仓库依赖两个上游项目：
 
-## Verified Board
+- 官方 SiFli SDK
+  - 仓库：https://gitee.com/SiFli/sifli-sdk
+  - 分支：`release/v2.4`
+  - 本地路径：`/Users/wq/huangshan-pi-workspace/sifli-sdk`
 
-- Board: LCKFB Huangshan Pi / 立创黄山派
-- MCU module: SF32LB52x-MOD-1-N16R8
-- LCD: CO5300 AMOLED, 390x450, QADSPI
-- Touch: FT6146
-- Serial: CH340 USB UART
-- macOS port used during bring-up: `/dev/cu.usbserial-110`
+- 立创黄山派例程
+  - 仓库：https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
+  - 本地路径：`/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 
-## Project Layout
+完整 SDK 没有复制进本仓库。它作为外部依赖保留在同一个 workspace
+里。当前仓库复制了立创 `lvgl/watch` 的已验证应用结构，用它作为第一版
+可运行开发基座。
 
-Recommended local workspace:
+## 推荐本地目录
+
+建议把 SDK、立创例程和本项目放在同一个目录下：
 
 ```text
 /Users/wq/huangshan-pi-workspace/
-  sifli-sdk/                  Official SDK dependency
-  lckfb-hspi-ulp_example/     LCKFB reference examples
-  huangshan-pi-sf32-dev/      This board application workspace
+  sifli-sdk/                  官方 SDK
+  lckfb-hspi-ulp_example/     立创黄山派参考例程
+  huangshan-pi-sf32-dev/      本开发仓库
 ```
 
-Repository layout:
+本仓库的脚本默认会从兄弟目录 `../sifli-sdk` 查找 SDK。如果你把 SDK 放在
+其他位置，可以通过 `SIFLI_SDK_PATH` 覆盖。
+
+## 仓库结构
 
 ```text
-project/                 SCons project files
-src/gui_apps/            GUI app modules registered into the current launcher
-src/gui_apps/Codex_Test/ First verified custom app
-src/resource/images/     Image assets converted by SiFli resource tools
-src/resource/strings/    Multilingual string resources
-scripts/                 Local build, flash, and monitor helpers
-docs/                    Board and development notes
+project/                 SCons 工程文件
+src/gui_apps/            当前启动器里的应用模块
+src/gui_apps/Codex_Test/ 第一个已验证的自定义应用
+src/resource/images/     SiFli 资源工具转换后的图片资源
+src/resource/strings/    多语言字符串资源
+scripts/                 本地构建、烧录、串口监视脚本
+docs/                    开发板、上游来源和 bring-up 记录
 ```
 
-## Build
+## 构建
+
+在本仓库根目录执行：
 
 ```bash
 ./scripts/build.sh
 ```
 
-Equivalent manual command:
+等价的手动命令：
 
 ```bash
 cd project
@@ -68,61 +77,72 @@ source ../../sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
 
-The helper scripts default to the sibling SDK path
-`../sifli-sdk`. Override it with `SIFLI_SDK_PATH` when using another SDK
-location.
+## 烧录
 
-## Flash
+连接开发板 USB 后执行：
 
 ```bash
 ./scripts/flash.sh /dev/cu.usbserial-110
 ```
 
-If no port is passed, the script uses `/dev/cu.usbserial-110`.
+如果不传串口参数，脚本默认使用：
 
-## Monitor And Reset
+```text
+/dev/cu.usbserial-110
+```
+
+## 串口监视和复位
 
 ```bash
 ./scripts/monitor.sh /dev/cu.usbserial-110
 ```
 
-The monitor toggles RTS to reset the board, then captures boot logs at `1000000`
-baud.
+该脚本会通过 RTS 复位开发板，然后以 `1000000` 波特率抓取启动日志。
 
-## Current Demo App
+## 当前已验证应用
 
-`src/gui_apps/Codex_Test` is the first custom app in this project. It is
-registered into the honeycomb launcher as `Codex测试 / Codex Test`.
+`src/gui_apps/Codex_Test` 是本仓库的第一个自定义应用，已经可以从当前
+蜂窝启动器里打开，名称为：
 
-It displays:
+```text
+Codex测试 / Codex Test
+```
 
-- Four color blocks for display validation
-- `390x450` board label
-- LVGL timer count
-- Touch count
-- A `Back` button that returns to `Main`
+它用于验证：
 
-## Important SDK Patch
+- 屏幕显示
+- 触摸计数
+- LVGL 定时器刷新
+- 390x450 分辨率显示
+- 返回主启动器
 
-This board only worked reliably after patching the SDK CO5300 driver in:
+## 重要 SDK 补丁
+
+这块板子的 CO5300 屏幕在本机验证时，需要修改官方 SDK 的驱动文件：
 
 ```text
 /Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c
 ```
 
-Required behavior:
+关键行为：
 
-- Accept CO5300 read IDs `0x331100`, `0x1fff`, and `0x3fff`
-- Disable LCDC TE sync for this panel path with `HAL_LCDC_SYNC_DISABLE`
+- 接受 CO5300 读到的 `0x331100`、`0x1fff`、`0x3fff`
+- 对当前屏幕路径使用 `HAL_LCDC_SYNC_DISABLE`
 
-Details are in `docs/board-bringup.md`.
+没有这个补丁时，曾出现屏幕黑屏、LCD ID 不匹配、`draw_core timeout`
+等问题。详细记录见：
 
-## Development Rule
+```text
+docs/board-bringup.md
+```
 
-Treat this repository as the board-level application workspace. Keep official
-SDK and LCKFB examples as upstream references, and put new product/application
-code here unless a board-driver fix must be made in the SDK.
+## 开发原则
 
-The full official SDK is not vendored into this repository. The verified LCKFB
-`lvgl/watch` application structure is copied in as the current working base.
-See `docs/upstream.md` for source repositories and dependency boundaries.
+本仓库作为黄山派 SF32 的板级应用工作区使用。
+
+新应用、新界面、新板级测试代码优先放在本仓库。只有确实属于底层驱动或
+SDK bring-up 的问题，才修改 `sifli-sdk`。
+
+当前 `lvgl/watch` 启动器只是一个已经跑通的应用壳，不是产品形态限制。
+后续可以继续保留它，也可以替换成新的 LVGL 壳，或者开发非手表形态的
+板级 Demo。
