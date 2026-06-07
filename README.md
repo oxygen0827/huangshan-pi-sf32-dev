@@ -61,6 +61,16 @@ scripts/                 本地构建、烧录、串口监视脚本
 docs/                    开发板、上游来源和 bring-up 记录
 ```
 
+## 资料文档
+
+仓库内已整理 SiFli 和黄山派相关资料：
+
+- [SiFli 资料索引](docs/sifli-resources.md)
+- [SiFli SDK 本地地图](docs/sifli-sdk-map.md)
+- [黄山派学习路线](docs/sifli-learning-path.md)
+- [上游仓库记录](docs/upstream.md)
+- [开发板 bring-up 记录](docs/board-bringup.md)
+
 ## 构建
 
 在本仓库根目录执行：

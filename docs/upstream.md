@@ -66,3 +66,9 @@ Not copied into this repository:
 
 This keeps the new project focused on board application development while still
 recording the exact upstream sources needed to rebuild the environment.
+
+## Related Documentation In This Repository
+
+- `docs/sifli-resources.md`: external SiFli document and tool links
+- `docs/sifli-sdk-map.md`: local SDK source map for this board
+- `docs/sifli-learning-path.md`: recommended learning order for Huangshan Pi
