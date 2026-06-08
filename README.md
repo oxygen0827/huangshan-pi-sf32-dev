@@ -74,11 +74,29 @@ docs/                    开发板、上游来源和 bring-up 记录
 
 ## 构建
 
-在本仓库根目录执行：
+macOS / Linux：
 
 ```bash
 ./scripts/build.sh
 ```
+
+Windows PowerShell：
+
+```powershell
+.\scripts\build.ps1
+```
+
+两个脚本默认都使用：
+
+```text
+BOARD=sf32lb52-lchspi-ulp
+JOBS=8
+SDK=../sifli-sdk
+```
+
+如果 SDK 不在兄弟目录，可以用 `SIFLI_SDK_PATH` 覆盖。Windows 还可以用
+`SIFLI_SDK_TOOLS_PATH` 指定 SiFli 工具缓存目录；不指定时默认使用本仓库
+下的 `.sifli-tools/`，该目录不会提交到 Git。
 
 等价的手动命令：
 
@@ -88,27 +106,61 @@ source ../../sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
 
+```powershell
+. ..\..\sifli-sdk\export.ps1
+cd project
+scons --board=sf32lb52-lchspi-ulp -j8
+```
+
+## Windows 首次环境
+
+Windows 需要先按 SiFli SDK 官方流程安装工具链：
+
+```powershell
+cd ..\sifli-sdk
+$env:SIFLI_SDK_TOOLS_PATH="..\huangshan-pi-sf32-dev\.sifli-tools"
+.\install.ps1
+```
+
+如果国内网络访问 GitHub 慢，可以在安装前加：
+
+```powershell
+$env:SIFLI_SDK_GITHUB_ASSETS="downloads.sifli.com/github_assets"
+```
+
 ## 烧录
 
-连接开发板 USB 后执行：
+macOS / Linux：
 
 ```bash
 ./scripts/flash.sh /dev/cu.usbserial-110
 ```
 
-如果不传串口参数，脚本默认使用：
+Windows PowerShell：
 
-```text
-/dev/cu.usbserial-110
+```powershell
+.\scripts\flash.ps1 COM7
 ```
 
+Windows 串口也可以只传数字，例如 `.\scripts\flash.ps1 7`。烧录脚本使用
+UART 下载，需要先完成构建并生成 `bootloader.bin`、`main.bin` 和
+`ftab.bin`。
+
 ## 串口监视和复位
+
+macOS / Linux：
 
 ```bash
 ./scripts/monitor.sh /dev/cu.usbserial-110
 ```
 
-该脚本会通过 RTS 复位开发板，然后以 `1000000` 波特率抓取启动日志。
+Windows PowerShell：
+
+```powershell
+.\scripts\monitor.ps1 COM7
+```
+
+监视脚本会通过 RTS 复位开发板，然后以 `1000000` 波特率抓取启动日志。
 
 ## 当前已验证应用
 
