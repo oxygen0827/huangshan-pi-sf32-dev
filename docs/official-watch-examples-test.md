@@ -219,7 +219,7 @@ Build results:
 | `gpio/project` | 251608 bytes | Pass | Pass |
 | `uart/project` | 304444 bytes | Pass | Not fully tested, requires external USB-TTL on UART2 |
 | `I2C/charger/project` | 311092 bytes | Pass | Not flashed, writes charger current register |
-| `RT-Device/sensor/project` | 325304 bytes | Pass | Not flashed in this pass |
+| `RT-Device/sensor/project` | 325304 bytes | Pass | Pass |
 | `ws2812/project` | 305960 bytes | Pass | Not fully tested, requires external WS2812 LED |
 | `lvgl/lvgl_v8_demos/project` | 761400 bytes | Pass | Serial init pass, visual check needed |
 | `lvgl/lvgl_v9_demos/project` | 882836 bytes | Pass | Serial/sysmon pass, visual check needed |
@@ -308,6 +308,31 @@ Learning points:
 - The v9 demo is a good reference for benchmark/performance reporting, but it is
   heavier than the watch app examples.
 
+### RT-Device Sensor Project
+
+Board result: pass.
+
+Evidence:
+
+- `Find i2c bus device i2c3`
+- `LTR303_MEAS_RATE Reg[0] = 3`
+- `light sensor init success`
+- `MMC56x3 ID = 16`
+- `mag sensor init success`
+- `sensor.st.lsm6dsl sensor init success`
+- `acce set odr 1660`
+- `gyro set odr 1660`
+- Sample data included `light: 12 lux`, `mag, x: -389, y: 138, z: -740`,
+  `acce, x: 0, y: 20, z: -1009`, and `gyro, x: -1890, y: -4200, z: 3150`.
+- `lsm6d step, step: 0` while the board was static.
+
+Learning points:
+
+- The example uses I2C3 on PA39 / PA40.
+- LTR303, MMC56X3, and LSM6DSL all initialize and produce periodic readings.
+- The step counter path is readable; a separate motion test is needed to verify
+  step increments.
+
 ### Projects Not Fully Run In This Pass
 
 `uart/project`:
@@ -326,13 +351,6 @@ Learning points:
   register.
 - It was not flashed in this pass because changing charger current is a hardware
   side effect and should be done intentionally.
-
-`RT-Device/sensor/project`:
-
-- Builds successfully.
-- Uses I2C3 on PA39/PA40 and initializes LTR303, MMC56X3, and LSM6DSL devices.
-- It was not flashed in this pass because the first pass focused on lower-risk
-  serial/LVGL examples. It is a good next candidate if we want sensor data.
 
 `ws2812/project`:
 

@@ -232,7 +232,7 @@ STATE_DEINIT: clock[simple] deinit
 | `gpio/project` | 251608 bytes | 通过 | 通过 |
 | `uart/project` | 304444 bytes | 通过 | 未完整测试 |
 | `I2C/charger/project` | 311092 bytes | 通过 | 未刷机 |
-| `RT-Device/sensor/project` | 325304 bytes | 通过 | 未刷机 |
+| `RT-Device/sensor/project` | 325304 bytes | 通过 | 通过 |
 | `ws2812/project` | 305960 bytes | 通过 | 未完整测试 |
 | `lvgl/lvgl_v8_demos/project` | 761400 bytes | 通过 | 串口初始化通过 |
 | `lvgl/lvgl_v9_demos/project` | 882836 bytes | 通过 | 串口 / sysmon 通过 |
@@ -328,6 +328,37 @@ sysmon: 39 FPS ...
 - 该例程持续输出 sysmon 性能信息。
 - 本轮抓取到的 FPS 大约在 `39` 到 `62` 之间，取决于当前 demo 场景。
 
+### 8.5 RT-Device Sensor 例程
+
+板上结果：通过。
+
+串口证据：
+
+```text
+Hello world!
+[D/drv.als] Find i2c bus device i2c3
+LTR303_MEAS_RATE Reg[0] = 3
+[I/sensor.ltr-303] light sensor init success
+MMC56x3 ID = 16
+[I/sensor.mmc56x3] mag sensor init success
+[I/sensor.st.lsm6dsl] sensor init success
+acce set odr 1660
+gyro set odr 1660
+light: 12 lux
+mag, x: -389, y: 138, z: -740
+acce, x: 0, y: 20, z: -1009
+gyro, x: -1890, y: -4200, z: 3150
+lsm6d step, step: 0
+```
+
+结论：
+
+- I2C3 总线在 PA39 / PA40 上可以正常发现并驱动板载传感器。
+- LTR303 光照传感器初始化成功，并持续输出 `light` 数据。
+- MMC56X3 磁力传感器初始化成功，并持续输出 `mag` 三轴数据。
+- LSM6DSL 加速度计和陀螺仪初始化成功，并持续输出 `acce` / `gyro` 数据。
+- 计步器接口可以读取，当前静置测试中 `step` 保持为 `0`，后续可通过移动板子进一步验证动态变化。
+
 ## 9. 未完整板测的官方例程
 
 ### 9.1 UART 例程
@@ -361,23 +392,7 @@ README 中的硬件映射：
 - 会扫描 I2C、读取芯片 ID，并循环写入充电电流寄存器；
 - 这属于真实硬件副作用，应该在明确需要时再运行。
 
-### 9.3 RT-Device Sensor 例程
-
-构建结果：通过。
-
-本轮未刷机原因：
-
-- 该例程会初始化并读取 I2C3 上的多个板载传感器；
-- 本轮优先测试低风险串口 / GPIO / LVGL 例程；
-- 如果下一步要验证传感器数据，它是很合适的目标。
-
-README 和源码中涉及的设备：
-
-- LTR303 光照传感器；
-- MMC56X3 磁力传感器；
-- LSM6DSL 加速度计、陀螺仪、计步器。
-
-### 9.4 WS2812 例程
+### 9.3 WS2812 例程
 
 构建结果：通过。
 
@@ -486,7 +501,7 @@ a640612 docs: record official example test results
 
 ## 12. 建议的下一步测试
 
-1. 单独刷入并测试 `RT-Device/sensor`，记录 LTR303、MMC56X3、LSM6DSL 的真实数据。
+1. 对已通过的 `RT-Device/sensor` 做动态验证：遮挡 / 照光、旋转板子、移动板子，观察 `light`、`mag`、`acce`、`gyro`、`step` 是否随动作变化。
 2. 接 USB-TTL 后完整测试 UART2 收发。
 3. 接 WS2812 灯珠后完整测试 LED 时序和颜色循环。
 4. 明确充电电流修改是否安全后，再测试 I2C charger 例程。
@@ -499,9 +514,9 @@ a640612 docs: record official example test results
 - 当前板子可以通过本地 patched CO5300 路径稳定点亮屏幕；
 - 触摸和显示在已测试固件中可以正常初始化；
 - 官方 watch 内置应用可以通过 app ID 启动并返回 `Main`；
-- ADC 和 GPIO 官方独立例程已在板上实测通过；
+- ADC、GPIO 和 Sensor 官方独立例程已在板上实测通过；
 - LVGL v8 / v9 官方 demo 可以初始化显示和触摸；
-- UART、WS2812、I2C charger、Sensor 等例程需要根据外设和硬件副作用单独安排测试；
+- UART、WS2812、I2C charger 等例程需要根据外设和硬件副作用单独安排测试；
 - 后续 AI 可以基于这份报告，明确区分官方例程、我们自己的应用、构建通过、板上通过和部分测试。
 
 这份报告可以作为后续黄山派应用开发、调试和 AI 协作的基础参考。
