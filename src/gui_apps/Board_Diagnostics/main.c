@@ -15,10 +15,6 @@
     #define BSP_KEY2_PIN 43
 #endif
 
-#ifndef BSP_LED1_PIN
-    #define BSP_LED1_PIN 26
-#endif
-
 typedef struct
 {
     lv_obj_t *root;
@@ -28,15 +24,12 @@ typedef struct
     lv_obj_t *coord_label;
     lv_obj_t *key1_label;
     lv_obj_t *key2_label;
-    lv_obj_t *led_label;
-    lv_obj_t *led_card;
     lv_timer_t *timer;
     uint32_t seconds;
     uint32_t tick_count;
     uint32_t touch_count;
     int last_key1_level;
     int last_key2_level;
-    rt_base_t led_on;
 } board_diag_t;
 
 static board_diag_t g_board_diag;
@@ -90,11 +83,6 @@ static const char *level_to_text(int level)
     return level ? "HIGH" : "LOW";
 }
 
-static const char *active_to_text(int level)
-{
-    return level ? "ON" : "OFF";
-}
-
 static int key1_is_active(rt_base_t pin_level)
 {
 #ifdef BSP_KEY1_ACTIVE_HIGH
@@ -113,15 +101,6 @@ static int key2_is_active(rt_base_t pin_level)
 #endif
 }
 
-static void write_led1(rt_base_t on)
-{
-#ifdef BSP_LED1_ACTIVE_HIGH
-    rt_pin_write(BSP_LED1_PIN, on ? PIN_HIGH : PIN_LOW);
-#else
-    rt_pin_write(BSP_LED1_PIN, on ? PIN_LOW : PIN_HIGH);
-#endif
-}
-
 static void update_signal_labels(board_diag_t *state)
 {
     int key1_level = rt_pin_read(BSP_KEY1_PIN);
@@ -137,11 +116,6 @@ static void update_signal_labels(board_diag_t *state)
     {
         lv_label_set_text_fmt(state->key2_label, "%s %s",
                               level_to_text(key2_level), key2_is_active(key2_level) ? "PRESSED" : "IDLE");
-    }
-
-    if (state->led_label)
-    {
-        lv_label_set_text_fmt(state->led_label, "LED1 %s", active_to_text(state->led_on));
     }
 
     if (state->last_key1_level != key1_level)
@@ -226,25 +200,10 @@ static void back_event_cb(lv_event_t *event)
     }
 }
 
-static void led_event_cb(lv_event_t *event)
-{
-    board_diag_t *state = (board_diag_t *)lv_event_get_user_data(event);
-
-    if (LV_EVENT_CLICKED == lv_event_get_code(event))
-    {
-        state->led_on = !state->led_on;
-        write_led1(state->led_on);
-        update_signal_labels(state);
-        rt_kprintf("[Board_Diagnostics] LED1 %s\n", active_to_text(state->led_on));
-    }
-}
-
 static void init_signal_pins(void)
 {
     rt_pin_mode(BSP_KEY1_PIN, PIN_MODE_INPUT);
     rt_pin_mode(BSP_KEY2_PIN, PIN_MODE_INPUT);
-    rt_pin_mode(BSP_LED1_PIN, PIN_MODE_OUTPUT);
-    write_led1(RT_FALSE);
 }
 
 static void on_start(void)
@@ -288,9 +247,7 @@ static void on_start(void)
     create_metric_card(g_board_diag.root, 198, 202, "KEY2 GPIO43", "--", &g_board_diag.key2_label);
 
     create_metric_card(g_board_diag.root, 22, 286, "LVGL Tick", "0", &g_board_diag.tick_label);
-    g_board_diag.led_card = create_metric_card(g_board_diag.root, 198, 286, "Tap Toggle", "LED1 OFF",
-                                               &g_board_diag.led_label);
-    lv_obj_add_event_cb(g_board_diag.led_card, led_event_cb, LV_EVENT_CLICKED, &g_board_diag);
+    create_metric_card(g_board_diag.root, 198, 286, "Panel", "390 x 450", RT_NULL);
 
     create_color_block(g_board_diag.root, 22, 370, 0xff3030);
     create_color_block(g_board_diag.root, 112, 370, 0x20d060);
@@ -299,7 +256,7 @@ static void on_start(void)
 
     update_signal_labels(&g_board_diag);
 
-    lv_obj_t *hint = create_label(g_board_diag.root, "Tap blank area for touch. Tap LED card to toggle.",
+    lv_obj_t *hint = create_label(g_board_diag.root, "Tap blank area for touch. Press KEY1 or KEY2.",
                                   FONT_SMALL, lv_color_hex(0xa8b3bd));
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -16);
 
