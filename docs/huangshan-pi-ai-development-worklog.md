@@ -2,16 +2,28 @@
 
 日期：2026-06-09
 
-## 1. 文档目的
+本文记录立创黄山派 / SF32LB52x 在 AI 协作开发中的真实进展、验证证据和后续开发边界。它不是官方资料摘抄，也不是单纯的提交列表，而是给人和 AI 后续接手时使用的工作入口。
 
-这份文档记录本轮围绕立创黄山派 / SF32LB52x 开发板实际做过的工作。它不是官方资料摘抄，也不是单纯的功能清单，而是给后续继续开发和让 AI 理解这块板子使用的实测复盘。
+核心结论：
 
-阅读这份文档时要注意四个边界：
+- 当前仓库已经能稳定构建、烧录和监视黄山派固件。
+- 当前板子已经验证过显示、触摸、应用框架、ADC、GPIO 和板载传感器基础链路。
+- 屏幕点亮依赖本地 SiFli SDK 中的 CO5300 适配补丁，不能只看应用层代码。
+- 官方独立例程会替换整套固件，测试后必须刷回当前仓库固件。
+- VibeBoard 已接入黄山派 workspace，并打通构建、产物识别、本机烧录和串口监视。
 
-- 官方例程：来自立创 / SiFli 的 watch、ADC、GPIO、Sensor、LVGL 等示例。
-- 当前仓库应用：`huangshan-pi-sf32-dev` 里我们自己维护的固件和 UI。
-- 本地 SDK 适配：为了让这块板子的 CO5300 屏幕稳定点亮，对本地 SiFli SDK 做过必要补丁。
-- 未完整测试项：构建通过不等于板上功能完整通过，涉及外设或硬件副作用的例程仍需单独测试。
+## 1. 必须先分清的四层边界
+
+黄山派开发最容易混淆的是“板子”“应用”“官方例程”和“平台”。后续排查问题前，先判断当前改动属于哪一层。
+
+| 层级 | 代表内容 | 关键风险 |
+| --- | --- | --- |
+| SDK / 板级适配 | LCD、触摸、PSRAM、Flash、pinmux、CO5300 | 屏幕黑屏、LCDC timeout、外设驱动不匹配 |
+| 当前应用仓库 | `huangshan-pi-sf32-dev` 的 launcher、内置 app、资源 | app ID、生命周期、SConscript、资源注册 |
+| 官方独立例程 | 立创 / SiFli 的 ADC、GPIO、Sensor、LVGL demo | 刷入后会替换当前应用固件 |
+| VibeBoard 平台 | Web workspace、构建服务、产物、烧录、串口监视 | 服务器能编译，但只有本机能看到本机 USB 串口 |
+
+这四层不要混写结论。尤其不要把“官方例程构建通过”说成“当前应用页面已集成”，也不要把“服务器编译成功”说成“本机板子已烧录成功”。
 
 ## 2. 当前工作区和硬件事实
 
@@ -26,6 +38,9 @@ SiFli SDK：
 
 立创官方例程：
 /Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example
+
+VibeBoard：
+/Users/wq/VibeBoard
 ```
 
 本轮实测使用的硬件和目标：
@@ -37,8 +52,15 @@ SiFli SDK：
 屏幕驱动 IC：CO5300
 触摸芯片：FT6146
 调试串口：/dev/cu.usbserial-110
-串口波特率：1000000
+monitor.py 串口波特率：1000000
+VibeBoard 串口监视默认波特率：921600
 ```
+
+波特率说明：
+
+- `scripts/monitor.sh` 使用 Python `pyserial`，实测可用 `1000000`。
+- VibeBoard 后端用 macOS `stty` 配置串口，`1000000` 不可用，已改用 `921600`。
+- 如果后续统一监视实现，应优先复用 Python / pyserial 路径，减少 `stty` 平台差异。
 
 多个成功启动的 GUI 固件都出现过这些日志：
 
@@ -51,32 +73,40 @@ touch screen found driver ..., ft6146
 display on
 ```
 
-这些日志是后续判断板级基础链路是否正常的第一组证据。
+这组日志是判断板级基础链路是否正常的第一证据。
 
-## 3. 本轮实际做过的工作
+## 3. 当前可复用命令
 
-### 3.1 建立当前应用仓库的开发基线
-
-当前仓库不是一个空项目，而是基于 SiFli / 立创 watch 示例体系整理出来的应用工作区。我们先确认了构建、烧录、串口监视三条链路：
+当前应用仓库的基础闭环：
 
 ```bash
+cd /Users/wq/huangshan-pi-workspace/huangshan-pi-sf32-dev
+
 ./scripts/build.sh
 ./scripts/flash.sh /dev/cu.usbserial-110
 SECONDS_TO_CAPTURE=10 ./scripts/monitor.sh /dev/cu.usbserial-110
 ```
 
-这一步的意义是：后续每次开发都能用同一套命令从源码到真板子验证，避免只停留在“编译看起来没问题”。
+对应关系：
 
-### 3.2 修通屏幕点亮路径
+- `build.sh`：进入 `project/`，source SiFli SDK，再执行 `scons --board=sf32lb52-lchspi-ulp -j8`。
+- `flash.sh`：进入生成目录，调用 `uart_download.sh`。
+- `monitor.sh`：使用 pyserial 打开调试串口并采集启动日志。
 
-这块板子的屏幕是 CO5300。实测中遇到过两个关键问题：
+这三条命令是后续每次改动后的最小真板验证闭环。
+
+## 4. 板级点亮：CO5300 是关键前置条件
+
+这块板子的屏幕是 CO5300。实测中遇到过两个关键问题。
+
+屏幕 ID 识别失败：
 
 ```text
 Try lcd co5300, read id:1fffh, expect:331100h
 unknow lcd!
 ```
 
-以及：
+LCDC 同步超时：
 
 ```text
 draw_core timeout
@@ -90,7 +120,7 @@ LCDC STATUS=1,TE=3
 /Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c
 ```
 
-本地 SDK 接受的 CO5300 ID 包括：
+当前接受的 CO5300 ID：
 
 ```text
 0x331100
@@ -98,17 +128,31 @@ LCDC STATUS=1,TE=3
 0x3fff
 ```
 
-并且当前已验证屏幕路径使用：
+当前已验证的同步模式：
 
 ```c
 .syn_mode = HAL_LCDC_SYNC_DISABLE,
 ```
 
-这说明黄山派开发时不能只看应用层 UI 代码。屏幕能否点亮，首先依赖 SDK 板级外设驱动对当前屏幕模组的识别和同步方式。
+结论：黄山派开发不能只看应用层 UI 代码。屏幕能否点亮，首先依赖 SDK 板级外设驱动对当前屏幕模组的识别和 LCDC 同步方式。
 
-### 3.3 新增 Board Diagnostics 应用
+## 5. 当前应用仓库已经完成的工作
 
-我们新增了一个板级诊断页面：
+### 5.1 开发基线
+
+当前仓库不是空项目，而是基于 SiFli / 立创 watch 示例体系整理出的应用工作区。
+
+已经确认三条基础链路：
+
+- 源码可以构建。
+- 固件可以通过 CH340 串口烧录。
+- 串口可以捕获板上启动和应用日志。
+
+这一步的意义是：后续每次开发都能从源码到真板子验证，避免只停留在“编译看起来没问题”。
+
+### 5.2 Board Diagnostics 应用
+
+新增板级诊断页面：
 
 ```text
 src/gui_apps/Board_Diagnostics/
@@ -121,22 +165,22 @@ src/gui_apps/Board_Diagnostics/main.c
 src/gui_apps/Board_Diagnostics/SConscript
 ```
 
-该应用的目标不是产品功能，而是帮助我们确认板子的基础交互能力：
+该应用目标不是产品功能，而是确认基础交互能力：
 
-- LVGL 页面能创建并显示；
-- 触摸事件能进入 LVGL 回调；
-- KEY1 / KEY2 GPIO 能读取；
-- 定时器能稳定更新 UI；
-- 串口能持续输出调试日志；
+- LVGL 页面能创建并显示。
+- 触摸事件能进入 LVGL 回调。
+- KEY1 / KEY2 GPIO 能读取。
+- 定时器能稳定更新 UI。
+- 串口能持续输出调试日志。
 - 应用能通过 watch app framework 注册、启动、暂停、停止。
 
-诊断应用注册方式：
+注册方式：
 
 ```c
 BUILTIN_APP_EXPORT(LV_EXT_STR_ID(board_diagnostics), LV_EXT_IMG_GET(img_LiChuang), APP_ID, app_main);
 ```
 
-诊断应用启动时会输出：
+启动证据：
 
 ```text
 [Board_Diagnostics] registered
@@ -144,28 +188,28 @@ BUILTIN_APP_EXPORT(LV_EXT_STR_ID(board_diagnostics), LV_EXT_IMG_GET(img_LiChuang
 [Board_Diagnostics] resume
 ```
 
-触摸时会输出类似：
+触摸证据：
 
 ```text
 [Board_Diagnostics] touch count=1 x=... y=...
 ```
 
-按键电平变化时会输出类似：
+按键证据：
 
 ```text
 [Board_Diagnostics] KEY1 GPIO34 ... ...
 [Board_Diagnostics] KEY2 GPIO43 ... ...
 ```
 
-这一步学到的关键点：
+关键经验：
 
-- 新增内置 GUI 应用时，需要独立目录、`SConscript`、应用 ID、消息处理函数和 `BUILTIN_APP_EXPORT`。
-- watch app framework 会负责应用生命周期分发，应用自身要处理 `ONSTART`、`ONRESUME`、`ONPAUSE`、`ONSTOP`。
+- 新增内置 GUI 应用需要独立目录、`SConscript`、应用 ID、消息处理函数和 `BUILTIN_APP_EXPORT`。
+- watch app framework 分发生命周期，应用自身要处理 `ONSTART`、`ONRESUME`、`ONPAUSE`、`ONSTOP`。
 - `ONSTOP` 中要释放 LVGL timer 和 root object，否则反复进入页面可能积累对象或回调。
 
-### 3.4 避免诊断页误控 GPIO26
+### 5.3 避免诊断页误控 GPIO26
 
-早期诊断思路中曾尝试加入 LED / GPIO 控制，但实际板级验证中发现这会带来风险。后来提交中移除了 Diagnostics 对 LED GPIO 的控制，只保留按键和触摸等低风险读取路径。
+早期诊断思路中曾尝试加入 LED / GPIO 控制，后来移除了 Diagnostics 对 LED GPIO 的主动控制，只保留按键和触摸等低风险读取路径。
 
 相关提交：
 
@@ -173,25 +217,25 @@ BUILTIN_APP_EXPORT(LV_EXT_STR_ID(board_diagnostics), LV_EXT_IMG_GET(img_LiChuang
 fdf1543 fix: avoid diagnostics LED GPIO control
 ```
 
-这一步的经验是：板级辅助应用不要随便驱动不确定用途的 GPIO。对 MCU 板子来说，一个 GPIO 可能同时牵涉背光、电源、外设使能或保留功能。没有明确原理图和官方例程证据前，应优先读状态，不主动写电平。
+经验：板级辅助应用不要随便驱动不确定用途的 GPIO。一个 GPIO 可能牵涉背光、电源、外设使能或保留功能。没有明确原理图和官方例程证据前，应优先读状态，不主动写电平。
 
-### 3.5 新增 Huangshan Home 首页
+### 5.4 Huangshan Home 首页
 
-我们改造了当前启动器：
+当前启动器已改造成更明确的 Huangshan Home：
 
 ```text
 src/gui_apps/main/app_mainmenu.c
 ```
 
-目标是让板子开机后进入更明确的 Huangshan Home，而不是只停留在官方示例默认样式里。实测恢复到当前应用固件后，串口确认：
+恢复到当前应用固件后，串口确认：
 
 ```text
 [Huangshan_Home] start
 ```
 
-这条日志是当前板子已经回到我们自己应用固件的关键证据。因为官方独立例程刷入后会替换整套固件，所以每轮官方例程测试结束后，都要刷回当前仓库固件并确认这条日志。
+这条日志是“板子已经回到当前仓库应用固件”的关键证据。官方独立例程刷入后会替换整套固件，所以每轮官方例程测试结束后，都要刷回当前仓库固件并确认这条日志。
 
-## 4. 官方 watch 内置应用实测
+## 6. 官方 watch 内置应用实测
 
 当前仓库中保留了一批官方 watch app 示例：
 
@@ -204,9 +248,9 @@ src/gui_apps/utils/
 src/gui_apps/watch_demo.c
 ```
 
-这些代码主要用于学习 SiFli 的 GUI 应用框架和 LVGL 用法。它们不是我们自己开发的产品页面。
+这些代码主要用于学习 SiFli 的 GUI 应用框架和 LVGL 用法，不是我们自己的产品页面。
 
-本轮在当前应用固件中通过串口命令测试过：
+本轮通过串口命令测试过：
 
 ```text
 app_run hello_world
@@ -239,10 +283,10 @@ page[hello_world][root] do ONSTOP
 后续学习建议：
 
 - 写第一个新页面时先参考 `hello_world`。
-- 做动画或周期刷新时参考 `rotation3d`，但要重点看 timer 清理。
-- 做复杂页面状态切换时参考 `clock`，尤其是 pause / resume / deinit 的顺序。
+- 做动画或周期刷新时参考 `rotation3d`，重点看 timer 清理。
+- 做复杂页面状态切换时参考 `clock`，重点看 pause / resume / deinit 顺序。
 
-## 5. 官方独立例程实测
+## 7. 官方独立例程实测
 
 官方独立例程来自：
 
@@ -250,7 +294,7 @@ page[hello_world][root] do ONSTOP
 /Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example
 ```
 
-这些项目和当前 `Huangshan Home` 不是同一个固件。刷入任意官方独立例程，都会替换当前板子上的应用。因此测试结束后必须刷回当前仓库固件。
+它们和当前 `Huangshan Home` 不是同一个固件。刷入任意官方独立例程，都会替换当前板子上的应用。
 
 官方独立例程构建命令：
 
@@ -279,7 +323,7 @@ source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
 | `lvgl/lvgl_v8_demos/project` | 通过 | 串口初始化通过 | 独立 LVGL v8 主循环 |
 | `lvgl/lvgl_v9_demos/project` | 通过 | 串口 / sysmon 通过 | LVGL v9 API 和性能输出 |
 
-### 5.1 ADC 例程
+### 7.1 ADC 例程
 
 串口证据：
 
@@ -303,9 +347,9 @@ PA34 ADC 电压值约 777 到 893 mV
 
 - ADC1 在 RT-Thread 设备框架中暴露为 `bat1`。
 - 例程使用 channel 7 读取 VBAT，使用 channel 6 读取 PA34。
-- ADC 数值受供电、电池、按键状态影响，测试时应看“合理且变化”，不要把某个数值当成固定标准。
+- ADC 数值受供电、电池、按键状态影响，应看“合理且变化”，不要把某个数值当成固定标准。
 
-### 5.2 GPIO 例程
+### 7.2 GPIO 例程
 
 串口证据：
 
@@ -326,11 +370,11 @@ KEY2 released
 - KEY2 是 PA43，可以通过 `rt_pin_attach_irq` 处理中断。
 - 中断回调里应只做很小的工作，例如记录状态或打印日志。
 
-### 5.3 Sensor 例程
+### 7.3 Sensor 例程
 
-本轮最新实测中，刷入并运行了官方 `RT-Device/sensor/project`。
+本轮刷入并运行了官方 `RT-Device/sensor/project`。
 
-启动和初始化证据：
+初始化证据：
 
 ```text
 Hello world!
@@ -357,17 +401,19 @@ lsm6d step, step: 0
 学习点：
 
 - Sensor 例程使用 I2C3。
-- I2C3 对应的源码配置是 PA40 / PA39 作为 SCL / SDA。
+- I2C3 对应 PA40 / PA39 作为 SCL / SDA。
 - LTR303 光照传感器可以初始化并持续输出 `light`。
 - MMC56X3 磁力传感器可以初始化并持续输出三轴 `mag`。
 - LSM6DSL 加速度计和陀螺仪可以初始化并持续输出 `acce` / `gyro`。
-- 静置测试中计步器 `step` 保持 0，这是合理现象；后续要通过移动或步行动作单独验证动态计步。
+- 静置时计步器 `step` 保持 0 是合理现象；后续要通过移动或步行动作单独验证动态计步。
 
-这个例程是后续做“传感器仪表盘”最重要的官方参考。
+这个例程是后续做“传感器仪表盘”的最重要官方参考。
 
-### 5.4 LVGL v8 / v9 独立 demo
+### 7.4 LVGL v8 / v9 独立 demo
 
-两套 LVGL demo 都能初始化显示和触摸。典型证据：
+两套 LVGL demo 都能初始化显示和触摸。
+
+典型证据：
 
 ```text
 Found lcd co5300 id:331100h
@@ -387,11 +433,11 @@ sysmon: 39 FPS ...
 
 - 独立 LVGL demo 不走 watch app framework。
 - 它们适合学习 LVGL 主循环、demo 选择、性能监控。
-- 但后续如果继续沿用当前 `Huangshan Home`，新增页面更应该优先学习 watch app framework 的应用注册和生命周期。
+- 如果继续沿用当前 `Huangshan Home`，新增页面应优先学习 watch app framework 的应用注册和生命周期。
 
-## 6. 未完整测试项和原因
+## 8. 未完整测试项和原因
 
-### 6.1 UART2
+### 8.1 UART2
 
 状态：构建通过，未完整板测。
 
@@ -408,24 +454,24 @@ UART2 TX：PA19
 UART2 RX：PA18
 ```
 
-完整测试时至少需要两条串口路径：
+完整测试至少需要两条串口路径：
 
-- 当前调试串口看系统日志；
+- 当前调试串口看系统日志。
 - 外接 USB-TTL 接 UART2 做收发。
 
-### 6.2 I2C Charger
+### 8.2 I2C Charger
 
 状态：构建通过，未刷机。
 
 原因：
 
-- 该例程访问 AW32001 充电芯片；
-- 会扫描 I2C、读取芯片 ID；
+- 该例程访问 AW32001 充电芯片。
+- 会扫描 I2C、读取芯片 ID。
 - 还会循环写入充电电流寄存器。
 
-这是有真实硬件副作用的例程，后续要确认供电、电池和安全边界后再运行。
+这是有真实硬件副作用的例程。后续要确认供电、电池和安全边界后再运行。
 
-### 6.3 WS2812
+### 8.3 WS2812
 
 状态：构建通过，未完整板测。
 
@@ -434,7 +480,7 @@ UART2 RX：PA18
 - 需要外接 WS2812 灯珠。
 - 串口只能证明程序进入颜色循环，不能证明灯珠接线、时序和颜色实际正确。
 
-## 7. 最终恢复状态
+## 9. 最终恢复状态
 
 官方独立例程测试结束后，已经刷回当前应用仓库固件。
 
@@ -455,65 +501,94 @@ display on
 
 因此当前板子最终状态不是官方 ADC、GPIO、Sensor 或 LVGL 独立例程，而是我们自己的 `Huangshan Home` 固件。
 
-## 8. 对后续深度学习最有价值的结论
+## 10. VibeBoard 平台集成状态
 
-### 8.1 先分清“板子”和“应用”
+VibeBoard 已经把黄山派作为独立 workspace 接入，而不是强行塞进 ESP-IDF board selector。
 
-黄山派开发里最容易混淆的是：屏幕、触摸、Flash、PSRAM、GPIO、I2C、UART 这些是板级事实；页面、按钮、传感器展示、蓝牙服务这些是应用逻辑。
+当前已完成：
 
-后续遇到问题时要先判断属于哪层：
+- 黄山派 board profile。
+- Huangshan Workspace UI。
+- 黄山派 app 模板生成。
+- SiFli/SCons 构建服务。
+- 构建日志解析和 build evidence。
+- 构建产物识别：`main.bin`、`sftool_param.json`、`download.bat`。
+- 本机串口枚举。
+- 本机烧录。
+- 本机串口监视。
 
-```text
-屏幕不亮        -> SDK / board / LCD driver / TE / panel ID
-触摸没反应      -> touch driver / I2C / LVGL input
-应用打不开      -> app ID / BUILTIN_APP_EXPORT / SConscript / lifecycle
-传感器没数据    -> I2C bus / sensor driver / RT-Thread device name
-UART 没收发     -> UART instance / pin mux / external wiring
-```
-
-### 8.2 构建通过不是板上通过
-
-本轮已经明确区分：
-
-- 构建通过：`scons` 能生成 `main.bin`。
-- 串口初始化通过：固件能启动并初始化关键驱动。
-- 板上功能通过：真实硬件数据或交互行为被观察到。
-- 未完整测试：缺少外设或存在硬件副作用，不能假装通过。
-
-这个分类后续必须继续保持，否则 AI 很容易把“编译成功”误认为“硬件功能成功”。
-
-### 8.3 每轮官方例程测试后都要刷回当前固件
-
-官方独立例程是完整固件，不是当前应用里的页面。测试顺序应该是：
+关键 VibeBoard 提交：
 
 ```text
-构建官方例程
-刷入官方例程
-串口记录证据
-判断通过 / 部分通过 / 未通过
-刷回当前仓库固件
-串口确认 [Huangshan_Home] start
-更新文档
+e1b70cd Add Huangshan workspace UI
+358bd46 Add Huangshan build artifact summary
+9bc97d3 Add Huangshan local flash controls
+c09f684 Add Huangshan serial monitor
 ```
 
-这能避免一个常见混乱：以为板子还在运行我们自己的应用，实际已经停在某个官方 demo 固件。
+服务器侧已经配置：
 
-### 8.4 官方例程应该被当成“最小硬件证据”
+```text
+SiFli SDK：
+/home/wq/huangshan-pi-workspace/sifli-sdk
 
-官方 ADC、GPIO、Sensor 例程的价值不是界面好看，而是它们给出了最小可运行硬件路径：
+黄山派工程：
+/home/wq/huangshan-pi-workspace/huangshan-pi-sf32-dev
 
-- ADC：证明 `bat1`、channel 7、channel 6 能读。
-- GPIO：证明 PA20 输出、PA43 按键中断能用。
-- Sensor：证明 I2C3、LTR303、MMC56X3、LSM6DSL 能用。
-- LVGL：证明 LCD、触摸、framebuffer、LVGL 能启动。
+VibeBoard 服务：
+vibeboard-huangshan.service
+```
 
-后续我们自己的应用应该先复用这些最小路径，再做 UI 和业务逻辑。
+服务器能做：
 
-## 9. 建议的下一阶段学习顺序
+- 编译黄山派工程。
+- 解析构建产物。
+- 服务前端页面。
+
+服务器不能直接做：
+
+- 烧录插在用户 Mac 上的黄山派。
+- 读取用户 Mac 上的 `/dev/cu.usbserial-110`。
+
+原因很简单：USB 串口是本机设备，不在服务器上。
+
+因此当前正确使用方式是：
+
+- 线上 VibeBoard：适合验证服务器构建和平台入口。
+- 本机 VibeBoard 服务：适合直接烧录和串口监视已连接设备。
+
+本机服务端口：
+
+```text
+http://127.0.0.1:8771
+```
+
+本机串口识别证据：
+
+```text
+{"ports":[{"path":"/dev/cu.usbserial-110","recommended":true}]}
+```
+
+本机烧录命令等价于：
+
+```bash
+sftool -p /dev/cu.usbserial-110 -c SF32LB52 -m nor write_flash \
+  bootloader/bootloader.bin@0x12010000 \
+  main.bin@0x12020000 \
+  ftab/ftab.bin@0x12000000
+```
+
+本机串口监视使用：
+
+```bash
+stty -f /dev/cu.usbserial-110 921600 raw -echo
+```
+
+## 11. 后续深度学习路线
 
 ### 第一阶段：应用框架
 
-目标：能稳定新增一个自己的页面。
+目标：稳定新增一个自己的页面。
 
 重点文件：
 
@@ -528,11 +603,11 @@ src/resource/strings/en_us.json
 
 要掌握：
 
-- app ID；
-- `BUILTIN_APP_EXPORT`；
-- `SConscript`；
-- `GUI_APP_MSG_ONSTART` / `ONRESUME` / `ONPAUSE` / `ONSTOP`；
-- LVGL object 创建和释放；
+- app ID。
+- `BUILTIN_APP_EXPORT`。
+- `SConscript`。
+- `GUI_APP_MSG_ONSTART` / `ONRESUME` / `ONPAUSE` / `ONSTOP`。
+- LVGL object 创建和释放。
 - 从页面返回 `Main`。
 
 ### 第二阶段：传感器路径
@@ -547,11 +622,11 @@ src/resource/strings/en_us.json
 
 要掌握：
 
-- I2C3 初始化；
-- LTR303 光照读取；
-- MMC56X3 磁力读取；
-- LSM6DSL 加速度 / 陀螺仪读取；
-- RT-Thread sensor device 的 open / read / control 流程；
+- I2C3 初始化。
+- LTR303 光照读取。
+- MMC56X3 磁力读取。
+- LSM6DSL 加速度 / 陀螺仪读取。
+- RT-Thread sensor device 的 open / read / control 流程。
 - 如何把传感器数据接入 LVGL 页面。
 
 ### 第三阶段：输入和按键
@@ -567,10 +642,10 @@ src/gui_apps/Board_Diagnostics/main.c
 
 要掌握：
 
-- `rt_pin_mode`；
-- `rt_pin_read`；
-- `rt_pin_attach_irq`；
-- active high / active low；
+- `rt_pin_mode`。
+- `rt_pin_read`。
+- `rt_pin_attach_irq`。
+- active high / active low。
 - 中断回调和 UI 更新之间的边界。
 
 ### 第四阶段：显示和性能
@@ -587,25 +662,38 @@ docs/board-bringup.md
 
 要掌握：
 
-- CO5300 ID；
-- `HAL_LCDC_SYNC_DISABLE`；
-- `display on` 日志；
-- LVGL sysmon FPS；
+- CO5300 ID。
+- `HAL_LCDC_SYNC_DISABLE`。
+- `display on` 日志。
+- LVGL sysmon FPS。
 - 黑屏时从 LCD driver、LCDC timeout、LVGL 初始化三层排查。
 
 ### 第五阶段：高风险外设
 
 目标：在明确硬件边界后再测 UART2、WS2812、charger。
 
-顺序建议：
+建议顺序：
 
 1. UART2：准备 USB-TTL，接 PA19 / PA18 / GND。
 2. WS2812：准备灯珠，确认供电和数据脚。
 3. Charger：确认电池、供电、安全边界后再运行。
 
-## 10. 相关提交
+## 12. 后续 AI 开发规则
 
-本轮关键提交：
+AI 后续继续开发时必须遵守这些规则：
+
+1. 先判断当前要改的是官方例程、当前应用、SDK 板级适配，还是 VibeBoard 平台。
+2. 不要把官方独立例程当成当前应用页面。
+3. 不要把构建通过说成板上通过。
+4. 每次刷官方独立例程后，都要刷回当前应用固件并确认 `[Huangshan_Home] start`。
+5. 涉及 GPIO、charger、电源、背光、外设使能时，先查官方例程和原理图，不要盲目写电平。
+6. 所有硬件结论都要留下串口证据、命令、路径或提交号。
+7. 平台侧要区分服务器能力和本机 USB 串口能力。
+8. 如果测试结果会影响后续学习路径，要更新 `docs/huangshan-pi-official-examples-report.md` 或本文档。
+
+## 13. 关键提交索引
+
+当前应用仓库关键提交：
 
 ```text
 0579391 feat: add board diagnostics app
@@ -615,27 +703,28 @@ fdf1543 fix: avoid diagnostics LED GPIO control
 a640612 docs: record official example test results
 3613005 docs: add official examples test report
 b123a3e docs: add sensor example board results
+5439a0a docs: add ai development worklog
 ```
 
-这些提交对应的实际含义：
+VibeBoard 平台关键提交：
+
+```text
+e1b70cd Add Huangshan workspace UI
+358bd46 Add Huangshan build artifact summary
+9bc97d3 Add Huangshan local flash controls
+c09f684 Add Huangshan serial monitor
+```
+
+提交含义：
 
 - `0579391` / `83963e2`：建立自己的板级诊断页面。
-- `6f43513`：建立自己的 Huangshan Home 首页。
+- `6f43513`：建立 Huangshan Home 首页。
 - `fdf1543`：收敛诊断页硬件风险，避免误控 LED GPIO。
 - `a640612`：记录官方 watch 和独立例程测试笔记。
 - `3613005`：整理完整中文官方例程测试报告。
 - `b123a3e`：补充 sensor 官方例程真实板测结果。
+- VibeBoard `e1b70cd` 到 `c09f684`：把黄山派接入平台，并打通编译、产物、烧录、监视。
 
-## 11. 后续 AI 使用这份文档的方式
+## 14. 一句话总结
 
-后续继续开发时，AI 应该遵守这些规则：
-
-1. 先判断当前要改的是官方例程、当前应用，还是 SDK 板级适配。
-2. 不要把官方独立例程当成当前应用页面。
-3. 不要把构建通过说成板上通过。
-4. 每次刷官方独立例程后，都要刷回当前应用固件并确认 `[Huangshan_Home] start`。
-5. 涉及 GPIO、charger、电源、背光、外设使能时，先查官方例程和原理图，不要盲目写电平。
-6. 所有硬件结论都要留下串口证据、命令、路径或提交号。
-7. 如果测试结果会影响后续学习路径，要更新 `docs/huangshan-pi-official-examples-report.md` 或本复盘文档。
-
-这份复盘的核心结论是：当前黄山派已经具备稳定的显示、触摸、应用框架、ADC、GPIO 和板载传感器实测基础。后续可以在这些已验证路径上继续做更复杂的 UI、传感器仪表盘、BLE 控制器和低功耗实验。
+当前黄山派已经具备稳定的显示、触摸、应用框架、ADC、GPIO、板载传感器和平台化编译 / 烧录 / 串口监视基础。后续开发应在这些已验证路径上继续推进传感器仪表盘、输入交互、BLE 控制和低功耗实验。
