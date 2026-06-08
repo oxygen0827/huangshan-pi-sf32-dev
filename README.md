@@ -68,6 +68,7 @@ docs/                    开发板、上游来源和 bring-up 记录
 - [SiFli 资料索引](docs/sifli-resources.md)
 - [SiFli SDK 本地地图](docs/sifli-sdk-map.md)
 - [黄山派学习路线](docs/sifli-learning-path.md)
+- [黄山派 AI 协作开发实测复盘](docs/huangshan-pi-ai-development-worklog.md)
 - [板子与应用分离：SiFli SDK 的开发模型](docs/board-app-separation.md)
 - [上游仓库记录](docs/upstream.md)
 - [开发板 bring-up 记录](docs/board-bringup.md)
