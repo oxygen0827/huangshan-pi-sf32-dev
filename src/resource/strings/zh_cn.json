@@ -48,5 +48,6 @@
     "rotation3d":"3D旋转",
     "lvgl_demos":"LVGL示例DEMO",
     "lckfb": "立创开发板",
-    "codex_test": "Codex测试"
+    "codex_test": "Codex测试",
+    "board_diagnostics": "板级诊断"
 }

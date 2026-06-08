@@ -48,5 +48,6 @@
     "rotation3d":"Rotation 3D",
     "lvgl_demos":"LVGL demos",
     "lckfb": "LCKFB",
-    "codex_test": "Codex Test"
+    "codex_test": "Codex Test",
+    "board_diagnostics": "Board Diagnostics"
 }
