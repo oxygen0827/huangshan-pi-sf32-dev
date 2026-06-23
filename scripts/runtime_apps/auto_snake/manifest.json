@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "auto_snake",
+  "name": "Auto Snake",
+  "description": "Autonomous snake game running as a Runtime app.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "game",
+      "label": "Mode",
+      "value": "autoplay"
+    }
+  ]
+}

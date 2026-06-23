@@ -54,6 +54,7 @@ GUI 应用。
 ```text
 project/                 SCons 工程文件
 src/gui_apps/            当前启动器里的应用模块
+src/gui_apps/VibeBoard_Runtime/ 一次烧录后的串口 App 更新 Runtime
 src/gui_apps/Codex_Test/ 第一个已验证的自定义应用
 src/resource/images/     SiFli 资源工具转换后的图片资源
 src/resource/strings/    多语言字符串资源
@@ -137,6 +138,23 @@ macOS / Linux：
 ./scripts/flash.sh /dev/cu.usbserial-110
 ```
 
+烧录脚本会先校验构建产物和串口类型，然后调用 SiFli `sftool`。默认只把
+`/dev/cu.usbserial*` / `/dev/ttyUSB*` 这类 CH340/UART bridge 端口当作
+黄山派推荐下载口；`/dev/cu.usbmodem*` 通常是 USB CDC 设备，脚本会拒绝
+直接使用，除非显式传给底层 Python 工具 `--allow-usbmodem`。
+
+查看本机候选串口：
+
+```bash
+./scripts/flash.sh --list-ports
+```
+
+做多轮烧录成功率测试：
+
+```bash
+./scripts/flash_reliability.sh /dev/cu.usbserial-110 --runs 5 --confirm-boot
+```
+
 Windows PowerShell：
 
 ```powershell
@@ -146,6 +164,159 @@ Windows PowerShell：
 Windows 串口也可以只传数字，例如 `.\scripts\flash.ps1 7`。烧录脚本使用
 UART 下载，需要先完成构建并生成 `bootloader.bin`、`main.bin` 和
 `ftab.bin`。
+
+## Runtime App 更新
+
+`VibeBoard_Runtime` 是面向“一次烧录固件，之后不重刷固件更新 App”的
+第一版黄山派 Runtime。它会自动启动，也可以从首页 `Runtime` 卡片进入。
+
+Runtime 固件负责屏幕、触摸、文件系统、串口命令和 App 包加载。App 更新
+只改逻辑路径：
+
+```text
+/sdcard/apps/<appId>/
+  manifest.json
+  main.lua
+  assets/...
+/sdcard/apps/.active
+```
+
+当前黄山派板型不要求自己联网。第一版通过 Mac Mini 串口桥安装 App：
+
+```bash
+./scripts/runtime_install_serial.sh /dev/cu.usbserial-110 \
+  --package-dir scripts/runtime_apps/clock_test \
+  --app-id clock_test
+```
+
+安装会先写入隐藏 staging 目录，`install_end` 校验完整包后再提交到
+`/sdcard/apps/<appId>`；中途断包不会覆盖当前可运行 App。
+
+验证 10 次免烧录安装/切换：
+
+```bash
+./scripts/runtime_reliability.sh /dev/cu.usbserial-110 --runs 10
+```
+
+板端 Runtime 暴露的 MSH 命令：
+
+```text
+vb_runtime_status
+vb_runtime_install_begin <appId>
+vb_runtime_install_file <appId> <path> <offset> <hexChunk>
+vb_runtime_install_end <appId>
+vb_runtime_select <appId>
+vb_runtime_reload
+vb_runtime_quiet [0|1]
+vb_runtime_sensors
+vb_runtime_sensor_probe
+```
+
+串口日志里应能看到 `[vb_runtime] install complete: <appId>`、
+`[vb_runtime] active=<appId>` 和 `transport=serial-msh`。当前版本已经支持
+manifest 驱动的 LVGL 展示、App 包落盘，以及 `main.lua` 的安全脚本子集
+执行；状态会显示 `lua=script-subset`。这个子集先支持 `print(...)`、基础
+LVGL label/button/image、文本/颜色/位置/尺寸、文件读取证据、简单 tick
+label，以及 `vibe_sensor_label(label, "light|acce|gyro|mag|step")` 读取板载
+传感器首帧快照。Manifest 组件也可以声明 `sensor.light`、`sensor.acce`、
+`sensor.gyro`、`sensor.mag`、`sensor.step`，Runtime 会定时刷新显示值。
+需要复杂 Lua 语法、闭包定时器、网络、新 LVGL binding 或完整 Lua VM 时，
+仍属于 Runtime 固件更新，需要重新烧录。
+`vb_runtime_quiet` 默认开启，用来压低自动运行 App 的周期性日志，避免影响
+串口或 BLE 安装调试；需要观察游戏 tick 时可执行 `vb_runtime_quiet 0`。
+
+`vb_runtime_sensors` 会初始化 I2C3 上的板载 LTR303 光照、MMC56X3 磁力、
+LSM6DSL 加速度/陀螺仪/计步器，并返回一行 JSON，供 AI、手机 App 或 Mac
+串口桥直接解析：
+
+```json
+{"api":"vibeboard-huangshan-sensors/v1","available":1,"ready":1,"count":1,"light":{"ok":1,"lux":12},"mag":{"ok":1,"x":-389,"y":138,"z":-740},"acce":{"ok":1,"x":0,"y":20,"z":-1009},"gyro":{"ok":1,"x":-1890,"y":-4200,"z":3150},"step":{"ok":1,"count":0}}
+```
+
+`ready=1` 表示至少一个板载传感器可读；每个子对象的 `ok` 表示该传感器本次
+是否在线并成功读取。若某块板上 `light.ok=0` 或 `mag.ok=0`，可执行
+`vb_runtime_sensor_probe` 查看 I2C3 上 LTR303/MMC56X3/LSM6DSL 的应答情况。
+
+安装示例传感器面板：
+
+```bash
+./scripts/runtime_install_serial.sh /dev/cu.usbserial-110 \
+  --package-dir scripts/runtime_apps/sensor_dash \
+  --app-id sensor_dash
+```
+
+Runtime 也会默认广播 BLE 设备名 `VibeBoard`，用于后续手机/VibeCoding App
+通过 BLE GATT 分块安装 App 包。板端状态命令：
+
+```text
+vb_runtime_ble_status
+```
+
+当前 BLE 安装服务已验证会返回 `init=1 power=1 service=1 adv=1`。iPhone
+不一定会在系统“设置 > 蓝牙”里显示这种自定义 BLE GATT 设备；验证时请用
+LightBlue、nRF Connect 或后续 VibeCoding 手机端扫描 `VibeBoard`。
+
+Mac 也可以作为 BLE 中心端验证这条手机同款链路：
+
+```bash
+python3 -m venv .venv-ble
+.venv-ble/bin/python -m pip install bleak
+./scripts/runtime_install_ble.sh --scan-only
+./scripts/runtime_install_ble.sh --status-only
+./scripts/runtime_install_ble.sh --sensors-only
+./scripts/runtime_install_ble.sh \
+  --package-dir scripts/runtime_apps/clock_test \
+  --app-id clock_test
+```
+
+BLE 客户端会把第一次连接到的外设 identifier/address 缓存在
+`~/.vibeboard/huangshan_ble.json`，后续优先重连缓存设备，失败再扫描
+`VibeBoard`。正式 iPhone App 也按这个模型做自动重连。
+
+iOS/CoreBluetooth 参考实现位于：
+
+```text
+mobile/ios/VibeBoardBLE
+```
+
+它提供 `VibeBoardBLEClient.connect()`、`status()`、`sensors()`、`install(_:)`，以及和
+串口/BLE 工具一致的 Runtime App 包分块命令生成逻辑。这个 Swift package
+已经通过 `swift test` 编译和单元测试。
+
+最小 iPhone App 工程位于：
+
+```text
+mobile/ios/VibeBoardPhone/VibeBoardPhone.xcodeproj
+```
+
+这个 App 只走蓝牙，不连接手机热点，也不需要 Wi-Fi 密码。打开工程并选择
+iPhone 运行后，App 会在启动和回到前台时自动连接/重连 `VibeBoard`；界面里
+仍保留 `Connect / Auto Reconnect`、`Read Runtime Status` 和
+`Read Built-in Sensors`、`Install Demo App Over BLE` 用于手动验证连接、
+状态读取、传感器读取和 App 安装。
+也可以点 `Import App Folder Over BLE`，从手机“文件”里选择一个 Runtime
+App 文件夹并安装；文件夹需要包含 `manifest.json` 或 `app.info`、`main.lua`，
+可选资源放在 `assets/`、`images/`、`fonts/` 或 `lib/` 下。
+首次连接成功后，手机端会缓存 CoreBluetooth peripheral identifier，后续优先
+自动重连，失败才重新扫描 `VibeBoard`。
+
+真机验证前可以先跑本机自检：
+
+```bash
+./scripts/verify_phone_ble_ready.sh
+```
+
+如果要检查 Xcode 真机签名和 iPhone 可用状态：
+
+```bash
+./scripts/verify_phone_device_ready.sh
+```
+
+Xcode 账号和 provisioning profile 配好后，可以直接构建、安装并启动手机端：
+
+```bash
+./scripts/install_phone_app.sh
+```
 
 ## 串口监视和复位
 

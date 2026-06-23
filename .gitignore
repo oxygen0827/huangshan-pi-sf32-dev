@@ -1,7 +1,9 @@
 project/build_*/
+**/.build/
 project/.sconsign.dblite
 project/__pycache__/
 .sifli-tools/
+.venv-ble/
 *.pyc
 compile_commands.json
 .DS_Store

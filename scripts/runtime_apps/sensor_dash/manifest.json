@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "sensor_dash",
+  "name": "Sensor Dashboard",
+  "description": "Built-in LTR303, MMC56X3, and LSM6DSL sensor snapshot.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "sensor.light",
+      "label": "Light",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.acce",
+      "label": "Accelerometer",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.gyro",
+      "label": "Gyroscope",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.mag",
+      "label": "Magnetometer",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.step",
+      "label": "Steps",
+      "value": "--"
+    }
+  ]
+}

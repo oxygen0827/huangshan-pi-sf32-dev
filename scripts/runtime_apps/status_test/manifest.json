@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "status_test",
+  "name": "Status Test",
+  "description": "Second package for no-reflash app switching.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "status",
+      "label": "Mode",
+      "value": "switch-ok"
+    },
+    {
+      "type": "action",
+      "capability": "reload",
+      "label": "Reload"
+    }
+  ]
+}

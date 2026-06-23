@@ -1,0 +1,25 @@
+local root = lv_scr_act()
+lv_obj_clean(root)
+lv_obj_set_style_bg_color(root, 0x0f172a)
+lv_obj_set_style_text_color(root, 0xf8fafc)
+
+local title = lv_label_create(root)
+lv_label_set_text(title, "Status Test")
+lv_obj_set_style_text_color(title, 0x5eead4)
+lv_obj_set_width(title, 300)
+lv_obj_align(title, LV_ALIGN_TOP_LEFT, 32, 48)
+
+local body = lv_label_create(root)
+lv_label_set_text(body, "No reflash switch OK")
+lv_obj_set_style_text_color(body, 0xcbd5e1)
+lv_obj_set_width(body, 320)
+lv_obj_align(body, LV_ALIGN_TOP_LEFT, 32, 96)
+
+local tick = lv_label_create(root)
+lv_label_set_text(tick, "Runtime Tick 0")
+lv_obj_set_style_text_color(tick, 0xfbbf24)
+lv_obj_align(tick, LV_ALIGN_TOP_LEFT, 32, 150)
+vibe_timer_label(tick, 1000, "Runtime Tick")
+
+vibe_button("Reload ready", 168, 40, 32, 214)
+print("[status_test] lua entry reached")

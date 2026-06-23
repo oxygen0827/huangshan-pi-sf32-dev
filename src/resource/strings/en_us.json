@@ -49,5 +49,6 @@
     "lvgl_demos":"LVGL demos",
     "lckfb": "LCKFB",
     "codex_test": "Codex Test",
-    "board_diagnostics": "Board Diagnostics"
+    "board_diagnostics": "Board Diagnostics",
+    "vibeboard_runtime": "VibeBoard Runtime"
 }

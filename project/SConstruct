@@ -16,6 +16,10 @@ PrepareEnv()
 # Add bootloader project
 AddBootLoader(SIFLI_SDK,rtconfig.CHIP)
 
+# Add LCPU Bluetooth controller project. The SF32LB52 Bluetooth host needs the
+# matching LCPU image for GAP confirmations and PAN traffic to work.
+AddLCPU(SIFLI_SDK,rtconfig.CHIP)
+
 # Set default compile options
 SifliEnv()
 

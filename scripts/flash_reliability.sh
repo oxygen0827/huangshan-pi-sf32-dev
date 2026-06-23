@@ -11,4 +11,4 @@ if [[ ! -d "$BUILD_DIR" ]]; then
 fi
 
 source "$ROOT_DIR/scripts/sifli-env.sh"
-python "$ROOT_DIR/scripts/flash.py" --board "$BOARD" "$@"
+python "$ROOT_DIR/scripts/flash_reliability.py" "$@"

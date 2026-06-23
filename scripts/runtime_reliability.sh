@@ -2,9 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BOARD="${BOARD:-sf32lb52-lchspi-ulp}"
-JOBS="${JOBS:-8}"
 
-cd "$ROOT_DIR/project"
 source "$ROOT_DIR/scripts/sifli-env.sh"
-scons --board="$BOARD" -j"$JOBS"
+python "$ROOT_DIR/scripts/runtime_reliability.py" "$@"

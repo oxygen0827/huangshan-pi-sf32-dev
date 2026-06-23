@@ -1,0 +1,31 @@
+from building import *
+import os
+
+cwd = GetCurrentDir()
+objs = []
+
+if GetDepend('PKG_USING_LITTLEVGL2RTT'):
+    inc = ['']
+    Import('SIFLI_SDK')
+    if GetDepend('BLUETOOTH') or GetDepend('BSP_BLE_SIBLES') or GetDepend('BT_FINSH'):
+        inc.append(os.path.join(SIFLI_SDK, 'middleware/bluetooth/include'))
+    if GetDepend('BT_FINSH'):
+        inc.extend([
+            os.path.join(SIFLI_SDK, 'middleware/bluetooth/service/bt/bt_finsh'),
+        ])
+    if GetDepend('PKG_USING_WEBCLIENT'):
+        inc.append(os.path.join(SIFLI_SDK, 'external/webclient/inc'))
+    if GetDepend('RT_USING_SENSOR'):
+        inc.extend([
+            os.path.join(SIFLI_SDK, 'rtos/rtthread/components/drivers/sensors'),
+            os.path.join(SIFLI_SDK, 'drivers/Include'),
+            os.path.join(SIFLI_SDK, 'customer/boards/include'),
+            os.path.join(SIFLI_SDK, 'customer/peripherals/sensor/LTR303'),
+            os.path.join(SIFLI_SDK, 'customer/peripherals/sensor/MMC56x3'),
+            os.path.join(SIFLI_SDK, 'customer/peripherals/sensor/LSM6DSL'),
+            os.path.join(SIFLI_SDK, 'customer/peripherals/sensor/LSM6DSL/libraries'),
+        ])
+    objs = Glob('*.c')
+    group = DefineGroup('App_VibeBoard_Runtime', objs, depend=['PKG_USING_LITTLEVGL2RTT'], CPPPATH=inc, LOCAL_CCFLAGS='')
+
+Return('objs')

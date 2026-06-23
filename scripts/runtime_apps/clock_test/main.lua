@@ -1,0 +1,31 @@
+local root = lv_scr_act()
+lv_obj_clean(root)
+lv_obj_set_style_bg_color(root, 0x101418)
+lv_obj_set_style_text_color(root, 0xf4f7fb)
+
+local card = lv_obj_create(root)
+lv_obj_set_size(card, 310, 190)
+lv_obj_align(card, LV_ALIGN_CENTER, 0, -10)
+lv_obj_set_style_bg_color(card, 0x18212b)
+lv_obj_set_style_radius(card, 8)
+lv_obj_set_style_border_width(card, 1)
+lv_obj_set_style_border_color(card, 0x334155)
+
+local title = lv_label_create(card)
+lv_label_set_text(title, "Clock Test")
+lv_obj_set_style_text_color(title, 0xe5edf6)
+lv_obj_set_width(title, 260)
+lv_obj_align(title, LV_ALIGN_TOP_LEFT, 18, 18)
+
+local status = lv_label_create(card)
+lv_label_set_text(status, "serial app installed")
+lv_obj_set_style_text_color(status, 0x7dd3fc)
+lv_obj_align(status, LV_ALIGN_TOP_LEFT, 18, 56)
+
+local tick = lv_label_create(card)
+lv_label_set_text(tick, "Tick 0")
+lv_obj_set_style_text_color(tick, 0xfbbf24)
+lv_obj_align(tick, LV_ALIGN_TOP_LEFT, 18, 104)
+vibe_timer_label(tick, 1000, "Tick")
+
+print("[clock_test] lua entry reached")

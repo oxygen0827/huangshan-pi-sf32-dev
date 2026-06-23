@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "clock_test",
+  "name": "Clock Test",
+  "description": "Runtime app package installed over serial.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "clock",
+      "capability": "clock",
+      "label": "Clock",
+      "value": "--:--:--"
+    },
+    {
+      "type": "status",
+      "capability": "status",
+      "label": "Delivery",
+      "value": "serial-msh"
+    }
+  ]
+}

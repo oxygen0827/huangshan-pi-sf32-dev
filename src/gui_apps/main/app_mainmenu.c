@@ -1604,11 +1604,12 @@ static void huangshan_home_ui_init(void)
 {
     static const huangshan_home_card_t cards[] =
     {
-        {"Diagnostics", "touch / keys / LED", "board_diag", 0x1d4ed8, 20, 118, 170, 78},
-        {"Codex Test", "display baseline", "codex_test", 0x047857, 200, 118, 170, 78},
-        {"Hello World", "simple LVGL app", "hello_world", 0x7c3aed, 20, 208, 170, 78},
-        {"Rotation 3D", "GPU animation", "rotation3d", 0xb45309, 200, 208, 170, 78},
-        {"Clock", "watch demo", "clock", 0xbe123c, 20, 298, 170, 78},
+        {"Runtime", "serial app OTA", "vb_runtime", 0x0f766e, 20, 118, 170, 78},
+        {"Diagnostics", "touch / keys / LED", "board_diag", 0x1d4ed8, 200, 118, 170, 78},
+        {"Codex Test", "display baseline", "codex_test", 0x047857, 20, 208, 170, 78},
+        {"Hello World", "simple LVGL app", "hello_world", 0x7c3aed, 200, 208, 170, 78},
+        {"Rotation 3D", "GPU animation", "rotation3d", 0xb45309, 20, 298, 170, 78},
+        {"Clock", "watch demo", "clock", 0xbe123c, 200, 298, 170, 78},
     };
     uint32_t i;
 
@@ -1639,7 +1640,7 @@ static void huangshan_home_ui_init(void)
         home_create_card(huangshan_home_root, &cards[i]);
     }
 
-    lv_obj_t *hint = home_create_label(huangshan_home_root, "Tap a card to open a board app.",
+    lv_obj_t *hint = home_create_label(huangshan_home_root, "Runtime supports serial app install.",
                                        FONT_SMALL, lv_color_hex(0xa8b3bd));
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
 
@@ -1738,4 +1739,3 @@ static int app_mainmenu(intent_t i)
 
 
 BUILTIN_APP_EXPORT(LV_EXT_STR_ID(mainmenu), NULL, APP_ID, app_mainmenu);
-

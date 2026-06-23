@@ -58,6 +58,7 @@ const struct dfs_mount_tbl mount_table[] =
 #ifdef RT_USING_DFS
 #include "dfs_file.h"
 #include "dfs_posix.h"
+#include "dfs_fs.h"
 #ifndef BSP_USING_PC_SIMULATOR
     #include "drv_flash.h"
 #endif /* !BSP_USING_PC_SIMULATOR */
@@ -105,6 +106,9 @@ int auto_mnt_init(void)
 #ifdef FS_ROOT_START_ADDR
     name[1] = "flash0";
     register_mtd_device(FS_ROOT_START_ADDR, FS_ROOT_SIZE, name[1]);
+#elif defined(FS_REGION_START_ADDR)
+    name[1] = "flash0";
+    register_mtd_device(FS_REGION_START_ADDR, FS_REGION_SIZE, name[1]);
 #endif /* FS_ROOT_START_ADDR */
 
 
@@ -121,11 +125,23 @@ int auto_mnt_init(void)
         else
         {
             rt_kprintf("mount fs on %s to root fail\n", name[i]);
+#if defined(RT_USING_DFS_ELMFAT) && (defined(FS_ROOT_START_ADDR) || defined(FS_REGION_START_ADDR))
+            if (i == 1 && dfs_mkfs(type, name[i]) == 0)
+            {
+                rt_kprintf("mkfs on %s success, mount again\n", name[i]);
+                if (dfs_mount(name[i], "/", type, 0, 0) == 0)
+                {
+                    rt_kprintf("mount fs on %s to root success\n", name[i]);
+                    break;
+                }
+            }
+#endif
         }
     }
 
     return RT_EOK;
 }
+INIT_ENV_EXPORT(auto_mnt_init);
 #endif /* RT_USING_DFS */
 
 
@@ -251,4 +267,3 @@ int mod_free(int argc, char **argv)
 MSH_CMD_EXPORT(mod_free, Free module);
 
 #endif
-

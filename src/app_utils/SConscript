@@ -1,14 +1,15 @@
 Import('RTT_ROOT')
 Import('rtconfig')
 from building import *
+import os
 
 cwd = GetCurrentDir()
 src = ['main.c']
 
-if GetDepend('BSP_BLE_SIBLES'):
+if GetDepend('BSP_BLE_SIBLES') and os.path.exists(os.path.join(cwd, 'ble_app.c')):
     src+=['ble_app.c']
 
-if GetDepend('BSP_BT_APP'):
+if GetDepend('BSP_BT_APP') and os.path.exists(os.path.join(cwd, 'bt_app.c')):
     src+=['bt_app.c']
 
 
