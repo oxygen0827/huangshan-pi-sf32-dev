@@ -1,0 +1,6 @@
+local root = lv_scr_act()
+lv_obj_clean(root)
+lv_obj_set_style_bg_color(root, 0x103749)
+lv_obj_set_style_text_color(root, 0xf8fafc)
+vibe_weather_pet("Shanghai", "sunny", 26, 58, 0)
+print("[weather_pet] weather pet requested")

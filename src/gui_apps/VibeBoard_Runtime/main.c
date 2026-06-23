@@ -94,6 +94,8 @@
 #define VB_SNAKE_MAX_CELLS (VB_SNAKE_MAX_COLS * VB_SNAKE_MAX_ROWS)
 #define VB_SNAKE_MAX_DRAWN 28
 #define VB_SNAKE_LOG_EVERY 120
+#define VB_WEATHER_DROP_COUNT 8
+#define VB_WEATHER_PERIOD_MS 180
 
 #if defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH) && defined(CFG_PAN) && defined(RT_USING_LWIP)
 #define VB_RUNTIME_HAS_BT_PAN 1
@@ -165,6 +167,42 @@ typedef struct
     int snake_x[VB_SNAKE_MAX_CELLS];
     int snake_y[VB_SNAKE_MAX_CELLS];
 } vb_snake_state_t;
+
+typedef enum
+{
+    VB_WEATHER_SUNNY = 0,
+    VB_WEATHER_CLOUDY,
+    VB_WEATHER_RAIN,
+    VB_WEATHER_SNOW,
+    VB_WEATHER_STORM,
+    VB_WEATHER_FOG
+} vb_weather_kind_t;
+
+typedef struct
+{
+    int active;
+    vb_weather_kind_t kind;
+    int temp_c;
+    int humidity;
+    int weather_code;
+    int frame;
+    uint32_t last_run;
+    uint32_t period_ticks;
+    char city[VB_MAX_TEXT];
+    char condition[32];
+    lv_obj_t *sun;
+    lv_obj_t *left_eye;
+    lv_obj_t *right_eye;
+    lv_obj_t *mouth;
+    lv_obj_t *blush_l;
+    lv_obj_t *blush_r;
+    lv_obj_t *cloud[4];
+    lv_obj_t *drops[VB_WEATHER_DROP_COUNT];
+    lv_obj_t *bolt;
+    lv_obj_t *fog[3];
+    lv_obj_t *title_label;
+    lv_obj_t *summary_label;
+} vb_weather_state_t;
 
 typedef struct
 {
@@ -261,6 +299,7 @@ typedef struct
     uint32_t script_tick_last_run;
     int script_runtime_active;
     vb_snake_state_t snake;
+    vb_weather_state_t weather;
     volatile int pending_reload;
     int running;
     int fs_ready;
@@ -2605,6 +2644,230 @@ static int vb_snake_start(const char *title, int cols, int rows, int period_ms)
     return RT_EOK;
 }
 
+static lv_obj_t *vb_weather_blob(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color, int radius)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_set_size(obj, w, h);
+    lv_obj_set_pos(obj, x, y);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(obj, radius, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    return obj;
+}
+
+static vb_weather_kind_t vb_weather_kind_from_condition(const char *condition, int code)
+{
+    if (condition)
+    {
+        if (rt_strcmp(condition, "sunny") == 0 || rt_strcmp(condition, "clear") == 0) return VB_WEATHER_SUNNY;
+        if (rt_strcmp(condition, "cloudy") == 0 || rt_strcmp(condition, "overcast") == 0) return VB_WEATHER_CLOUDY;
+        if (rt_strcmp(condition, "rain") == 0 || rt_strcmp(condition, "drizzle") == 0) return VB_WEATHER_RAIN;
+        if (rt_strcmp(condition, "snow") == 0) return VB_WEATHER_SNOW;
+        if (rt_strcmp(condition, "storm") == 0 || rt_strcmp(condition, "thunder") == 0) return VB_WEATHER_STORM;
+        if (rt_strcmp(condition, "fog") == 0 || rt_strcmp(condition, "mist") == 0) return VB_WEATHER_FOG;
+    }
+    if (code == 0 || code == 1) return VB_WEATHER_SUNNY;
+    if (code == 2 || code == 3) return VB_WEATHER_CLOUDY;
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return VB_WEATHER_RAIN;
+    if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return VB_WEATHER_SNOW;
+    if (code >= 95) return VB_WEATHER_STORM;
+    if (code == 45 || code == 48) return VB_WEATHER_FOG;
+    return VB_WEATHER_CLOUDY;
+}
+
+static const char *vb_weather_kind_label(vb_weather_kind_t kind)
+{
+    switch (kind)
+    {
+    case VB_WEATHER_SUNNY: return "Sunny";
+    case VB_WEATHER_CLOUDY: return "Cloudy";
+    case VB_WEATHER_RAIN: return "Rain";
+    case VB_WEATHER_SNOW: return "Snow";
+    case VB_WEATHER_STORM: return "Storm";
+    case VB_WEATHER_FOG: return "Fog";
+    default: return "Weather";
+    }
+}
+
+static void vb_weather_create_cloud(int x_base, int y_base)
+{
+    g_vb_runtime.weather.cloud[0] = vb_weather_blob(g_vb_runtime.root, x_base + 8, y_base + 40, 132, 58, 0xf8fafc, 28);
+    g_vb_runtime.weather.cloud[1] = vb_weather_blob(g_vb_runtime.root, x_base + 28, y_base + 18, 64, 64, 0xe2e8f0, 32);
+    g_vb_runtime.weather.cloud[2] = vb_weather_blob(g_vb_runtime.root, x_base + 80, y_base + 8, 74, 74, 0xf1f5f9, 37);
+    g_vb_runtime.weather.cloud[3] = vb_weather_blob(g_vb_runtime.root, x_base + 122, y_base + 34, 64, 64, 0xcbd5e1, 32);
+}
+
+static void vb_weather_create_drops(vb_weather_kind_t kind)
+{
+    int i;
+    for (i = 0; i < VB_WEATHER_DROP_COUNT; i++)
+    {
+        int x = 78 + i * 28;
+        int y = 218 + (i % 3) * 18;
+        uint32_t color = kind == VB_WEATHER_SNOW ? 0xf8fafc : 0x38bdf8;
+        int size = kind == VB_WEATHER_SNOW ? 10 : 8;
+        g_vb_runtime.weather.drops[i] = vb_weather_blob(g_vb_runtime.root, x, y, size, kind == VB_WEATHER_SNOW ? size : 22, color, size / 2);
+    }
+}
+
+static int vb_weather_start(const char *city, const char *condition, int temp_c, int humidity, int weather_code)
+{
+    char text[96];
+    int i;
+    vb_weather_kind_t kind = vb_weather_kind_from_condition(condition, weather_code);
+    uint32_t bg = 0x0f172a;
+
+    if (!g_vb_runtime.root) return -RT_ERROR;
+    rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
+    g_vb_runtime.weather.active = 1;
+    g_vb_runtime.weather.kind = kind;
+    g_vb_runtime.weather.temp_c = temp_c;
+    g_vb_runtime.weather.humidity = humidity;
+    g_vb_runtime.weather.weather_code = weather_code;
+    g_vb_runtime.weather.last_run = rt_tick_get();
+    g_vb_runtime.weather.period_ticks = rt_tick_from_millisecond(VB_WEATHER_PERIOD_MS);
+    if (g_vb_runtime.weather.period_ticks == 0) g_vb_runtime.weather.period_ticks = 1;
+    vb_safe_copy(g_vb_runtime.weather.city, sizeof(g_vb_runtime.weather.city), city && city[0] ? city : "Current Location");
+    vb_safe_copy(g_vb_runtime.weather.condition, sizeof(g_vb_runtime.weather.condition), condition && condition[0] ? condition : vb_weather_kind_label(kind));
+
+    if (kind == VB_WEATHER_SUNNY) bg = 0x103749;
+    else if (kind == VB_WEATHER_RAIN) bg = 0x111827;
+    else if (kind == VB_WEATHER_SNOW) bg = 0x1e3a5f;
+    else if (kind == VB_WEATHER_STORM) bg = 0x18181b;
+    else if (kind == VB_WEATHER_FOG) bg = 0x334155;
+    lv_obj_set_style_bg_color(g_vb_runtime.root, lv_color_hex(bg), LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    g_vb_runtime.weather.title_label = vb_create_label(g_vb_runtime.root, "Weather Pet", FONT_BIGL, lv_color_hex(0xf8fafc));
+    lv_obj_set_width(g_vb_runtime.weather.title_label, 340);
+    lv_obj_set_style_text_align(g_vb_runtime.weather.title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.weather.title_label, LV_ALIGN_TOP_MID, 0, 28);
+
+    rt_snprintf(text, sizeof(text), "%s  %dC  %s  RH %d%%",
+                g_vb_runtime.weather.city, temp_c, vb_weather_kind_label(kind), humidity);
+    g_vb_runtime.weather.summary_label = vb_create_label(g_vb_runtime.root, text, FONT_SMALL, lv_color_hex(0xcbd5e1));
+    lv_obj_set_width(g_vb_runtime.weather.summary_label, 350);
+    lv_obj_set_style_text_align(g_vb_runtime.weather.summary_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.weather.summary_label, LV_ALIGN_TOP_MID, 0, 70);
+
+    if (kind == VB_WEATHER_SUNNY)
+    {
+        for (i = 0; i < 8; i++)
+        {
+            int horiz = (i == 0 || i == 4);
+            int x = 172 + (i == 0 ? 82 : i == 4 ? -38 : i == 1 || i == 7 ? 62 : i == 3 || i == 5 ? -18 : 20);
+            int y = 144 + (i == 2 ? -40 : i == 6 ? 82 : i == 1 || i == 3 ? -18 : i == 5 || i == 7 ? 62 : 20);
+            vb_weather_blob(g_vb_runtime.root, x, y, horiz ? 36 : 12, horiz ? 12 : 36, 0xfacc15, 6);
+        }
+        g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 132, 116, 126, 126, 0xfbbf24, 63);
+    }
+    else
+    {
+        if (kind == VB_WEATHER_CLOUDY)
+        {
+            g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 102, 110, 90, 90, 0xfbbf24, 45);
+        }
+        vb_weather_create_cloud(84, 112);
+        if (kind == VB_WEATHER_RAIN || kind == VB_WEATHER_SNOW || kind == VB_WEATHER_STORM)
+        {
+            vb_weather_create_drops(kind);
+        }
+        if (kind == VB_WEATHER_STORM)
+        {
+            g_vb_runtime.weather.bolt = vb_create_label(g_vb_runtime.root, "Z", FONT_BIGL, lv_color_hex(0xfacc15));
+            lv_obj_set_width(g_vb_runtime.weather.bolt, 90);
+            lv_obj_align(g_vb_runtime.weather.bolt, LV_ALIGN_TOP_MID, 18, 202);
+        }
+        if (kind == VB_WEATHER_FOG)
+        {
+            for (i = 0; i < 3; i++)
+            {
+                g_vb_runtime.weather.fog[i] = vb_weather_blob(g_vb_runtime.root, 70 + i * 26, 186 + i * 26, 220 - i * 24, 12, 0xcbd5e1, 6);
+            }
+        }
+    }
+
+    if (!g_vb_runtime.weather.sun)
+    {
+        g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 138, 124, 112, 112, 0xf8fafc, 56);
+    }
+    g_vb_runtime.weather.left_eye = vb_weather_blob(g_vb_runtime.root, 164, 164, 14, 18, 0x0f172a, 7);
+    g_vb_runtime.weather.right_eye = vb_weather_blob(g_vb_runtime.root, 212, 164, 14, 18, 0x0f172a, 7);
+    g_vb_runtime.weather.mouth = vb_weather_blob(g_vb_runtime.root, 178, 202, 42, 12, 0x0f172a, 6);
+    g_vb_runtime.weather.blush_l = vb_weather_blob(g_vb_runtime.root, 140, 190, 22, 10, 0xfb7185, 5);
+    g_vb_runtime.weather.blush_r = vb_weather_blob(g_vb_runtime.root, 228, 190, 22, 10, 0xfb7185, 5);
+
+    rt_kprintf("[vb_runtime][weather] started city=%s kind=%s temp=%d humidity=%d code=%d\n",
+               g_vb_runtime.weather.city, vb_weather_kind_label(kind), temp_c, humidity, weather_code);
+    return RT_EOK;
+}
+
+static void vb_weather_step(void)
+{
+    int i;
+    int bob;
+    int blink;
+    vb_weather_state_t *w = &g_vb_runtime.weather;
+    if (!w->active) return;
+    w->frame++;
+    bob = (w->frame % 12) < 6 ? (w->frame % 6) : (11 - (w->frame % 12));
+    blink = (w->frame % 24) == 0 || (w->frame % 24) == 1;
+
+    if (w->sun) lv_obj_set_pos(w->sun, 132, 116 + bob);
+    if (w->left_eye)
+    {
+        lv_obj_set_pos(w->left_eye, 164, 164 + bob);
+        lv_obj_set_size(w->left_eye, 14, blink ? 4 : 18);
+    }
+    if (w->right_eye)
+    {
+        lv_obj_set_pos(w->right_eye, 212, 164 + bob);
+        lv_obj_set_size(w->right_eye, 14, blink ? 4 : 18);
+    }
+    if (w->mouth) lv_obj_set_pos(w->mouth, 178, 202 + bob);
+    if (w->blush_l) lv_obj_set_pos(w->blush_l, 140, 190 + bob);
+    if (w->blush_r) lv_obj_set_pos(w->blush_r, 228, 190 + bob);
+
+    for (i = 0; i < 4; i++)
+    {
+        if (w->cloud[i])
+        {
+            int dx = ((w->frame + i * 3) % 18) - 9;
+            int y = i == 0 ? 152 : i == 1 ? 130 : i == 2 ? 120 : 146;
+            int x = i == 0 ? 92 : i == 1 ? 112 : i == 2 ? 164 : 206;
+            lv_obj_set_pos(w->cloud[i], x + dx, y);
+        }
+    }
+
+    for (i = 0; i < VB_WEATHER_DROP_COUNT; i++)
+    {
+        if (w->drops[i])
+        {
+            int x = 78 + i * 28;
+            int y = 214 + ((w->frame * 8 + i * 19) % 78);
+            if (w->kind == VB_WEATHER_SNOW)
+            {
+                x += ((w->frame + i) % 7) - 3;
+            }
+            lv_obj_set_pos(w->drops[i], x, y);
+        }
+    }
+    if (w->bolt)
+    {
+        if ((w->frame % 10) < 4) lv_obj_clear_flag(w->bolt, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(w->bolt, LV_OBJ_FLAG_HIDDEN);
+    }
+    for (i = 0; i < 3; i++)
+    {
+        if (w->fog[i])
+        {
+            int dx = ((w->frame * 3 + i * 11) % 34) - 17;
+            lv_obj_set_pos(w->fog[i], 70 + i * 26 + dx, 186 + i * 26);
+        }
+    }
+}
+
 static void vb_script_resolve_asset_path(const char *src, char *dst, rt_size_t cap)
 {
     if (!src || !src[0])
@@ -2943,6 +3206,11 @@ static int vb_script_execute_helper_call(const char *line)
         vb_snake_start(args[0], atoi(args[1]), atoi(args[2]), atoi(args[3]));
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_weather_pet", args, &argc) && argc >= 5)
+    {
+        vb_weather_start(args[0], args[1], atoi(args[2]), atoi(args[3]), atoi(args[4]));
+        return 1;
+    }
     return 0;
 }
 
@@ -2987,6 +3255,7 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_tick_prefix[0] = '\0';
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
+    rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
 
     cursor = script;
     line_start = script;
@@ -3024,6 +3293,7 @@ static void vb_builtin_script_stop(void)
     g_vb_runtime.script_object_count = 0;
     g_vb_runtime.script_tick_prefix[0] = '\0';
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
+    rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
 }
 
 static void vb_set_obj_bg(lv_obj_t *obj, uint32_t color)
@@ -3985,6 +4255,11 @@ static void vb_timer_cb(lv_timer_t *timer)
     {
         g_vb_runtime.snake.last_run = now;
         vb_snake_step();
+    }
+    if (g_vb_runtime.weather.active && now - g_vb_runtime.weather.last_run >= g_vb_runtime.weather.period_ticks)
+    {
+        g_vb_runtime.weather.last_run = now;
+        vb_weather_step();
     }
 }
 

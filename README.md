@@ -269,6 +269,17 @@ python3 -m venv .venv-ble
   --app-id clock_test
 ```
 
+Mac 本地应用商店会打开浏览器页面，列出 `weather_pet`、`auto_snake` 和
+`sensor_stage`，并通过同一条 BLE OTA 链路安装到板子：
+
+```bash
+./scripts/app_store_mac.sh
+```
+
+`weather_pet` 安装前会由 Mac 获取实时天气，生成带天气数据的 Runtime App
+包，再 OTA 到 `/sdcard/apps/weather_pet`。如果浏览器定位不可用，可在页面里
+输入城市兜底。
+
 BLE 客户端会把第一次连接到的外设 identifier/address 缓存在
 `~/.vibeboard/huangshan_ble.json`，后续优先重连缓存设备，失败再扫描
 `VibeBoard`。正式 iPhone App 也按这个模型做自动重连。

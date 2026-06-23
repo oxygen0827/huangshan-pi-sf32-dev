@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "sensor_stage",
+  "name": "Sensor Stage",
+  "description": "A compact stage for light, motion, steps, and clock data.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "sensor.light",
+      "label": "Light",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.acce",
+      "label": "Motion",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "sensor.step",
+      "label": "Steps",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "clock",
+      "label": "Clock",
+      "value": "--"
+    }
+  ]
+}

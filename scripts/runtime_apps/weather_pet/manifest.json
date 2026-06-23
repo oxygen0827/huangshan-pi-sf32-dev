@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "weather_pet",
+  "name": "Weather Pet",
+  "description": "Cute animated weather card generated from Mac weather data.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "weather.current",
+      "label": "Weather",
+      "value": "ready"
+    }
+  ]
+}

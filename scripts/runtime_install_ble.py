@@ -102,6 +102,30 @@ async def write_command(client, command: str, response_wait: float, echo: bool) 
     return status
 
 
+async def hold_connection(client, seconds: float, keepalive_period: float, response_wait: float, echo: bool) -> None:
+    if seconds == 0:
+        return
+
+    started = time.monotonic()
+    deadline = None if seconds < 0 else started + seconds
+    print("holding BLE connection" + (" until Ctrl-C" if deadline is None else f" for {seconds:g}s"))
+
+    try:
+        while deadline is None or time.monotonic() < deadline:
+            sleep_for = keepalive_period
+            if deadline is not None:
+                sleep_for = min(sleep_for, max(0.0, deadline - time.monotonic()))
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            status = await write_command(client, "status", response_wait, echo)
+            if not status or status.startswith("read_status_failed"):
+                fail(f"BLE keepalive failed: {status!r}")
+    except KeyboardInterrupt:
+        print("disconnect requested")
+
+
 async def connect_and_run(args: argparse.Namespace) -> int:
     BleakClient, _ = ensure_bleak()
     device = await find_device(args.name, args.scan_timeout, args.cache, args.no_cache)
@@ -116,6 +140,16 @@ async def connect_and_run(args: argparse.Namespace) -> int:
             print(f"warning: could not subscribe status notifications: {exc}", file=sys.stderr)
 
         initial = await write_command(client, "status", args.response_wait, not args.no_echo)
+        if args.connect_only:
+            print(f"connection verified: {initial}")
+            await hold_connection(
+                client,
+                args.hold_seconds,
+                args.keepalive_period,
+                args.response_wait,
+                not args.no_echo,
+            )
+            return 0
         if args.status_only:
             print(f"status: {initial}")
             return 0
@@ -164,6 +198,7 @@ def main() -> int:
     parser.add_argument("--app-id", help="Override package id")
     parser.add_argument("--name", default=DEFAULT_DEVICE_NAME, help="BLE local name to scan for")
     parser.add_argument("--scan-only", action="store_true", help="Only scan and list nearby BLE devices")
+    parser.add_argument("--connect-only", action="store_true", help="Connect to the board, read status, and optionally hold the link")
     parser.add_argument("--status-only", action="store_true", help="Connect and read Runtime BLE status")
     parser.add_argument("--sensors-only", action="store_true", help="Connect and read built-in sensor JSON")
     parser.add_argument("--cache", type=Path, default=CACHE_PATH, help="Peripheral cache path for reconnects")
@@ -173,6 +208,8 @@ def main() -> int:
     parser.add_argument("--chunk-bytes", type=int, default=48)
     parser.add_argument("--response-wait", type=float, default=0.12)
     parser.add_argument("--final-wait", type=float, default=0.8)
+    parser.add_argument("--hold-seconds", type=float, default=0.0, help="Keep --connect-only connected for N seconds; use -1 until Ctrl-C")
+    parser.add_argument("--keepalive-period", type=float, default=5.0, help="Status keepalive interval while holding a BLE connection")
     parser.add_argument("--stop-before-end", action="store_true")
     parser.add_argument("--no-echo", action="store_true")
     args = parser.parse_args()
@@ -180,8 +217,8 @@ def main() -> int:
     if args.scan_only:
         asyncio.run(scan_devices(args.name, args.scan_timeout))
         return 0
-    if not args.status_only and not args.sensors_only and not args.package_dir and not args.package_json:
-        parser.error("use --status-only, --sensors-only, --scan-only, --package-dir, or --package-json")
+    if not args.connect_only and not args.status_only and not args.sensors_only and not args.package_dir and not args.package_json:
+        parser.error("use --connect-only, --status-only, --sensors-only, --scan-only, --package-dir, or --package-json")
     return asyncio.run(connect_and_run(args))
 
 
