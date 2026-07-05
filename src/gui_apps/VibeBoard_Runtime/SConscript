@@ -26,6 +26,6 @@ if GetDepend('PKG_USING_LITTLEVGL2RTT'):
             os.path.join(SIFLI_SDK, 'customer/peripherals/sensor/LSM6DSL/libraries'),
         ])
     objs = Glob('*.c')
-    group = DefineGroup('App_VibeBoard_Runtime', objs, depend=['PKG_USING_LITTLEVGL2RTT'], CPPPATH=inc, LOCAL_CCFLAGS='')
+    group = DefineGroup('App_VibeBoard_Runtime', objs, depend=['PKG_USING_LITTLEVGL2RTT'], CPPPATH=inc, LOCAL_CCFLAGS=' -include compat_sdk25.h')
 
 Return('objs')

@@ -8,3 +8,5 @@ project/__pycache__/
 compile_commands.json
 .DS_Store
 .superpowers/
+.voice_terminal.env
+captures/

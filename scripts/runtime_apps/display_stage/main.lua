@@ -1,0 +1,53 @@
+local root = lv_scr_act()
+lv_obj_clean(root)
+lv_obj_set_style_bg_color(root, 0x0b1220)
+lv_obj_set_style_text_color(root, 0xf8fafc)
+
+local title = lv_label_create(root)
+lv_label_set_text(title, "Display Stage")
+lv_obj_set_style_text_color(title, 0x38bdf8)
+lv_obj_set_width(title, 330)
+lv_obj_align(title, LV_ALIGN_TOP_LEFT, 30, 34)
+
+local subtitle = lv_label_create(root)
+lv_label_set_text(subtitle, "Runtime display API: brightness + panel info")
+lv_obj_set_style_text_color(subtitle, 0xcbd5e1)
+lv_obj_set_width(subtitle, 330)
+lv_obj_align(subtitle, LV_ALIGN_TOP_LEFT, 30, 72)
+
+vibe_display_brightness("70")
+
+local brightness = lv_label_create(root)
+lv_label_set_text(brightness, "Brightness --")
+lv_obj_set_style_text_color(brightness, 0xfacc15)
+lv_obj_set_width(brightness, 330)
+lv_obj_align(brightness, LV_ALIGN_TOP_LEFT, 30, 138)
+vibe_display_label(brightness, "brightness")
+
+local size = lv_label_create(root)
+lv_label_set_text(size, "Panel --")
+lv_obj_set_style_text_color(size, 0x86efac)
+lv_obj_set_width(size, 330)
+lv_obj_align(size, LV_ALIGN_TOP_LEFT, 30, 184)
+vibe_display_label(size, "size")
+
+local state = lv_label_create(root)
+lv_label_set_text(state, "State --")
+lv_obj_set_style_text_color(state, 0xc4b5fd)
+lv_obj_set_width(state, 330)
+lv_obj_align(state, LV_ALIGN_TOP_LEFT, 30, 230)
+vibe_display_label(state, "state")
+
+local hint = lv_label_create(root)
+lv_label_set_text(hint, "Host can call vb_runtime_display 35..100")
+lv_obj_set_style_text_color(hint, 0xfda4af)
+lv_obj_set_width(hint, 330)
+lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 30, 286)
+
+local tick = lv_label_create(root)
+lv_label_set_text(tick, "Display Tick 0")
+lv_obj_set_style_text_color(tick, 0x93c5fd)
+lv_obj_align(tick, LV_ALIGN_BOTTOM_LEFT, 30, -32)
+vibe_timer_label(tick, 1000, "Display Tick")
+
+print("[display_stage] runtime display stage requested")

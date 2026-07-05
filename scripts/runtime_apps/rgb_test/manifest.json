@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "rgb_test",
+  "name": "RGB Test",
+  "description": "Runtime RGB API smoke test",
+  "entry": "main.lua",
+  "components": [
+    {"type":"label","id":"title","text":"RGB Runtime","x":42,"y":70,"w":300,"color":"#f8fafc","font":24},
+    {"type":"label","id":"body","text":"Lua set rgb=#3366ff","x":42,"y":126,"w":310,"color":"#93c5fd","font":20}
+  ]
+}

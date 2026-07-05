@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "voice_stage",
+  "name": "Voice Stage",
+  "description": "Runtime voice status and controlled capture stage.",
+  "entry": "main.lua",
+  "components": [
+    {"type":"status","capability":"voice.ready","label":"Ready","value":"--"},
+    {"type":"status","capability":"voice.recording","label":"State","value":"--"},
+    {"type":"status","capability":"voice.bytes","label":"Bytes","value":"--"},
+    {"type":"status","capability":"voice.seq","label":"Seq","value":"--"},
+    {"type":"action","capability":"voice.start","label":"Record 1s","value":"1000"},
+    {"type":"action","capability":"voice.clear","label":"Clear"},
+    {"type":"clock","capability":"clock","label":"Refresh","value":"--:--:--"}
+  ]
+}

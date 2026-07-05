@@ -1,0 +1,71 @@
+# Huangshan Pi LVGL AI System Contract
+
+Use this contract when asking AI to generate or modify LVGL UI code for this
+repository.
+
+## Target
+
+- Board: LCKFB Huangshan Pi / `sf32lb52-lchspi-ulp`.
+- Display: CO5300 AMOLED, 390x450 portrait.
+- Touch: FT6146.
+- GUI stack: SiFli SDK `release/v2.4`, RT-Thread, LVGL 8.
+- Color/resource assumptions: RGB565 target hardware, constrained MCU memory,
+  existing SiFli resource system.
+
+## Code Rules
+
+- Generate C code for LVGL 8 APIs. Do not use C++.
+- Keep page lifecycle compatible with `gui_app_fwk`:
+  `GUI_APP_MSG_ONSTART`, `ONRESUME`, `ONPAUSE`, `ONSTOP`.
+- Register built-in apps through the existing `BUILTIN_APP_EXPORT` pattern.
+- Use `LV_HOR_RES_MAX` and `LV_VER_RES_MAX` where practical, while designing
+  for 390x450 portrait.
+- Prefer reusable component helpers and a theme file over one-off styling.
+- Use app-specific prefixes, for example `hs_ui_` or the app name prefix.
+- Separate page creation from dynamic data updates.
+- Delete timers and root objects in `ONSTOP`.
+- Use `rt_kprintf` for lifecycle and important interaction evidence.
+
+## Layout Rules
+
+- Touch targets should be at least 44x44 px.
+- Use LVGL flex/grid when it keeps layout simpler.
+- Absolute positioning is acceptable for tightly bounded 390x450 board demos,
+  but keep values centralized and readable.
+- Reserve safe margins around edges; avoid text pressed into bezels.
+- Keep text short enough for English and Chinese labels.
+
+## Visual Rules
+
+- Use dark AMOLED-friendly backgrounds with high-contrast text.
+- Keep color semantics stable:
+  - normal/ready: cyan or green
+  - warning: amber
+  - danger/error: red
+  - secondary text: muted blue-gray
+- Avoid blur, glass effects, large transparent layers, heavy shadows, and large
+  unbudgeted bitmap assets.
+- Limit animation to small, purposeful changes unless performance is measured.
+
+## Runtime App Rules
+
+For `VibeBoard_Runtime` packages:
+
+- Treat `manifest.json` as the stable UI contract.
+- Use `main.lua` only within the documented script subset.
+- Prefer manifest components and existing sensor capabilities before asking for
+  firmware changes.
+- Firmware changes are still required for new LVGL bindings, complex Lua syntax,
+  networking primitives, or new hardware APIs.
+
+## Review Loop
+
+Build and inspect on target whenever possible:
+
+```bash
+./scripts/build.sh
+./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/monitor.sh /dev/cu.usbserial-110
+```
+
+Then review a photo/video of the screen with `visual-review-checklist.md`.

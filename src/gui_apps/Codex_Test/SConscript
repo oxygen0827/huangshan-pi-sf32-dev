@@ -6,7 +6,7 @@ cwd = GetCurrentDir()
 src = Glob('*.c')
 inc = [cwd]
 
-LOCAL_CCFLAGS = ''
+LOCAL_CCFLAGS=' -include compat_sdk25.h'
 
 group = DefineGroup('App_watch_demo', src, depend = [''], CPPPATH = inc, LOCAL_CCFLAGS = LOCAL_CCFLAGS)
 

@@ -27,6 +27,7 @@ TARGET = rtconfig.OUTPUT_DIR + rtconfig.TARGET_NAME + '.' + rtconfig.TARGET_EXT
 # Prepare building environment
 objs = PrepareBuilding(None)
 env = GetCurrentEnv()
+env.Append(CCFLAGS=['-Wno-incompatible-pointer-types', '-fpermissive'])
 
 # Build application.
 DoBuilding(TARGET, objs)

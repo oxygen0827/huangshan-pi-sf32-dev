@@ -40,4 +40,16 @@ if [[ -z "${SIFLI_PYTHON_ENV_PATH:-}" ]]; then
     done
 fi
 
+_sifli_env_had_nounset=0
+case $- in
+    *u*) _sifli_env_had_nounset=1; set +u ;;
+esac
+_sifli_env_args=("$@")
+set --
 source "$SDK_DIR/export.sh" >/tmp/huangshan-sifli-export.log
+set -- "${_sifli_env_args[@]}"
+unset _sifli_env_args
+if [[ "$_sifli_env_had_nounset" == "1" ]]; then
+    set -u
+fi
+unset _sifli_env_had_nounset

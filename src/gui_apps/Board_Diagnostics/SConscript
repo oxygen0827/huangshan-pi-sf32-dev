@@ -5,6 +5,6 @@ objs = []
 
 if GetDepend('PKG_USING_LITTLEVGL2RTT'):
     objs = Glob('*.c')
-    group = DefineGroup('App_Board_Diagnostics', objs, depend=['PKG_USING_LITTLEVGL2RTT'], CPPPATH=[''], LOCAL_CCFLAGS='')
+    group = DefineGroup('App_Board_Diagnostics', objs, depend=['PKG_USING_LITTLEVGL2RTT'], CPPPATH=[''], LOCAL_CCFLAGS=' -include compat_sdk25.h')
 
 Return('objs')

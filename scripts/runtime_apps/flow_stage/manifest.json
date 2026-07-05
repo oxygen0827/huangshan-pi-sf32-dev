@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "flow_stage",
+  "name": "Flow Stage",
+  "description": "Runtime info flow status stage.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "flow.latest",
+      "label": "Latest",
+      "value": "waiting"
+    },
+    {
+      "type": "status",
+      "capability": "flow.channel",
+      "label": "Channel",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "flow.seq",
+      "label": "Seq",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "flow.bytes",
+      "label": "Bytes",
+      "value": "--"
+    },
+    {
+      "type": "clock",
+      "capability": "clock",
+      "label": "Refresh",
+      "value": "--:--:--"
+    }
+  ]
+}

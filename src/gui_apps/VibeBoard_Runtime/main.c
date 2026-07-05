@@ -1,5 +1,9 @@
 #include <rtthread.h>
 #include <rtdevice.h>
+#include "drivers/rt_drv_pwm.h"
+#if defined(BSP_USING_LCD)
+#include "drv_lcd.h"
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -8,6 +12,12 @@
 #include <dfs_file.h>
 #include <dfs_fs.h>
 #include <dfs_posix.h>
+#if defined(AUDIO) && defined(AUDIO_USING_MANAGER)
+#include "audio_server.h"
+#endif
+#if defined(RT_USING_ADC)
+#include "bf0_hal.h"
+#endif
 #if defined(RT_USING_SENSOR)
 #include "bf0_hal.h"
 #include "drv_io.h"
@@ -22,14 +32,14 @@
 #include "st_lsm6dsl_sensor_v1.h"
 #endif
 #endif
-#ifdef PKG_USING_WEBCLIENT
+#if defined(PKG_USING_WEBCLIENT) && defined(VB_RUNTIME_ENABLE_HTTP_APP_OTA)
 #include <webclient.h>
 #endif
 #if defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH)
 #include "bf0_ble_gap.h"
 #include "bf0_sibles.h"
 #include "bf0_sibles_advertising.h"
-#if defined(CFG_PAN) && defined(RT_USING_LWIP)
+#if defined(VB_RUNTIME_ENABLE_BT_PAN) && defined(CFG_PAN) && defined(RT_USING_LWIP)
 #include "bts2_app_inc.h"
 #include "bts2_app_demo.h"
 #include "bt_connection_manager.h"
@@ -41,14 +51,30 @@
 #include "gui_app_fwk.h"
 #include "lv_ext_resource_manager.h"
 #include "lv_ex_data.h"
+#include "app_mem.h"
+#if defined(RGB_SK6812MINI_HS_ENABLE)
+#include "bf0_hal.h"
+#include "drv_io.h"
+#endif
 
 #define APP_ID "vb_runtime"
 #define VIBEBOARD_RUNTIME_API_VERSION "vibeboard-huangshan-runtime/v1"
-#define VIBEBOARD_RUNTIME_NET_API_VERSION "vibeboard-huangshan-net/v1"
+#define VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION "vibeboard-huangshan-app-manager/v1"
+#define VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION "vibeboard-huangshan-capabilities/v1"
 #define VIBEBOARD_RUNTIME_BLE_API_VERSION "vibeboard-huangshan-ble-install/v1"
+#define VIBEBOARD_RUNTIME_DISPLAY_API_VERSION "vibeboard-huangshan-display/v1"
 #define VIBEBOARD_RUNTIME_SENSOR_API_VERSION "vibeboard-huangshan-sensors/v1"
+#define VIBEBOARD_RUNTIME_FLOW_API_VERSION "vibeboard-huangshan-info-flow/v1"
+#define VIBEBOARD_RUNTIME_VOICE_API_VERSION "vibeboard-huangshan-voice-bridge/v1"
+#define VIBEBOARD_RUNTIME_POWER_API_VERSION "vibeboard-huangshan-power/v1"
+#define VIBEBOARD_RUNTIME_GPIO_API_VERSION "vibeboard-huangshan-gpio/v1"
+#define VIBEBOARD_RUNTIME_RGB_API_VERSION "vibeboard-huangshan-rgb/v1"
+#define VIBEBOARD_RUNTIME_TOUCH_API_VERSION "vibeboard-huangshan-touch/v1"
 #define VIBEBOARD_APP_ROOT "/sdcard/apps"
 #define VIBEBOARD_ACTIVE_APP_FILE VIBEBOARD_APP_ROOT "/.active"
+#define VIBEBOARD_FLOW_STATE_FILE VIBEBOARD_APP_ROOT "/.flow"
+#define VIBEBOARD_DISPLAY_STATE_FILE VIBEBOARD_APP_ROOT "/.display"
+#define VIBEBOARD_RGB_STATE_FILE VIBEBOARD_APP_ROOT "/.rgb"
 #define VIBEBOARD_STAGING_PREFIX ".__install_"
 #define VIBEBOARD_BACKUP_PREFIX ".__backup_"
 #define VIBEBOARD_DEFAULT_APP_ID "welcome"
@@ -65,6 +91,7 @@
 #define VB_MAX_SCRIPT 8192
 #define VB_MAX_SCRIPT_LINE 256
 #define VB_MAX_COMPONENTS 8
+#define VB_LAUNCHER_MAX_ITEMS 5
 #define VB_MAX_SCRIPT_OBJECTS 24
 #define VB_MAX_SCRIPT_NAME 24
 #define VB_MAX_SCRIPT_ARGS 6
@@ -80,8 +107,35 @@
 #define VB_HTTP_MAX_RESOURCE_SIZE 131072
 #define VB_HTTP_FILES_TXT_MAX 4096
 #define VB_BLE_MAX_COMMAND 896
-#define VB_BLE_STATUS_MAX 512
+#define VB_BLE_STATUS_MAX 1024
+#define VB_RUNTIME_INSTALL_MAX_CHUNK_BYTES 240
+#define VB_BLE_EVT_RESTART_ADV 0x56524201u
+#define VB_BLE_ADV_RESTART_DELAY_MS 600
+#define VB_BLE_ADV_RESTART_INTERVAL_MS 700
+#define VB_BLE_ADV_RESTART_ATTEMPTS 6
+#define VB_BLE_ADV_FORCE_RESTART_DELAY_MS 250
+#define VB_BLE_ADV_FORCE_RESTART_ATTEMPTS 8
 #define VB_SENSOR_JSON_MAX 512
+#define VB_POWER_JSON_MAX 384
+#define VB_DISPLAY_JSON_MAX 384
+#define VB_VOICE_JSON_MAX 384
+#define VB_RGB_JSON_MAX 256
+#define VB_TOUCH_JSON_MAX 384
+#define VB_GPIO_JSON_MAX 448
+#define VB_APP_JSON_MAX 2048
+#define VB_JSON_READ_MAX 2048
+#define VB_FLOW_MAX_CHANNEL 24
+#define VB_FLOW_MAX_PAYLOAD 192
+#define VB_FLOW_HISTORY 6
+#define VB_VOICE_SAMPLE_RATE 16000
+#define VB_VOICE_BITS_PER_SAMPLE 16
+#define VB_VOICE_CHANNELS 1
+#define VB_VOICE_MAX_MS 5000
+#define VB_VOICE_DEFAULT_MS 1500
+#define VB_VOICE_MAX_BYTES ((VB_VOICE_SAMPLE_RATE * VB_VOICE_BITS_PER_SAMPLE / 8 * VB_VOICE_CHANNELS * VB_VOICE_MAX_MS) / 1000)
+#define VB_VOICE_CHUNK_BYTES 160
+#define VB_VOICE_CACHE_SIZE 2048
+#define VB_VOICE_THREAD_STACK 4096
 #define VB_PAN_EVT_STACK_READY 1
 #define VB_PAN_EVT_CONNECT_PAN 2
 #define VB_PAN_EVT_OPEN_BT 3
@@ -95,24 +149,91 @@
 #define VB_SNAKE_MAX_DRAWN 28
 #define VB_SNAKE_LOG_EVERY 120
 #define VB_WEATHER_DROP_COUNT 8
+#define VB_WEATHER_CLOUD_COUNT 12
+#define VB_WEATHER_RAY_COUNT 8
+#define VB_WEATHER_DECOR_COUNT 8
+#define VB_WEATHER_FOG_COUNT 3
 #define VB_WEATHER_PERIOD_MS 180
+#define VB_WEATHER_IMG_MAGIC 0x474d4956u
+#define VB_WEATHER_IMG_VERSION 1u
 
-#if defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH) && defined(CFG_PAN) && defined(RT_USING_LWIP)
+#if defined(VB_RUNTIME_ENABLE_BT_PAN) && defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH) && defined(CFG_PAN) && defined(RT_USING_LWIP)
 #define VB_RUNTIME_HAS_BT_PAN 1
 #else
 #define VB_RUNTIME_HAS_BT_PAN 0
 #endif
 
-#if VB_RUNTIME_HAS_BT_PAN && defined(PKG_USING_WEBCLIENT)
+#if defined(VB_RUNTIME_ENABLE_HTTP_APP_OTA) && VB_RUNTIME_HAS_BT_PAN && defined(PKG_USING_WEBCLIENT)
 #define VB_RUNTIME_HAS_HTTP_APP_OTA 1
 #else
 #define VB_RUNTIME_HAS_HTTP_APP_OTA 0
 #endif
 
+#if defined(ADC_VBAT_DEDICATED_CHANNEL)
+#define VB_RUNTIME_BATTERY_ADC_CHANNEL ADC_VBAT_DEDICATED_CHANNEL
+#elif defined(BSP_BATTERY_DETECT_ADC_CHANNEL)
+#define VB_RUNTIME_BATTERY_ADC_CHANNEL BSP_BATTERY_DETECT_ADC_CHANNEL
+#endif
+
+#if defined(RT_USING_ADC) && defined(BSP_BATTERY_DETECT_ADC) && defined(VB_RUNTIME_BATTERY_ADC_CHANNEL)
+#define VB_RUNTIME_HAS_POWER_BATTERY 1
+#else
+#define VB_RUNTIME_HAS_POWER_BATTERY 0
+#endif
+
+#if defined(RT_USING_I2C) && defined(CHARGE_USING_AW32001) && defined(BSP_BATTERY_USE_I2C_BUS)
+#define VB_RUNTIME_HAS_POWER_CHARGER 1
+#else
+#define VB_RUNTIME_HAS_POWER_CHARGER 0
+#endif
+
+#if defined(BSP_USING_LCD)
+#define VB_RUNTIME_HAS_DISPLAY 1
+#else
+#define VB_RUNTIME_HAS_DISPLAY 0
+#endif
+
+#define VB_DISPLAY_DEVICE_NAME "lcd"
+
+#if defined(BSP_USING_GPIO) && ((defined(BSP_USING_KEY1) && defined(BSP_KEY1_PIN)) || (defined(BSP_USING_KEY2) && defined(BSP_KEY2_PIN)))
+#define VB_RUNTIME_HAS_GPIO 1
+#else
+#define VB_RUNTIME_HAS_GPIO 0
+#endif
+
+#if defined(BSP_KEY1_ACTIVE_HIGH)
+#define VB_RUNTIME_GPIO_KEY1_ACTIVE_HIGH 1
+#else
+#define VB_RUNTIME_GPIO_KEY1_ACTIVE_HIGH 0
+#endif
+
+#if defined(BSP_KEY2_ACTIVE_HIGH)
+#define VB_RUNTIME_GPIO_KEY2_ACTIVE_HIGH 1
+#else
+#define VB_RUNTIME_GPIO_KEY2_ACTIVE_HIGH 0
+#endif
+
+#if defined(RGB_SK6812MINI_HS_ENABLE) && defined(RGB_USING_SK6812MINI_HS_DEV_NAME)
+#define VB_RUNTIME_HAS_RGB 1
+#else
+#define VB_RUNTIME_HAS_RGB 0
+#endif
+
+#define VB_AW32001_I2C_ADDRESS 0x49
+#define VB_AW32001_REG_POWERON_CONF 0x01
+#define VB_AW32001_REG_SYS_STATUS 0x08
+#define VB_AW32001_REG_FAULT 0x09
+
 #if defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH) && defined(BSP_BLE_SIBLES)
 #define VB_RUNTIME_HAS_BLE_INSTALL 1
 #else
 #define VB_RUNTIME_HAS_BLE_INSTALL 0
+#endif
+
+#if defined(AUDIO) && defined(AUDIO_USING_MANAGER)
+#define VB_RUNTIME_HAS_VOICE_CAPTURE 1
+#else
+#define VB_RUNTIME_HAS_VOICE_CAPTURE 0
 #endif
 
 typedef struct
@@ -190,19 +311,62 @@ typedef struct
     uint32_t period_ticks;
     char city[VB_MAX_TEXT];
     char condition[32];
+    lv_obj_t *pet;
+    lv_obj_t *image;
+    lv_img_dsc_t *image_dsc;
+    int image_raw;
     lv_obj_t *sun;
     lv_obj_t *left_eye;
     lv_obj_t *right_eye;
     lv_obj_t *mouth;
     lv_obj_t *blush_l;
     lv_obj_t *blush_r;
-    lv_obj_t *cloud[4];
+    lv_obj_t *cloud[VB_WEATHER_CLOUD_COUNT];
+    lv_obj_t *rays[VB_WEATHER_RAY_COUNT];
+    lv_obj_t *decor[VB_WEATHER_DECOR_COUNT];
     lv_obj_t *drops[VB_WEATHER_DROP_COUNT];
     lv_obj_t *bolt;
-    lv_obj_t *fog[3];
+    lv_obj_t *fog[VB_WEATHER_FOG_COUNT];
     lv_obj_t *title_label;
     lv_obj_t *summary_label;
 } vb_weather_state_t;
+
+typedef struct
+{
+    uint32_t sequence;
+    uint32_t bytes;
+    uint32_t tick;
+    char channel[VB_FLOW_MAX_CHANNEL];
+    char payload[VB_FLOW_MAX_PAYLOAD + 1];
+} vb_info_flow_item_t;
+
+typedef struct
+{
+    uint32_t total_count;
+    int count;
+    int write_index;
+    vb_info_flow_item_t items[VB_FLOW_HISTORY];
+} vb_info_flow_state_t;
+
+typedef struct
+{
+    int initialized;
+    int recording;
+    int ready;
+    int last_error;
+    uint32_t sequence;
+    uint32_t requested_ms;
+    uint32_t recorded_bytes;
+    uint32_t dropped_bytes;
+    uint32_t max_bytes;
+    uint8_t *buffer;
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+    audio_client_t client;
+    rt_sem_t done_sem;
+    rt_thread_t worker;
+    int stop_requested;
+#endif
+} vb_voice_state_t;
 
 typedef struct
 {
@@ -259,14 +423,66 @@ typedef struct
     struct rt_sensor_data step_data;
 } vb_sensor_state_t;
 
+typedef struct
+{
+    int available;
+    int ready;
+    int active;
+    int last_event;
+    int gesture_dir;
+    uint32_t count;
+    uint32_t last_tick;
+    uint32_t press_tick;
+    uint32_t last_duration_ms;
+    lv_point_t point;
+    lv_point_t press_point;
+    lv_point_t release_point;
+    lv_point_t delta;
+} vb_touch_state_t;
+
+typedef struct
+{
+    int available;
+    int ready;
+    int configured;
+    uint32_t read_count;
+    int key1_ok;
+    int key1_level;
+    int key1_pressed;
+    int key2_ok;
+    int key2_level;
+    int key2_pressed;
+} vb_gpio_state_t;
+
+typedef struct
+{
+    int available;
+    int ready;
+    int width;
+    int height;
+    int bpp;
+    int format;
+    int align;
+    int brightness;
+    int state;
+    const char *state_name;
+} vb_display_snapshot_t;
+
 #if VB_RUNTIME_HAS_BLE_INSTALL
 typedef struct
 {
     int initialized;
     int power_on;
     int service_ready;
+    int adv_configured;
     int advertising;
     int connected;
+    uint8_t last_adv_start_rc;
+    uint8_t last_adv_stop_rc;
+    uint8_t last_adv_stop_reason;
+    uint32_t adv_start_events;
+    uint32_t adv_stop_events;
+    uint32_t adv_restart_requests;
     uint16_t notify_cccd;
     uint8_t conn_idx;
     uint16_t mtu;
@@ -280,9 +496,35 @@ typedef struct
 
 typedef struct
 {
+    char id[VB_MAX_APP_ID];
+    char name[VB_MAX_TEXT];
+    char description[VB_MAX_TEXT];
+    int manifest;
+    int app_info;
+    int main_lua;
+    int compatible;
+    int active;
+} vb_app_summary_t;
+
+typedef struct
+{
+    char id[VB_MAX_APP_ID];
+} vb_launcher_item_t;
+
+typedef struct
+{
+    int delta;
+} vb_launcher_page_action_t;
+
+typedef struct
+{
     lv_obj_t *root;
     lv_obj_t *status_label;
     lv_obj_t *clock_label;
+    lv_obj_t *flow_label;
+    lv_obj_t *script_flow_label;
+    char script_flow_field[24];
+    uint32_t script_flow_seen_total;
     lv_timer_t *timer;
     char active_app[VB_MAX_APP_ID];
     char app_name[VB_MAX_TEXT];
@@ -301,16 +543,47 @@ typedef struct
     vb_snake_state_t snake;
     vb_weather_state_t weather;
     volatile int pending_reload;
+    volatile int pending_stop;
+    volatile int pending_manager_refresh;
     int running;
+    int app_running;
+    int app_failed;
+    int app_last_status;
+    uint32_t app_launch_count;
+    uint32_t app_stop_count;
+    char app_last_error[VB_MAX_TEXT];
+    char manager_message[VB_MAX_TEXT];
+    char launcher_pending_delete[VB_MAX_APP_ID];
+    vb_launcher_item_t launcher_items[VB_LAUNCHER_MAX_ITEMS];
+    vb_launcher_page_action_t launcher_page_actions[2];
+    int launcher_count;
+    int launcher_total;
+    int launcher_page;
     int fs_ready;
     int fs_mounted;
     int quiet_logs;
+    int install_fd;
+    long install_offset;
+    char install_path[VB_MAX_PATH];
+    char install_app[VB_MAX_APP_ID];
     uint32_t tick_count;
     uint32_t last_clock_update;
+    uint32_t flow_seen_total;
+    rt_uint32_t rgb_color;
+    int rgb_last_ready;
+    int display_brightness;
+    int display_target_brightness;
+    int display_last_ready;
+    vb_gpio_state_t gpio;
+    vb_touch_state_t touch;
 } vb_runtime_state_t;
 
 static vb_runtime_state_t g_vb_runtime;
+static vb_info_flow_state_t g_vb_flow;
+static vb_voice_state_t g_vb_voice;
+#if VB_RUNTIME_HAS_BT_PAN
 static vb_pan_state_t g_vb_pan;
+#endif
 static vb_sensor_state_t g_vb_sensor;
 #if VB_RUNTIME_HAS_BLE_INSTALL
 static vb_ble_install_state_t g_vb_ble;
@@ -320,22 +593,79 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
 static void vb_builtin_script_stop(void);
 static lv_obj_t *vb_create_label(lv_obj_t *parent, const char *text, uint16_t font_size,
                                  lv_color_t color);
+#if VB_RUNTIME_HAS_BT_PAN
 static int vb_pan_init(void);
 static int vb_pan_open_now(void);
 static int vb_pan_scan_now(void);
 static int vb_pan_probe_now(void);
 static int vb_pan_connect_now(void);
 static int vb_pan_forget(void);
+#endif
 static int vb_runtime_install_begin_app(const char *app_id);
 static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
                                          const char *offset_text, const char *hex);
 static int vb_runtime_install_end_app(const char *app_id);
+static int vb_runtime_install_abort_app(const char *app_id);
+static void vb_runtime_install_close_file(void);
 static int vb_runtime_select_app(const char *app_id);
 static void vb_runtime_request_reload(void);
+#if VB_RUNTIME_HAS_HTTP_APP_OTA
 static int vb_runtime_install_url_app(const char *app_id, const char *base_url);
+#endif
+static int vb_runtime_app_status_json(char *dst, rt_size_t cap);
+static int vb_runtime_app_list_json(char *dst, rt_size_t cap);
+static int vb_runtime_app_list_page_json(char *dst, rt_size_t cap, int offset, int limit);
+static int vb_runtime_app_launch(const char *app_id);
+static int vb_runtime_app_stop(void);
+static int vb_runtime_app_delete(const char *app_id);
+static void vb_runtime_request_manager_refresh(const char *message);
+static void vb_render_app_manager_ui(const char *reason);
+static void vb_runtime_stop_current_app(void);
+static int vb_runtime_app_status_command(void);
+static int vb_runtime_apps_status_command(void);
 static void vb_read_active_app(char *dst, rt_size_t cap);
 static int vb_runtime_sensors_read_json(char *dst, rt_size_t cap);
 static int vb_runtime_sensors_status_command(void);
+static int vb_runtime_power_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_power_format_text(const char *capability, char *dst, rt_size_t cap);
+static int vb_runtime_power_status_command(void);
+static int vb_runtime_display_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_display_set_brightness_text(const char *brightness_text, char *dst, rt_size_t cap);
+static int vb_runtime_display_apply_target(void);
+static int vb_runtime_display_load_state(void);
+static int vb_runtime_display_format_text(const char *selector, char *dst, rt_size_t cap);
+static int vb_runtime_display_status_command(void);
+static int vb_runtime_gpio_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_gpio_status_command(void);
+static int vb_runtime_touch_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_touch_status_command(void);
+static int vb_runtime_rgb_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_rgb_set_text(const char *color_text, char *dst, rt_size_t cap);
+static int vb_runtime_rgb_load_state(void);
+static int vb_runtime_rgb_status_command(void);
+static int vb_runtime_capabilities_json(char *dst, rt_size_t cap);
+static int vb_runtime_capabilities_status_command(void);
+static int vb_runtime_ble_json_read(const char *kind, uint32_t offset, uint32_t max_bytes, char *dst, rt_size_t cap);
+static const char *vb_json_find_string(const char *begin, const char *end, const char *key);
+static int vb_json_read_int(const char *begin, const char *end, const char *key, int *out);
+static void vb_json_copy_string(const char *begin, const char *end, const char *key,
+                                char *dst, rt_size_t cap, const char *fallback);
+static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, const char *hex);
+static int vb_runtime_flow_latest_index(void);
+static int vb_runtime_flow_save_latest(void);
+static int vb_runtime_flow_load_state(void);
+static void vb_runtime_flow_clear_state(void);
+static int vb_runtime_flow_status_command(void);
+static int vb_runtime_voice_start(uint32_t duration_ms);
+static void vb_runtime_voice_clear(void);
+static int vb_runtime_voice_status(char *dst, rt_size_t cap);
+static int vb_runtime_voice_read_json(char *dst, rt_size_t cap);
+static int vb_runtime_voice_start_text(const char *duration_text, char *dst, rt_size_t cap);
+static int vb_runtime_voice_clear_json(char *dst, rt_size_t cap);
+static int vb_runtime_voice_format_text(const char *selector, char *dst, rt_size_t cap);
+static int vb_runtime_voice_read_hex(uint32_t offset, uint32_t max_bytes, char *dst, rt_size_t cap);
+static int vb_runtime_voice_json_status_command(void);
+static int vb_runtime_voice_status_command(void);
 
 #if defined(RT_USING_BLUETOOTH) && defined(BLUETOOTH)
 static int g_vb_bt_core_enable_requested;
@@ -560,11 +890,20 @@ static int vb_write_text_file(const char *path, const char *text)
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0);
     int len;
     int written;
+    int result = RT_EOK;
     if (fd < 0) return -RT_ERROR;
     len = rt_strlen(text);
     written = write(fd, text, len);
+    if (written != len)
+    {
+        result = -RT_ERROR;
+    }
+    else if (fsync(fd) != 0)
+    {
+        result = -RT_ERROR;
+    }
     close(fd);
-    return written == len ? RT_EOK : -RT_ERROR;
+    return result;
 }
 
 static int vb_runtime_sensor_open_device(rt_device_t *slot, const char *name)
@@ -785,9 +1124,13 @@ static int vb_runtime_sensors_read_json(char *dst, rt_size_t cap)
 {
     int result;
     int used;
+    unsigned long sample_count;
     if (!dst || cap == 0) return -RT_EINVAL;
     dst[0] = '\0';
     result = vb_runtime_sensors_refresh();
+    sample_count = (unsigned long)(g_vb_sensor.have_light + g_vb_sensor.have_mag +
+                                   g_vb_sensor.have_acce + g_vb_sensor.have_gyro +
+                                   g_vb_sensor.have_step);
     used = rt_snprintf(dst, cap,
                        "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"count\":%lu,"
                        "\"light\":{\"ok\":%d,\"lux\":%ld},"
@@ -798,7 +1141,7 @@ static int vb_runtime_sensors_read_json(char *dst, rt_size_t cap)
                        VIBEBOARD_RUNTIME_SENSOR_API_VERSION,
                        g_vb_sensor.init_result != -RT_ENOSYS ? 1 : 0,
                        g_vb_sensor.ready,
-                       (unsigned long)g_vb_sensor.read_count,
+                       sample_count,
                        g_vb_sensor.have_light,
                        (long)g_vb_sensor.light_data.data.light,
                        g_vb_sensor.have_mag,
@@ -853,6 +1196,1049 @@ static void vb_runtime_print_json_line(const char *text)
     rt_kprintf("\n");
 }
 
+static int vb_runtime_power_read_battery(int *available, int *ready, rt_uint32_t *raw,
+                                         rt_uint32_t *mv, const char **device_name,
+                                         int *channel)
+{
+    int rc = -RT_ENOSYS;
+    rt_uint32_t raw_value = 0;
+    rt_uint32_t mv_value = 0;
+
+    if (available) *available = 0;
+    if (ready) *ready = 0;
+    if (raw) *raw = 0;
+    if (mv) *mv = 0;
+    if (device_name) *device_name = "";
+    if (channel) *channel = -1;
+
+#if VB_RUNTIME_HAS_POWER_BATTERY
+    {
+        rt_device_t dev;
+        if (available) *available = 1;
+        if (device_name) *device_name = BSP_BATTERY_DETECT_ADC;
+        if (channel) *channel = VB_RUNTIME_BATTERY_ADC_CHANNEL;
+
+        dev = rt_device_find(BSP_BATTERY_DETECT_ADC);
+        if (!dev) return -RT_ERROR;
+
+        rc = rt_adc_enable((rt_adc_device_t)dev, VB_RUNTIME_BATTERY_ADC_CHANNEL);
+        if (rc != RT_EOK) return rc;
+
+        raw_value = rt_adc_read((rt_adc_device_t)dev, VB_RUNTIME_BATTERY_ADC_CHANNEL);
+        rt_adc_disable((rt_adc_device_t)dev, VB_RUNTIME_BATTERY_ADC_CHANNEL);
+        if (raw_value == (rt_uint32_t)RT_ERROR || raw_value == 0) return -RT_ERROR;
+
+#if defined(SF32LB52X)
+        mv_value = raw_value / 10;
+#else
+        mv_value = raw_value;
+#endif
+        if (ready) *ready = 1;
+        if (raw) *raw = raw_value;
+        if (mv) *mv = mv_value;
+        return RT_EOK;
+    }
+#endif
+
+    return rc;
+}
+
+static const char *vb_runtime_charger_state_label(int state)
+{
+    switch (state)
+    {
+    case 0:
+        return "no_charging";
+    case 1:
+        return "pre_charge";
+    case 2:
+        return "charging";
+    case 3:
+        return "full";
+    default:
+        return "unavailable";
+    }
+}
+
+static int vb_runtime_power_read_charger(int *available, int *ready, rt_uint8_t *sys,
+                                         rt_uint8_t *fault, int *state,
+                                         int *detected, int *enabled,
+                                         const char **status)
+{
+    int rc = -RT_ENOSYS;
+
+    if (available) *available = 0;
+    if (ready) *ready = 0;
+    if (sys) *sys = 0;
+    if (fault) *fault = 0;
+    if (state) *state = -1;
+    if (detected) *detected = -1;
+    if (enabled) *enabled = -1;
+    if (status) *status = "unavailable";
+
+#if VB_RUNTIME_HAS_POWER_CHARGER
+    {
+        struct rt_i2c_bus_device *bus;
+        rt_uint8_t sys_reg = 0;
+        rt_uint8_t fault_reg = 0;
+        rt_uint8_t poweron_reg = 0;
+        int charge_state;
+        rt_size_t result;
+
+        if (available) *available = 1;
+        bus = rt_i2c_bus_device_find(BSP_BATTERY_USE_I2C_BUS);
+        if (!bus) return -RT_ERROR;
+
+        result = rt_i2c_mem_read(bus, VB_AW32001_I2C_ADDRESS, VB_AW32001_REG_SYS_STATUS, 8, &sys_reg, 1);
+        if (result <= 0) return -RT_ERROR;
+        result = rt_i2c_mem_read(bus, VB_AW32001_I2C_ADDRESS, VB_AW32001_REG_FAULT, 8, &fault_reg, 1);
+        if (result <= 0) return -RT_ERROR;
+
+        charge_state = (sys_reg & 0x18) >> 3;
+        if (sys) *sys = sys_reg;
+        if (fault) *fault = fault_reg;
+        if (state) *state = charge_state;
+        if (status) *status = vb_runtime_charger_state_label(charge_state);
+        if (ready) *ready = 1;
+        rc = RT_EOK;
+
+        result = rt_i2c_mem_read(bus, VB_AW32001_I2C_ADDRESS, VB_AW32001_REG_POWERON_CONF, 8,
+                                 &poweron_reg, 1);
+        if (result > 0 && enabled) *enabled = (poweron_reg & (1 << 3)) ? 0 : 1;
+
+#if defined(BSP_USING_CHARGER_DETECT) && defined(BSP_CHARGER_INT_PIN)
+#ifdef BSP_CHARGER_INT_PIN_ACTIVE_HIGH
+        if (detected) *detected = rt_pin_read(BSP_CHARGER_INT_PIN) ? 1 : 0;
+#else
+        if (detected) *detected = rt_pin_read(BSP_CHARGER_INT_PIN) ? 0 : 1;
+#endif
+#endif
+        return rc;
+    }
+#endif
+
+    return rc;
+}
+
+static int vb_runtime_power_read_json(char *dst, rt_size_t cap)
+{
+    int used;
+    int battery_available = 0;
+    int battery_ready = 0;
+    int charger_available = 0;
+    int charger_ready = 0;
+    int available;
+    int ready;
+    const char *device_name = "";
+    int channel = -1;
+    rt_uint32_t raw = 0;
+    rt_uint32_t mv = 0;
+    rt_uint8_t charger_sys = 0;
+    rt_uint8_t charger_fault = 0;
+    int charger_state = -1;
+    int charger_detected = -1;
+    int charger_enabled = -1;
+    const char *charger_status = "unavailable";
+    int battery_rc;
+    int charger_rc;
+
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    battery_rc = vb_runtime_power_read_battery(&battery_available, &battery_ready, &raw, &mv,
+                                               &device_name, &channel);
+    charger_rc = vb_runtime_power_read_charger(&charger_available, &charger_ready, &charger_sys,
+                                               &charger_fault, &charger_state, &charger_detected,
+                                               &charger_enabled, &charger_status);
+    available = (battery_available || charger_available) ? 1 : 0;
+    ready = (battery_ready || charger_ready) ? 1 : 0;
+
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,"
+                       "\"battery\":{\"ok\":%d,\"mv\":%lu,\"raw\":%lu,\"dev\":\"%s\",\"ch\":%d},"
+                       "\"charger\":{\"ok\":%d,\"state\":%d,\"status\":\"%s\",\"det\":%d,\"en\":%d,\"sys\":%u,\"fault\":%u}}",
+                       VIBEBOARD_RUNTIME_POWER_API_VERSION,
+                       available,
+                       ready,
+                       battery_ready,
+                       (unsigned long)mv,
+                       (unsigned long)raw,
+                       device_name,
+                       channel,
+                       charger_ready,
+                       charger_state,
+                       charger_status,
+                       charger_detected,
+                       charger_enabled,
+                       (unsigned int)charger_sys,
+                       (unsigned int)charger_fault);
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_POWER_API_VERSION,
+                    available,
+                    ready);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    if (ready) return RT_EOK;
+    if (battery_rc != -RT_ENOSYS) return battery_rc;
+    return charger_rc;
+}
+
+static const char *vb_runtime_power_short_capability(const char *capability)
+{
+    if (!capability) return "";
+    if (rt_strncmp(capability, "power.", 6) == 0) return capability + 6;
+    if (rt_strncmp(capability, "vibeboard.power.", 16) == 0) return capability + 16;
+    return capability;
+}
+
+static int vb_runtime_power_format_text(const char *capability, char *dst, rt_size_t cap)
+{
+    const char *short_cap = vb_runtime_power_short_capability(capability);
+
+    if (!short_cap || !dst || cap == 0) return 0;
+    if (rt_strcmp(short_cap, "battery") == 0)
+    {
+        rt_uint32_t mv = 0;
+        if (vb_runtime_power_read_battery(RT_NULL, RT_NULL, RT_NULL, &mv, RT_NULL, RT_NULL) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%lumV", (unsigned long)mv);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "Battery --");
+        }
+        return 1;
+    }
+    if (rt_strcmp(short_cap, "charger") == 0 || rt_strcmp(short_cap, "charger.status") == 0)
+    {
+        const char *status = "unavailable";
+        if (vb_runtime_power_read_charger(RT_NULL, RT_NULL, RT_NULL, RT_NULL, RT_NULL,
+                                          RT_NULL, RT_NULL, &status) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%s", status);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "Charger --");
+        }
+        return 1;
+    }
+    if (rt_strcmp(short_cap, "charger.state") == 0)
+    {
+        int state = -1;
+        if (vb_runtime_power_read_charger(RT_NULL, RT_NULL, RT_NULL, RT_NULL, &state,
+                                          RT_NULL, RT_NULL, RT_NULL) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%d", state);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "--");
+        }
+        return 1;
+    }
+    if (rt_strcmp(short_cap, "charger.det") == 0)
+    {
+        int detected = -1;
+        if (vb_runtime_power_read_charger(RT_NULL, RT_NULL, RT_NULL, RT_NULL, RT_NULL,
+                                          &detected, RT_NULL, RT_NULL) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%d", detected);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "--");
+        }
+        return 1;
+    }
+    if (rt_strcmp(short_cap, "charger.en") == 0)
+    {
+        int enabled = -1;
+        if (vb_runtime_power_read_charger(RT_NULL, RT_NULL, RT_NULL, RT_NULL, RT_NULL,
+                                          RT_NULL, &enabled, RT_NULL) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%d", enabled);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "--");
+        }
+        return 1;
+    }
+    if (rt_strcmp(short_cap, "charger.fault") == 0)
+    {
+        rt_uint8_t fault = 0;
+        if (vb_runtime_power_read_charger(RT_NULL, RT_NULL, RT_NULL, &fault, RT_NULL,
+                                          RT_NULL, RT_NULL, RT_NULL) == RT_EOK)
+        {
+            rt_snprintf(dst, cap, "%u", (unsigned int)fault);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "--");
+        }
+        return 1;
+    }
+    return 0;
+}
+
+
+static const char *vb_runtime_display_state_name(int state)
+{
+#if VB_RUNTIME_HAS_DISPLAY
+    switch (state)
+    {
+    case LCD_STATUS_NONE: return "none";
+    case LCD_STATUS_OPENING: return "opening";
+    case LCD_STATUS_NOT_FIND_LCD: return "not_found";
+    case LCD_STATUS_INITIALIZED: return "initialized";
+    case LCD_STATUS_DISPLAY_ON: return "on";
+    case LCD_STATUS_DISPLAY_OFF_PENDING: return "off_pending";
+    case LCD_STATUS_DISPLAY_OFF: return "off";
+    case LCD_STATUS_DISPLAY_TIMEOUT: return "timeout";
+    case LCD_STATUS_IDLE_MODE: return "idle";
+    default: return "unknown";
+    }
+#else
+    (void)state;
+    return "unavailable";
+#endif
+}
+
+static int vb_runtime_display_read(vb_display_snapshot_t *snapshot)
+{
+    if (!snapshot) return -RT_EINVAL;
+    rt_memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->available = VB_RUNTIME_HAS_DISPLAY ? 1 : 0;
+    snapshot->brightness = g_vb_runtime.display_brightness >= 0 ? g_vb_runtime.display_brightness : -1;
+    snapshot->state = -1;
+    snapshot->state_name = "unavailable";
+
+#if VB_RUNTIME_HAS_DISPLAY
+    {
+        rt_device_t dev = rt_device_find(VB_DISPLAY_DEVICE_NAME);
+        struct rt_device_graphic_info info;
+        rt_uint8_t brightness = 0;
+        int result;
+        if (!dev) return -RT_ERROR;
+
+        result = rt_device_control(dev, RTGRAPHIC_CTRL_GET_INFO, &info);
+        if (result != RT_EOK) return result;
+        snapshot->width = info.width;
+        snapshot->height = info.height;
+        snapshot->bpp = info.bits_per_pixel;
+        snapshot->format = info.pixel_format;
+        snapshot->align = info.draw_align;
+        snapshot->ready = (snapshot->width > 0 && snapshot->height > 0) ? 1 : 0;
+
+        if (rt_device_control(dev, RTGRAPHIC_CTRL_GET_BRIGHTNESS, &brightness) == RT_EOK)
+        {
+            if (g_vb_runtime.display_target_brightness < 0)
+            {
+                (void)vb_runtime_display_load_state();
+            }
+            if (g_vb_runtime.display_target_brightness >= 0)
+            {
+                (void)vb_runtime_display_apply_target();
+                brightness = (rt_uint8_t)g_vb_runtime.display_target_brightness;
+            }
+            snapshot->brightness = brightness;
+            g_vb_runtime.display_brightness = brightness;
+        }
+        {
+            LCD_DrvStatusTypeDef state = LCD_STATUS_NONE;
+            if (rt_device_control(dev, RTGRAPHIC_CTRL_GET_STATE, &state) == RT_EOK)
+            {
+                snapshot->state = (int)state;
+                snapshot->state_name = vb_runtime_display_state_name((int)state);
+            }
+            else
+            {
+                snapshot->state_name = "unknown";
+            }
+        }
+        g_vb_runtime.display_last_ready = snapshot->ready;
+        return snapshot->ready ? RT_EOK : -RT_ERROR;
+    }
+#else
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_display_write_json(char *dst, rt_size_t cap, int rc, const vb_display_snapshot_t *snapshot)
+{
+    int used;
+    vb_display_snapshot_t empty;
+    const vb_display_snapshot_t *s = snapshot;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    if (!s)
+    {
+        rt_memset(&empty, 0, sizeof(empty));
+        empty.available = VB_RUNTIME_HAS_DISPLAY ? 1 : 0;
+        empty.brightness = g_vb_runtime.display_brightness >= 0 ? g_vb_runtime.display_brightness : -1;
+        empty.state = -1;
+        empty.state_name = "unavailable";
+        s = &empty;
+    }
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"ok\":%d,\"dev\":\"%s\","
+                       "\"width\":%d,\"height\":%d,\"bpp\":%d,\"format\":%d,\"align\":%d,"
+                       "\"brightness\":%d,\"state\":%d,\"state_name\":\"%s\"}",
+                       VIBEBOARD_RUNTIME_DISPLAY_API_VERSION,
+                       s->available,
+                       s->ready,
+                       rc == RT_EOK ? 1 : 0,
+                       VB_DISPLAY_DEVICE_NAME,
+                       s->width,
+                       s->height,
+                       s->bpp,
+                       s->format,
+                       s->align,
+                       s->brightness,
+                       s->state,
+                       s->state_name ? s->state_name : "unknown");
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_DISPLAY_API_VERSION,
+                    s->available,
+                    s->ready);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return rc;
+}
+
+static int vb_runtime_display_read_json(char *dst, rt_size_t cap)
+{
+    vb_display_snapshot_t snapshot;
+    int rc = vb_runtime_display_read(&snapshot);
+    return vb_runtime_display_write_json(dst, cap, rc, &snapshot);
+}
+
+static int vb_runtime_display_apply_target(void)
+{
+#if VB_RUNTIME_HAS_DISPLAY
+    rt_device_t dev;
+    rt_uint8_t level;
+    if (g_vb_runtime.display_target_brightness < 0) return RT_EOK;
+    dev = rt_device_find(VB_DISPLAY_DEVICE_NAME);
+    if (!dev) return -RT_ERROR;
+    level = (rt_uint8_t)g_vb_runtime.display_target_brightness;
+    if (rt_device_control(dev, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &level) != RT_EOK) return -RT_ERROR;
+    g_vb_runtime.display_brightness = g_vb_runtime.display_target_brightness;
+    g_vb_runtime.display_last_ready = 1;
+    return RT_EOK;
+#else
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_display_save_state(void)
+{
+    char json[96];
+    if (g_vb_runtime.display_target_brightness < 0) return RT_EOK;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    rt_snprintf(json, sizeof(json),
+                "{\"api\":\"%s\",\"brightness\":%d}\n",
+                VIBEBOARD_RUNTIME_DISPLAY_API_VERSION,
+                g_vb_runtime.display_target_brightness);
+    json[sizeof(json) - 1] = '\0';
+    return vb_write_text_file(VIBEBOARD_DISPLAY_STATE_FILE, json);
+}
+
+static int vb_runtime_display_load_state(void)
+{
+    char json[128];
+    char api[64];
+    int brightness = -1;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    if (vb_read_text_file(VIBEBOARD_DISPLAY_STATE_FILE, json, sizeof(json)) <= 0) return -RT_ERROR;
+    vb_json_copy_string(json, RT_NULL, "api", api, sizeof(api), "");
+    if (rt_strcmp(api, VIBEBOARD_RUNTIME_DISPLAY_API_VERSION) != 0) return -RT_EINVAL;
+    if (!vb_json_read_int(json, RT_NULL, "brightness", &brightness)) return -RT_EINVAL;
+    if (brightness < 0 || brightness > 100) return -RT_EINVAL;
+    g_vb_runtime.display_target_brightness = brightness;
+    g_vb_runtime.display_brightness = brightness;
+    return vb_runtime_display_apply_target();
+}
+
+static int vb_runtime_display_set_brightness(int brightness)
+{
+#if VB_RUNTIME_HAS_DISPLAY
+    rt_device_t dev;
+    rt_uint8_t level;
+    int result;
+    if (brightness < 0 || brightness > 100) return -RT_EINVAL;
+    dev = rt_device_find(VB_DISPLAY_DEVICE_NAME);
+    if (!dev) return -RT_ERROR;
+    level = (rt_uint8_t)brightness;
+    result = rt_device_control(dev, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &level);
+    if (result == RT_EOK)
+    {
+        g_vb_runtime.display_brightness = brightness;
+        g_vb_runtime.display_target_brightness = brightness;
+        g_vb_runtime.display_last_ready = 1;
+        (void)vb_runtime_display_save_state();
+    }
+    return result;
+#else
+    (void)brightness;
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_display_set_brightness_text(const char *brightness_text, char *dst, rt_size_t cap)
+{
+    char *end = RT_NULL;
+    unsigned long value;
+    int rc;
+    if (!brightness_text || !brightness_text[0]) return vb_runtime_display_write_json(dst, cap, -RT_EINVAL, RT_NULL);
+    value = strtoul(brightness_text, &end, 10);
+    if (!end || *end || value > 100) return vb_runtime_display_write_json(dst, cap, -RT_EINVAL, RT_NULL);
+    rc = vb_runtime_display_set_brightness((int)value);
+    if (rc != RT_EOK) return vb_runtime_display_write_json(dst, cap, rc, RT_NULL);
+    return vb_runtime_display_read_json(dst, cap);
+}
+
+static const char *vb_runtime_display_short_selector(const char *selector)
+{
+    if (!selector) return "";
+    if (rt_strncmp(selector, "display.", 8) == 0) return selector + 8;
+    if (rt_strncmp(selector, "screen.", 7) == 0) return selector + 7;
+    if (rt_strncmp(selector, "vibeboard.display.", 18) == 0) return selector + 18;
+    return selector;
+}
+
+static int vb_runtime_display_format_text(const char *selector, char *dst, rt_size_t cap)
+{
+    vb_display_snapshot_t snapshot;
+    const char *short_selector = vb_runtime_display_short_selector(selector);
+    int rc;
+    if (!short_selector || !dst || cap == 0) return 0;
+    rc = vb_runtime_display_read(&snapshot);
+    if (rt_strcmp(short_selector, "brightness") == 0)
+    {
+        if (rc == RT_EOK && snapshot.brightness >= 0) rt_snprintf(dst, cap, "%d%%", snapshot.brightness);
+        else rt_snprintf(dst, cap, "Brightness --");
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "size") == 0 || rt_strcmp(short_selector, "resolution") == 0)
+    {
+        if (rc == RT_EOK) rt_snprintf(dst, cap, "%dx%d", snapshot.width, snapshot.height);
+        else rt_snprintf(dst, cap, "Display --");
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "state") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", snapshot.state_name ? snapshot.state_name : "unknown");
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "bpp") == 0)
+    {
+        if (rc == RT_EOK) rt_snprintf(dst, cap, "%d bpp", snapshot.bpp);
+        else rt_snprintf(dst, cap, "BPP --");
+        return 1;
+    }
+    return 0;
+}
+
+static const char *vb_runtime_rgb_color_name(rt_uint32_t color)
+{
+    switch (color & 0xffffffu)
+    {
+    case 0x000000u: return "off";
+    case 0xff0000u: return "red";
+    case 0x00ff00u: return "green";
+    case 0x0000ffu: return "blue";
+    case 0xffff00u: return "yellow";
+    case 0x00ffffu: return "cyan";
+    case 0xff00ffu: return "magenta";
+    case 0xffffffu: return "white";
+    default: return "custom";
+    }
+}
+
+static int vb_runtime_rgb_parse_color(const char *text, rt_uint32_t *color)
+{
+    char buf[24];
+    const char *p;
+    char *end;
+    unsigned long value;
+    rt_size_t i;
+
+    if (!text || !color) return -RT_EINVAL;
+    while (*text == ' ' || *text == '\t') text++;
+    if (!*text) return -RT_EINVAL;
+    vb_safe_copy(buf, sizeof(buf), text);
+    for (i = 0; buf[i]; i++)
+    {
+        if (buf[i] >= 'A' && buf[i] <= 'Z') buf[i] = (char)(buf[i] - 'A' + 'a');
+    }
+    if (rt_strcmp(buf, "off") == 0 || rt_strcmp(buf, "black") == 0)
+    {
+        *color = 0x000000u;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "red") == 0)
+    {
+        *color = 0xff0000u;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "green") == 0)
+    {
+        *color = 0x00ff00u;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "blue") == 0)
+    {
+        *color = 0x0000ffu;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "yellow") == 0)
+    {
+        *color = 0xffff00u;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "cyan") == 0)
+    {
+        *color = 0x00ffffu;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "magenta") == 0 || rt_strcmp(buf, "purple") == 0)
+    {
+        *color = 0xff00ffu;
+        return RT_EOK;
+    }
+    if (rt_strcmp(buf, "white") == 0)
+    {
+        *color = 0xffffffu;
+        return RT_EOK;
+    }
+
+    p = buf;
+    if (*p == '#') p++;
+    else if (p[0] == '0' && p[1] == 'x') p += 2;
+    if (rt_strlen(p) != 6) return -RT_EINVAL;
+    value = strtoul(p, &end, 16);
+    if (!end || *end) return -RT_EINVAL;
+    *color = (rt_uint32_t)(value & 0xffffffu);
+    return RT_EOK;
+}
+
+static int vb_runtime_rgb_apply(rt_uint32_t color)
+{
+#if VB_RUNTIME_HAS_RGB
+    rt_device_t dev;
+    struct rt_rgbled_configuration cfg;
+
+    HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO3_3V3, true, true);
+    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_NOPULL, 1);
+
+    dev = rt_device_find(RGB_USING_SK6812MINI_HS_DEV_NAME);
+    if (!dev)
+    {
+        g_vb_runtime.rgb_last_ready = 0;
+        return -RT_ERROR;
+    }
+    rt_memset(&cfg, 0, sizeof(cfg));
+    cfg.color_rgb = color & 0xffffffu;
+    if (rt_device_control(dev, PWM_CMD_SET_COLOR, &cfg) != RT_EOK)
+    {
+        g_vb_runtime.rgb_last_ready = 0;
+        return -RT_ERROR;
+    }
+    g_vb_runtime.rgb_color = color & 0xffffffu;
+    g_vb_runtime.rgb_last_ready = 1;
+    return RT_EOK;
+#else
+    (void)color;
+    g_vb_runtime.rgb_last_ready = 0;
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_rgb_save_state(void)
+{
+    char json[96];
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    rt_snprintf(json, sizeof(json),
+                "{\"api\":\"%s\",\"color\":\"%06lx\"}\n",
+                VIBEBOARD_RUNTIME_RGB_API_VERSION,
+                (unsigned long)(g_vb_runtime.rgb_color & 0xffffffu));
+    json[sizeof(json) - 1] = '\0';
+    return vb_write_text_file(VIBEBOARD_RGB_STATE_FILE, json);
+}
+
+static int vb_runtime_rgb_load_state(void)
+{
+    char json[128];
+    char api[64];
+    char color_text[16];
+    rt_uint32_t color = 0;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    if (vb_read_text_file(VIBEBOARD_RGB_STATE_FILE, json, sizeof(json)) <= 0) return -RT_ERROR;
+    vb_json_copy_string(json, RT_NULL, "api", api, sizeof(api), "");
+    if (rt_strcmp(api, VIBEBOARD_RUNTIME_RGB_API_VERSION) != 0) return -RT_EINVAL;
+    vb_json_copy_string(json, RT_NULL, "color", color_text, sizeof(color_text), "");
+    if (vb_runtime_rgb_parse_color(color_text, &color) != RT_EOK) return -RT_EINVAL;
+    return vb_runtime_rgb_apply(color);
+}
+
+static int vb_runtime_rgb_write_json(char *dst, rt_size_t cap, int rc)
+{
+    int used;
+    int available = VB_RUNTIME_HAS_RGB ? 1 : 0;
+    int ready = (rc == RT_EOK || g_vb_runtime.rgb_last_ready) ? 1 : 0;
+    const char *dev_name = "";
+    int led_count = 0;
+    if (!dst || cap == 0) return -RT_EINVAL;
+#if VB_RUNTIME_HAS_RGB
+    dev_name = RGB_USING_SK6812MINI_HS_DEV_NAME;
+#endif
+#if defined(BSP_RGB_LED_COUNT)
+    led_count = BSP_RGB_LED_COUNT;
+#endif
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"ok\":%d,\"dev\":\"%s\",\"count\":%d,\"color\":\"%06lx\",\"name\":\"%s\"}",
+                       VIBEBOARD_RUNTIME_RGB_API_VERSION,
+                       available,
+                       ready,
+                       rc == RT_EOK ? 1 : 0,
+                       dev_name,
+                       led_count,
+                       (unsigned long)(g_vb_runtime.rgb_color & 0xffffffu),
+                       vb_runtime_rgb_color_name(g_vb_runtime.rgb_color));
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_RGB_API_VERSION,
+                    available,
+                    ready);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return rc;
+}
+
+static int vb_runtime_rgb_read_json(char *dst, rt_size_t cap)
+{
+#if VB_RUNTIME_HAS_RGB
+    rt_device_t dev = rt_device_find(RGB_USING_SK6812MINI_HS_DEV_NAME);
+    int rc = dev ? RT_EOK : -RT_ERROR;
+    if (dev)
+    {
+        if (!g_vb_runtime.rgb_last_ready)
+        {
+            (void)vb_runtime_rgb_load_state();
+        }
+        else
+        {
+            (void)vb_runtime_rgb_apply(g_vb_runtime.rgb_color);
+        }
+        g_vb_runtime.rgb_last_ready = 1;
+        rc = RT_EOK;
+    }
+    return vb_runtime_rgb_write_json(dst, cap, rc);
+#else
+    return vb_runtime_rgb_write_json(dst, cap, -RT_ENOSYS);
+#endif
+}
+
+static int vb_runtime_rgb_set_text(const char *color_text, char *dst, rt_size_t cap)
+{
+    rt_uint32_t color = 0;
+    int rc = vb_runtime_rgb_parse_color(color_text, &color);
+    if (rc == RT_EOK) rc = vb_runtime_rgb_apply(color);
+    if (rc == RT_EOK) (void)vb_runtime_rgb_save_state();
+    return vb_runtime_rgb_write_json(dst, cap, rc);
+}
+
+static const char *vb_runtime_touch_event_name(int event)
+{
+    switch (event)
+    {
+    case LV_EVENT_PRESSED:
+        return "pressed";
+    case LV_EVENT_PRESSING:
+        return "pressing";
+    case LV_EVENT_RELEASED:
+        return "released";
+    case LV_EVENT_CLICKED:
+        return "clicked";
+    case LV_EVENT_GESTURE:
+        return "gesture";
+    default:
+        return "idle";
+    }
+}
+
+static const char *vb_runtime_touch_gesture_name(int dir)
+{
+    switch (dir)
+    {
+    case LV_DIR_LEFT:
+        return "left";
+    case LV_DIR_RIGHT:
+        return "right";
+    case LV_DIR_TOP:
+        return "up";
+    case LV_DIR_BOTTOM:
+        return "down";
+    default:
+        return "none";
+    }
+}
+
+static uint32_t vb_runtime_touch_tick_elapsed_ms(uint32_t start_tick, uint32_t end_tick)
+{
+    uint32_t delta = end_tick >= start_tick ? (end_tick - start_tick) : 0;
+    return (uint32_t)((delta * 1000u) / RT_TICK_PER_SECOND);
+}
+
+static int vb_runtime_touch_read_json(char *dst, rt_size_t cap)
+{
+    int used;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"active\":%d,\"count\":%lu,"
+                       "\"x\":%d,\"y\":%d,\"event\":\"%s\",\"gesture\":\"%s\","
+                       "\"dx\":%d,\"dy\":%d,\"duration_ms\":%lu,\"tick\":%lu}",
+                       VIBEBOARD_RUNTIME_TOUCH_API_VERSION,
+                       g_vb_runtime.touch.available,
+                       g_vb_runtime.touch.ready,
+                       g_vb_runtime.touch.active,
+                       (unsigned long)g_vb_runtime.touch.count,
+                       g_vb_runtime.touch.point.x,
+                       g_vb_runtime.touch.point.y,
+                       vb_runtime_touch_event_name(g_vb_runtime.touch.last_event),
+                       vb_runtime_touch_gesture_name(g_vb_runtime.touch.gesture_dir),
+                       g_vb_runtime.touch.delta.x,
+                       g_vb_runtime.touch.delta.y,
+                       (unsigned long)g_vb_runtime.touch.last_duration_ms,
+                       (unsigned long)g_vb_runtime.touch.last_tick);
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_TOUCH_API_VERSION);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_gpio_is_pressed(int level, int active_high)
+{
+    return active_high ? (level != 0) : (level == 0);
+}
+
+static int vb_runtime_gpio_refresh(void)
+{
+    int ready = 0;
+
+    g_vb_runtime.gpio.available = VB_RUNTIME_HAS_GPIO ? 1 : 0;
+    g_vb_runtime.gpio.ready = 0;
+    g_vb_runtime.gpio.key1_ok = 0;
+    g_vb_runtime.gpio.key2_ok = 0;
+    g_vb_runtime.gpio.key1_level = 0;
+    g_vb_runtime.gpio.key2_level = 0;
+    g_vb_runtime.gpio.key1_pressed = 0;
+    g_vb_runtime.gpio.key2_pressed = 0;
+
+#if VB_RUNTIME_HAS_GPIO
+    if (!g_vb_runtime.gpio.configured)
+    {
+#if defined(BSP_USING_KEY1) && defined(BSP_KEY1_PIN)
+        rt_pin_mode(BSP_KEY1_PIN, PIN_MODE_INPUT);
+#endif
+#if defined(BSP_USING_KEY2) && defined(BSP_KEY2_PIN)
+        rt_pin_mode(BSP_KEY2_PIN, PIN_MODE_INPUT);
+#endif
+        g_vb_runtime.gpio.configured = 1;
+    }
+#if defined(BSP_USING_KEY1) && defined(BSP_KEY1_PIN)
+    {
+        int level = rt_pin_read(BSP_KEY1_PIN);
+        g_vb_runtime.gpio.key1_ok = 1;
+        g_vb_runtime.gpio.key1_level = level ? 1 : 0;
+        g_vb_runtime.gpio.key1_pressed = vb_runtime_gpio_is_pressed(g_vb_runtime.gpio.key1_level,
+                                                                    VB_RUNTIME_GPIO_KEY1_ACTIVE_HIGH);
+        ready = 1;
+    }
+#endif
+#if defined(BSP_USING_KEY2) && defined(BSP_KEY2_PIN)
+    {
+        int level = rt_pin_read(BSP_KEY2_PIN);
+        g_vb_runtime.gpio.key2_ok = 1;
+        g_vb_runtime.gpio.key2_level = level ? 1 : 0;
+        g_vb_runtime.gpio.key2_pressed = vb_runtime_gpio_is_pressed(g_vb_runtime.gpio.key2_level,
+                                                                    VB_RUNTIME_GPIO_KEY2_ACTIVE_HIGH);
+        ready = 1;
+    }
+#endif
+    g_vb_runtime.gpio.ready = ready;
+    g_vb_runtime.gpio.read_count++;
+    return ready ? RT_EOK : -RT_ERROR;
+#else
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_gpio_read_json(char *dst, rt_size_t cap)
+{
+    int used;
+    int rc;
+    int count = 0;
+    int key1_pin = -1;
+    int key1_active_high = 0;
+    int key2_pin = -1;
+    int key2_active_high = 0;
+
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+
+#if defined(BSP_USING_KEY1) && defined(BSP_KEY1_PIN)
+    count++;
+    key1_pin = BSP_KEY1_PIN;
+    key1_active_high = VB_RUNTIME_GPIO_KEY1_ACTIVE_HIGH;
+#endif
+#if defined(BSP_USING_KEY2) && defined(BSP_KEY2_PIN)
+    count++;
+    key2_pin = BSP_KEY2_PIN;
+    key2_active_high = VB_RUNTIME_GPIO_KEY2_ACTIVE_HIGH;
+#endif
+
+    rc = vb_runtime_gpio_refresh();
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"count\":%d,\"inputs_only\":1,"
+                       "\"key1\":{\"ok\":%d,\"pin\":%d,\"active_high\":%d,\"level\":%d,\"pressed\":%d},"
+                       "\"key2\":{\"ok\":%d,\"pin\":%d,\"active_high\":%d,\"level\":%d,\"pressed\":%d}}",
+                       VIBEBOARD_RUNTIME_GPIO_API_VERSION,
+                       g_vb_runtime.gpio.available,
+                       g_vb_runtime.gpio.ready,
+                       count,
+                       g_vb_runtime.gpio.key1_ok,
+                       key1_pin,
+                       key1_active_high,
+                       g_vb_runtime.gpio.key1_level,
+                       g_vb_runtime.gpio.key1_pressed,
+                       g_vb_runtime.gpio.key2_ok,
+                       key2_pin,
+                       key2_active_high,
+                       g_vb_runtime.gpio.key2_level,
+                       g_vb_runtime.gpio.key2_pressed);
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"available\":%d,\"ready\":%d,\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_GPIO_API_VERSION,
+                    g_vb_runtime.gpio.available,
+                    g_vb_runtime.gpio.ready);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return g_vb_runtime.gpio.ready ? RT_EOK : rc;
+}
+
+static int vb_runtime_gpio_format_text(const char *selector, char *dst, rt_size_t cap)
+{
+    if (!selector || !dst || cap == 0) return 0;
+    vb_runtime_gpio_refresh();
+    if (rt_strcmp(selector, "key1") == 0)
+    {
+        rt_snprintf(dst, cap, g_vb_runtime.gpio.key1_ok ?
+                    (g_vb_runtime.gpio.key1_pressed ? "pressed" : "released") : "--");
+        return 1;
+    }
+    if (rt_strcmp(selector, "key1.level") == 0)
+    {
+        rt_snprintf(dst, cap, g_vb_runtime.gpio.key1_ok ? "%d" : "--",
+                    g_vb_runtime.gpio.key1_level);
+        return 1;
+    }
+    if (rt_strcmp(selector, "key2") == 0)
+    {
+        rt_snprintf(dst, cap, g_vb_runtime.gpio.key2_ok ?
+                    (g_vb_runtime.gpio.key2_pressed ? "pressed" : "released") : "--");
+        return 1;
+    }
+    if (rt_strcmp(selector, "key2.level") == 0)
+    {
+        rt_snprintf(dst, cap, g_vb_runtime.gpio.key2_ok ? "%d" : "--",
+                    g_vb_runtime.gpio.key2_level);
+        return 1;
+    }
+    return 0;
+}
+
+static int vb_runtime_capabilities_json(char *dst, rt_size_t cap)
+{
+    int fs;
+    int sensor_api;
+    int used;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    fs = vb_prepare_filesystem() == RT_EOK ? 1 : 0;
+#if defined(RT_USING_SENSOR)
+    sensor_api = 1;
+#else
+    sensor_api = 0;
+#endif
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"rt\":\"%s\",\"ble\":\"%s\",\"sens\":\"%s\",\"touch\":\"%s\","
+                       "\"flow\":\"%s\",\"voice\":\"%s\",\"pwr\":\"%s\",\"disp\":\"%s\",\"gpio\":\"%s\",\"rgb\":\"%s\",\"fs\":%d,"
+                       "\"ins\":{\"ser\":1,\"ble\":%d,\"max\":%d},"
+                       "\"app\":{\"lua\":\"%s\",\"comp\":%d},"
+                       "\"hw\":{\"disp\":%d,\"touch\":1,\"sens\":%d,\"voice\":%d,\"flow\":1,"
+                       "\"batt\":%d,\"chg\":%d,\"gpio\":%d,\"rgb\":%d}}",
+                       VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION,
+                       VIBEBOARD_RUNTIME_API_VERSION,
+                       VIBEBOARD_RUNTIME_BLE_API_VERSION,
+                       VIBEBOARD_RUNTIME_SENSOR_API_VERSION,
+                       VIBEBOARD_RUNTIME_TOUCH_API_VERSION,
+                       VIBEBOARD_RUNTIME_FLOW_API_VERSION,
+                       VIBEBOARD_RUNTIME_VOICE_API_VERSION,
+                       VIBEBOARD_RUNTIME_POWER_API_VERSION,
+                       VIBEBOARD_RUNTIME_DISPLAY_API_VERSION,
+                       VIBEBOARD_RUNTIME_GPIO_API_VERSION,
+                       VIBEBOARD_RUNTIME_RGB_API_VERSION,
+                       fs,
+                       VB_RUNTIME_HAS_BLE_INSTALL,
+                       VB_RUNTIME_INSTALL_MAX_CHUNK_BYTES,
+                       vibeboard_lua_runtime_available() ? vibeboard_lua_runtime_name() : "manifest-fallback",
+                       VB_MAX_COMPONENTS,
+                       VB_RUNTIME_HAS_DISPLAY,
+                       sensor_api,
+                       VB_RUNTIME_HAS_VOICE_CAPTURE,
+                       VB_RUNTIME_HAS_POWER_BATTERY,
+                       VB_RUNTIME_HAS_POWER_CHARGER,
+                       VB_RUNTIME_HAS_GPIO,
+                       VB_RUNTIME_HAS_RGB);
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_capabilities_status_command(void)
+{
+    char json[VB_BLE_STATUS_MAX];
+    int result = vb_runtime_capabilities_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
 #if VB_RUNTIME_HAS_BLE_INSTALL
 #ifndef SERIAL_UUID_16
 #define SERIAL_UUID_16(x) {((uint8_t)((x) & 0xff)), ((uint8_t)((x) >> 8))}
@@ -897,6 +2283,23 @@ BLE_GATT_SERVICE_DEFINE_128(vb_ble_install_att_db)
 };
 
 SIBLES_ADVERTISING_CONTEXT_DECLAR(g_vb_ble_install_adv_context);
+
+static uint8_t vb_ble_advertising_force_restart(void);
+
+static uint8_t vb_ble_adv_context_state(void)
+{
+    return g_vb_ble.adv_configured ? g_vb_ble_install_adv_context->state : 0xff;
+}
+
+static uint8_t vb_ble_adv_context_index(void)
+{
+    return g_vb_ble.adv_configured ? g_vb_ble_install_adv_context->adv_idx : 0xff;
+}
+
+static uint8_t vb_ble_adv_context_transist(void)
+{
+    return g_vb_ble.adv_configured ? g_vb_ble_install_adv_context->adv_transist : 0xff;
+}
 
 static void vb_ble_set_status(const char *fmt, ...)
 {
@@ -964,12 +2367,260 @@ static int vb_ble_execute_line(char *line)
     int argc = vb_ble_tokenize(line, argv, sizeof(argv) / sizeof(argv[0]));
 
     if (argc == 0) return RT_EOK;
+    if (rt_strcmp(argv[0], "capabilities") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_capabilities") == 0)
+    {
+        int result = vb_runtime_capabilities_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] capabilities rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "json_read") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_json_read") == 0) && argc >= 4)
+    {
+        uint32_t offset = (uint32_t)strtoul(argv[2], RT_NULL, 10);
+        uint32_t max_bytes = (uint32_t)strtoul(argv[3], RT_NULL, 10);
+        int result = vb_runtime_ble_json_read(argv[1], offset, max_bytes, g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] json_read rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
     if (rt_strcmp(argv[0], "status") == 0 || rt_strcmp(argv[0], "vb_runtime_status") == 0)
     {
         char active[VB_MAX_APP_ID];
         vb_read_active_app(active, sizeof(active));
-        vb_ble_set_status("ok status api=%s active=%s", VIBEBOARD_RUNTIME_BLE_API_VERSION,
-                          active[0] ? active : "(unknown)");
+        vb_ble_set_status("ok status api=%s active=%s flow=%lu", VIBEBOARD_RUNTIME_BLE_API_VERSION,
+                          active[0] ? active : "(unknown)",
+                          (unsigned long)g_vb_flow.total_count);
+        return RT_EOK;
+    }
+    if (rt_strcmp(argv[0], "ble_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_ble_status") == 0)
+    {
+        vb_ble_set_status("ok ble api=%s init=%d power=%d service=%d adv=%d conn=%d mtu=%d state=%d idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu",
+                          VIBEBOARD_RUNTIME_BLE_API_VERSION,
+                          g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready,
+                          g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.mtu,
+                          (int)vb_ble_adv_context_state(),
+                          (int)vb_ble_adv_context_index(),
+                          (int)vb_ble_adv_context_transist(),
+                          (int)g_vb_ble.last_adv_start_rc,
+                          (int)g_vb_ble.last_adv_stop_rc,
+                          (int)g_vb_ble.last_adv_stop_reason,
+                          (unsigned long)g_vb_ble.adv_start_events,
+                          (unsigned long)g_vb_ble.adv_stop_events,
+                          (unsigned long)g_vb_ble.adv_restart_requests);
+        return RT_EOK;
+    }
+    if (rt_strcmp(argv[0], "ble_restart") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_ble_restart") == 0)
+    {
+        uint8_t result = vb_ble_advertising_force_restart();
+        return result == SIBLES_ADV_NO_ERR ? RT_EOK : -RT_ERROR;
+    }
+    if (rt_strcmp(argv[0], "app") == 0 ||
+        rt_strcmp(argv[0], "app_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_app") == 0)
+    {
+        int result = vb_runtime_app_status_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] app rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "apps") == 0 ||
+        rt_strcmp(argv[0], "app_list") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_apps") == 0)
+    {
+        int result = vb_runtime_app_list_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] apps rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "apps_page") == 0 ||
+         rt_strcmp(argv[0], "app_page") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_apps_page") == 0))
+    {
+        int offset = argc >= 2 ? (int)strtol(argv[1], RT_NULL, 10) : 0;
+        int limit = argc >= 3 ? (int)strtol(argv[2], RT_NULL, 10) : VB_LAUNCHER_MAX_ITEMS;
+        int result = vb_runtime_app_list_page_json(g_vb_ble.status, sizeof(g_vb_ble.status), offset, limit);
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] apps_page rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "launch") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_launch") == 0) && argc >= 2)
+    {
+        int result = vb_runtime_app_launch(argv[1]);
+        vb_ble_set_status("%s launch app=%s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], result);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "stop") == 0 || rt_strcmp(argv[0], "vb_runtime_stop") == 0)
+    {
+        int result = vb_runtime_app_stop();
+        vb_ble_set_status("%s stop rc=%d", result == RT_EOK ? "ok" : "err", result);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "delete") == 0 ||
+         rt_strcmp(argv[0], "app_delete") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_delete") == 0) && argc >= 2)
+    {
+        int result = vb_runtime_app_delete(argv[1]);
+        vb_ble_set_status("%s delete app=%s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], result);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "power") == 0 ||
+        rt_strcmp(argv[0], "battery") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_power") == 0)
+    {
+        int result = vb_runtime_power_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] power rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "display") == 0 || rt_strcmp(argv[0], "display_status") == 0 ||
+        rt_strcmp(argv[0], "screen") == 0 || rt_strcmp(argv[0], "vb_runtime_display") == 0)
+    {
+        int result;
+        if (argc >= 2) result = vb_runtime_display_set_brightness_text(argv[1], g_vb_ble.status, sizeof(g_vb_ble.status));
+        else result = vb_runtime_display_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] display rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "display_brightness") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_display_brightness") == 0) && argc >= 2)
+    {
+        int result = vb_runtime_display_set_brightness_text(argv[1], g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] display_brightness rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "gpio") == 0 ||
+        rt_strcmp(argv[0], "gpio_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_gpio") == 0)
+    {
+        int result = vb_runtime_gpio_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] gpio rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "touch") == 0 ||
+        rt_strcmp(argv[0], "touch_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_touch") == 0)
+    {
+        int result = vb_runtime_touch_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] touch rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "rgb") == 0 || rt_strcmp(argv[0], "rgb_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_rgb") == 0)
+    {
+        int result;
+        if (argc >= 2) result = vb_runtime_rgb_set_text(argv[1], g_vb_ble.status, sizeof(g_vb_ble.status));
+        else result = vb_runtime_rgb_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] rgb rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "rgb_set") == 0 || rt_strcmp(argv[0], "vb_runtime_rgb_set") == 0) && argc >= 2)
+    {
+        int result = vb_runtime_rgb_set_text(argv[1], g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] rgb_set rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "flow_send") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_flow_send") == 0) && argc >= 4)
+    {
+        uint32_t sequence = (uint32_t)strtoul(argv[2], RT_NULL, 10);
+        int result = vb_runtime_flow_send_hex(argv[1], sequence, argv[3]);
+        vb_ble_set_status("%s flow_send channel=%s seq=%lu bytes=%d total=%lu",
+                          result >= 0 ? "ok" : "err",
+                          argv[1],
+                          (unsigned long)sequence,
+                          result >= 0 ? result : 0,
+                          (unsigned long)g_vb_flow.total_count);
+        return result >= 0 ? RT_EOK : result;
+    }
+    if (rt_strcmp(argv[0], "flow_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_flow_status") == 0)
+    {
+        int index = vb_runtime_flow_latest_index();
+        if (index >= 0)
+        {
+            vb_info_flow_item_t *item = &g_vb_flow.items[index];
+            vb_ble_set_status("ok flow api=%s total=%lu retained=%d seq=%lu channel=%s bytes=%lu",
+                              VIBEBOARD_RUNTIME_FLOW_API_VERSION,
+                              (unsigned long)g_vb_flow.total_count,
+                              g_vb_flow.count,
+                              (unsigned long)item->sequence,
+                              item->channel,
+                              (unsigned long)item->bytes);
+        }
+        else
+        {
+            vb_ble_set_status("ok flow api=%s total=0 retained=0",
+                              VIBEBOARD_RUNTIME_FLOW_API_VERSION);
+        }
+        return RT_EOK;
+    }
+    if (rt_strcmp(argv[0], "flow_clear") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_flow_clear") == 0)
+    {
+        vb_runtime_flow_clear_state();
+        vb_ble_set_status("ok flow_clear total=0");
+        return RT_EOK;
+    }
+    if (rt_strcmp(argv[0], "voice") == 0 ||
+        rt_strcmp(argv[0], "audio") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_voice") == 0)
+    {
+        int result = vb_runtime_voice_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] voice rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "voice_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_voice_status") == 0)
+    {
+        return vb_runtime_voice_status(g_vb_ble.status, sizeof(g_vb_ble.status));
+    }
+    if ((rt_strcmp(argv[0], "voice_start") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_voice_start") == 0))
+    {
+        uint32_t duration_ms = argc >= 2 ? (uint32_t)strtoul(argv[1], RT_NULL, 10) : VB_VOICE_DEFAULT_MS;
+        int result = vb_runtime_voice_start(duration_ms);
+        vb_ble_set_status("%s voice_start seq=%lu bytes=%lu ms=%lu rc=%d built=%d",
+                          result == RT_EOK ? "ok" : "err",
+                          (unsigned long)g_vb_voice.sequence,
+                          (unsigned long)g_vb_voice.recorded_bytes,
+                          (unsigned long)g_vb_voice.requested_ms,
+                          result,
+                          VB_RUNTIME_HAS_VOICE_CAPTURE);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "voice_read") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_voice_read") == 0)
+    {
+        uint32_t offset = argc >= 2 ? (uint32_t)strtoul(argv[1], RT_NULL, 10) : 0;
+        uint32_t max_bytes = argc >= 3 ? (uint32_t)strtoul(argv[2], RT_NULL, 10) : VB_VOICE_CHUNK_BYTES;
+        int result = vb_runtime_voice_read_hex(offset, max_bytes, g_vb_ble.status, sizeof(g_vb_ble.status));
+        if (result != RT_EOK)
+        {
+            vb_ble_set_status("err voice_read offset=%lu rc=%d ready=%d bytes=%lu",
+                              (unsigned long)offset,
+                              result,
+                              g_vb_voice.ready,
+                              (unsigned long)g_vb_voice.recorded_bytes);
+        }
+        return result;
+    }
+    if (rt_strcmp(argv[0], "voice_clear") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_voice_clear") == 0)
+    {
+        vb_runtime_voice_clear();
+        vb_ble_set_status("ok voice_clear");
         return RT_EOK;
     }
     if (rt_strcmp(argv[0], "sensors") == 0 || rt_strcmp(argv[0], "vb_runtime_sensors") == 0)
@@ -982,19 +2633,46 @@ static int vb_ble_execute_line(char *line)
     if (rt_strcmp(argv[0], "vb_runtime_install_begin") == 0 && argc >= 2)
     {
         int result = vb_runtime_install_begin_app(argv[1]);
-        vb_ble_set_status("%s install_begin %s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], result);
+        vb_ble_set_status("%s install_begin app=%s rc=%d",
+                          result == RT_EOK ? "ok" : "err",
+                          argv[1],
+                          result);
         return result;
     }
     if (rt_strcmp(argv[0], "vb_runtime_install_file") == 0 && argc >= 5)
     {
         int result = vb_runtime_install_file_chunk(argv[1], argv[2], argv[3], argv[4]);
-        vb_ble_set_status("%s install_file %s/%s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], argv[2], result);
+        vb_ble_set_status("%s install_file app=%s path=%s offset=%s rc=%d",
+                          result == RT_EOK ? "ok" : "err",
+                          argv[1],
+                          argv[2],
+                          argv[3],
+                          result);
+        return result;
+    }
+    if (rt_strcmp(argv[0], "vb_runtime_install_abort") == 0 && argc >= 2)
+    {
+        int result = vb_runtime_install_abort_app(argv[1]);
+        vb_ble_set_status("%s install_abort app=%s rc=%d",
+                          result == RT_EOK ? "ok" : "err",
+                          argv[1],
+                          result);
         return result;
     }
     if (rt_strcmp(argv[0], "vb_runtime_install_end") == 0 && argc >= 2)
     {
         int result = vb_runtime_install_end_app(argv[1]);
-        vb_ble_set_status("%s install_end %s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], result);
+        if (result == RT_EOK)
+        {
+            vb_ble_set_status("ok install_end app=%s active=%s rc=%d",
+                              argv[1],
+                              argv[1],
+                              result);
+        }
+        else
+        {
+            vb_ble_set_status("err install_end app=%s rc=%d", argv[1], result);
+        }
         return result;
     }
     if (rt_strcmp(argv[0], "vb_runtime_select") == 0 && argc >= 2)
@@ -1073,17 +2751,27 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
     case SIBLES_ADV_EVT_ADV_STARTED:
     {
         sibles_adv_evt_startted_t *evt = (sibles_adv_evt_startted_t *)data;
-        g_vb_ble.advertising = evt && evt->status == 0;
-        vb_ble_set_status("adv started name=%s status=%d mode=%d",
-                          VIBEBOARD_BLE_NAME, evt ? evt->status : -1, evt ? evt->adv_mode : -1);
+        uint8_t status = evt ? evt->status : 0xff;
+        g_vb_ble.last_adv_start_rc = status;
+        g_vb_ble.adv_start_events++;
+        g_vb_ble.advertising = status == 0;
+        vb_ble_set_status("adv started name=%s status=%u mode=%d state=%u events=%lu",
+                          VIBEBOARD_BLE_NAME, (unsigned)status, evt ? evt->adv_mode : -1,
+                          (unsigned)vb_ble_adv_context_state(),
+                          (unsigned long)g_vb_ble.adv_start_events);
         break;
     }
     case SIBLES_ADV_EVT_ADV_STOPPED:
     {
         sibles_adv_evt_stopped_t *evt = (sibles_adv_evt_stopped_t *)data;
+        uint8_t reason = evt ? evt->reason : 0xff;
+        g_vb_ble.last_adv_stop_reason = reason;
+        g_vb_ble.adv_stop_events++;
         g_vb_ble.advertising = 0;
-        vb_ble_set_status("adv stopped reason=%d mode=%d",
-                          evt ? evt->reason : -1, evt ? evt->adv_mode : -1);
+        vb_ble_set_status("adv stopped reason=%u mode=%d state=%u events=%lu",
+                          (unsigned)reason, evt ? evt->adv_mode : -1,
+                          (unsigned)vb_ble_adv_context_state(),
+                          (unsigned long)g_vb_ble.adv_stop_events);
         break;
     }
     default:
@@ -1113,10 +2801,10 @@ static void vb_ble_service_init(void)
     }
 }
 
-static void vb_ble_advertising_start(void)
+static uint8_t vb_ble_advertising_start(void)
 {
     sibles_advertising_para_t para = {0};
-    uint8_t ret;
+    uint8_t ret = 1;
     uint8_t manu_data[] = {'V', 'B', 'R', 'T', 1};
     ble_gap_dev_name_t *dev_name;
 
@@ -1127,6 +2815,37 @@ static void vb_ble_advertising_start(void)
         rt_memcpy(dev_name->name, VIBEBOARD_BLE_NAME, dev_name->len);
         ble_gap_set_dev_name(dev_name);
         rt_free(dev_name);
+    }
+
+    if (g_vb_ble.adv_configured)
+    {
+        if (g_vb_ble.connected)
+        {
+            ret = SIBLES_ADV_NOT_ALLOWED;
+            g_vb_ble.last_adv_start_rc = ret;
+            vb_ble_set_status("adv start blocked connected=1 state=%u",
+                              (unsigned)vb_ble_adv_context_state());
+            return ret;
+        }
+        if (g_vb_ble.advertising)
+        {
+            ret = SIBLES_ADV_NO_ERR;
+            g_vb_ble.last_adv_start_rc = ret;
+            vb_ble_set_status("adv already started name=%s state=%u idx=%u trans=%u",
+                              VIBEBOARD_BLE_NAME,
+                              (unsigned)vb_ble_adv_context_state(),
+                              (unsigned)vb_ble_adv_context_index(),
+                              (unsigned)vb_ble_adv_context_transist());
+            return ret;
+        }
+        ret = sibles_advertising_start(g_vb_ble_install_adv_context);
+        g_vb_ble.last_adv_start_rc = ret;
+        vb_ble_set_status("adv restart requested name=%s rc=%u state=%u idx=%u trans=%u",
+                          VIBEBOARD_BLE_NAME, (unsigned)ret,
+                          (unsigned)vb_ble_adv_context_state(),
+                          (unsigned)vb_ble_adv_context_index(),
+                          (unsigned)vb_ble_adv_context_transist());
+        return ret;
     }
 
     para.own_addr_type = GAPM_STATIC_ADDR;
@@ -1162,8 +2881,14 @@ static void vb_ble_advertising_start(void)
     ret = sibles_advertising_init(g_vb_ble_install_adv_context, &para);
     if (ret == SIBLES_ADV_NO_ERR)
     {
+        g_vb_ble.adv_configured = 1;
         ret = sibles_advertising_start(g_vb_ble_install_adv_context);
-        vb_ble_set_status("adv start requested name=%s rc=%d", VIBEBOARD_BLE_NAME, ret);
+        g_vb_ble.last_adv_start_rc = ret;
+        vb_ble_set_status("adv start requested name=%s rc=%u state=%u idx=%u trans=%u",
+                          VIBEBOARD_BLE_NAME, (unsigned)ret,
+                          (unsigned)vb_ble_adv_context_state(),
+                          (unsigned)vb_ble_adv_context_index(),
+                          (unsigned)vb_ble_adv_context_transist());
     }
     else
     {
@@ -1174,11 +2899,75 @@ cleanup:
     if (para.adv_data.completed_uuid) rt_free(para.adv_data.completed_uuid);
     if (para.rsp_data.completed_name) rt_free(para.rsp_data.completed_name);
     if (para.adv_data.manufacturer_data) rt_free(para.adv_data.manufacturer_data);
+    g_vb_ble.last_adv_start_rc = ret;
+    return ret;
+}
+
+static uint8_t vb_ble_advertising_force_restart(void)
+{
+    uint8_t stop_rc = SIBLES_ADV_NOT_ALLOWED;
+    uint8_t start_rc;
+    uint32_t stop_events;
+    int attempt;
+
+    g_vb_ble.adv_restart_requests++;
+    if (!g_vb_ble.power_on || !g_vb_ble.service_ready)
+    {
+        start_rc = SIBLES_ADV_NOT_ALLOWED;
+        g_vb_ble.last_adv_start_rc = start_rc;
+        vb_ble_set_status("ble_restart blocked power=%d service=%d rc=%u req=%lu",
+                          g_vb_ble.power_on, g_vb_ble.service_ready,
+                          (unsigned)start_rc,
+                          (unsigned long)g_vb_ble.adv_restart_requests);
+        return start_rc;
+    }
+    if (g_vb_ble.connected)
+    {
+        start_rc = SIBLES_ADV_NOT_ALLOWED;
+        g_vb_ble.last_adv_start_rc = start_rc;
+        vb_ble_set_status("ble_restart blocked connected=1 rc=%u req=%lu",
+                          (unsigned)start_rc,
+                          (unsigned long)g_vb_ble.adv_restart_requests);
+        return start_rc;
+    }
+
+    stop_events = g_vb_ble.adv_stop_events;
+    if (g_vb_ble.adv_configured)
+    {
+        stop_rc = sibles_advertising_stop(g_vb_ble_install_adv_context);
+        g_vb_ble.last_adv_stop_rc = stop_rc;
+        if (stop_rc == SIBLES_ADV_NO_ERR)
+        {
+            for (attempt = 0; attempt < VB_BLE_ADV_FORCE_RESTART_ATTEMPTS; attempt++)
+            {
+                if (g_vb_ble.adv_stop_events != stop_events)
+                {
+                    break;
+                }
+                rt_thread_mdelay(VB_BLE_ADV_FORCE_RESTART_DELAY_MS);
+            }
+        }
+    }
+
+    g_vb_ble.advertising = 0;
+    start_rc = vb_ble_advertising_start();
+    g_vb_ble.last_adv_start_rc = start_rc;
+    vb_ble_set_status("ble_restart stop_rc=%u start_rc=%u adv=%d state=%u idx=%u trans=%u starts=%lu stops=%lu req=%lu",
+                      (unsigned)stop_rc, (unsigned)start_rc, g_vb_ble.advertising,
+                      (unsigned)vb_ble_adv_context_state(),
+                      (unsigned)vb_ble_adv_context_index(),
+                      (unsigned)vb_ble_adv_context_transist(),
+                      (unsigned long)g_vb_ble.adv_start_events,
+                      (unsigned long)g_vb_ble.adv_stop_events,
+                      (unsigned long)g_vb_ble.adv_restart_requests);
+    return start_rc;
 }
 
 static void vb_ble_worker_entry(void *parameter)
 {
     uint32_t value;
+    int attempt;
+    uint8_t ret;
     (void)parameter;
     while (1)
     {
@@ -1193,6 +2982,25 @@ static void vb_ble_worker_entry(void *parameter)
             g_vb_ble.mtu = 23;
             vb_ble_service_init();
             vb_ble_advertising_start();
+        }
+        else if (value == VB_BLE_EVT_RESTART_ADV)
+        {
+            g_vb_ble.adv_restart_requests++;
+            rt_thread_mdelay(VB_BLE_ADV_RESTART_DELAY_MS);
+            for (attempt = 0; attempt < VB_BLE_ADV_RESTART_ATTEMPTS; attempt++)
+            {
+                if (!g_vb_ble.power_on || !g_vb_ble.service_ready || g_vb_ble.connected)
+                {
+                    break;
+                }
+                rt_kprintf("[vb_runtime][ble] restart advertising after disconnect attempt=%d\n", attempt + 1);
+                ret = vb_ble_advertising_start();
+                if (ret == SIBLES_ADV_NO_ERR)
+                {
+                    break;
+                }
+                rt_thread_mdelay(VB_BLE_ADV_RESTART_INTERVAL_MS);
+            }
         }
     }
 }
@@ -1265,6 +3073,10 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
         g_vb_ble.conn_idx = INVALID_CONN_IDX;
         g_vb_ble.rx_len = 0;
         vb_ble_set_status("disconnected reason=%d", ind ? ind->reason : -1);
+        if (g_vb_ble.mailbox)
+        {
+            rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
+        }
         break;
     }
     case SIBLES_MTU_EXCHANGE_IND:
@@ -1903,55 +3715,6 @@ static int vb_pan_forget(void)
     return -RT_ENOSYS;
 #endif
 }
-#else
-static int vb_pan_init(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_connect_now(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_open_now(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_scan_now(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_probe_now(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_inquiry_now(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_connect_addr_now(const char *addr_text)
-{
-    (void)addr_text;
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
-
-static int vb_pan_forget(void)
-{
-    rt_kprintf("[vb_runtime][pan] unavailable: not built\n");
-    return -RT_ENOSYS;
-}
 #endif
 
 static int vb_path_is_dir(const char *path)
@@ -2001,6 +3764,135 @@ static void vb_build_install_dir(char *dst, rt_size_t cap, const char *prefix, c
     dst[cap - 1] = '\0';
 }
 
+static void vb_runtime_install_clear_session(void)
+{
+    g_vb_runtime.install_app[0] = '\0';
+}
+
+static int vb_runtime_recover_install_state(void)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int result = RT_EOK;
+    int staging_prefix_len = rt_strlen(VIBEBOARD_STAGING_PREFIX);
+    int backup_prefix_len = rt_strlen(VIBEBOARD_BACKUP_PREFIX);
+
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+
+    dir = opendir(VIBEBOARD_APP_ROOT);
+    if (!dir)
+    {
+        rt_kprintf("[vb_runtime] install recovery failed: open %s\n", VIBEBOARD_APP_ROOT);
+        return -RT_ERROR;
+    }
+
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        const char *name = entry->d_name;
+        char path[VB_MAX_PATH];
+
+        if (!name || rt_strcmp(name, ".") == 0 || rt_strcmp(name, "..") == 0) continue;
+        rt_snprintf(path, sizeof(path), "%s/%s", VIBEBOARD_APP_ROOT, name);
+        path[sizeof(path) - 1] = '\0';
+
+        if (rt_strncmp(name, VIBEBOARD_STAGING_PREFIX, staging_prefix_len) == 0)
+        {
+            if (vb_remove_tree(path) != RT_EOK)
+            {
+                rt_kprintf("[vb_runtime] install recovery failed: remove staging %s\n", path);
+                result = -RT_ERROR;
+            }
+            else
+            {
+                rt_kprintf("[vb_runtime] removed stale staging: %s\n", name);
+            }
+            continue;
+        }
+
+        if (rt_strncmp(name, VIBEBOARD_BACKUP_PREFIX, backup_prefix_len) == 0)
+        {
+            const char *app_id = name + backup_prefix_len;
+            char app_path[VB_MAX_PATH];
+
+            if (!vb_is_safe_app_id(app_id))
+            {
+                if (vb_remove_tree(path) != RT_EOK)
+                {
+                    rt_kprintf("[vb_runtime] install recovery failed: remove backup %s\n", path);
+                    result = -RT_ERROR;
+                }
+                continue;
+            }
+
+            rt_snprintf(app_path, sizeof(app_path), "%s/%s", VIBEBOARD_APP_ROOT, app_id);
+            app_path[sizeof(app_path) - 1] = '\0';
+            if (access(app_path, 0) == 0)
+            {
+                if (vb_remove_tree(path) != RT_EOK)
+                {
+                    rt_kprintf("[vb_runtime] install recovery failed: clean backup %s\n", path);
+                    result = -RT_ERROR;
+                }
+                else
+                {
+                    rt_kprintf("[vb_runtime] removed completed backup: %s\n", name);
+                }
+            }
+            else if (rename(path, app_path) != 0)
+            {
+                rt_kprintf("[vb_runtime] install recovery failed: restore %s -> %s\n", path, app_path);
+                result = -RT_ERROR;
+            }
+            else
+            {
+                rt_kprintf("[vb_runtime] restored backup app: %s\n", app_id);
+            }
+        }
+    }
+
+    closedir(dir);
+    return result;
+}
+
+static int vb_runtime_install_abort_app(const char *app_id)
+{
+    const char *target_app = app_id;
+    char staging_dir[VB_MAX_PATH];
+    int result = RT_EOK;
+
+    if (target_app && target_app[0] && !vb_is_safe_app_id(target_app))
+    {
+        rt_kprintf("usage: vb_runtime_install_abort <app_id>\n");
+        return -RT_EINVAL;
+    }
+    if ((!target_app || !target_app[0]) && g_vb_runtime.install_app[0])
+    {
+        target_app = g_vb_runtime.install_app;
+    }
+    if (!target_app || !target_app[0]) return RT_EOK;
+    if (g_vb_runtime.install_app[0] && rt_strcmp(g_vb_runtime.install_app, target_app) != 0)
+    {
+        rt_kprintf("[vb_runtime] install abort failed: session=%s app=%s\n",
+                   g_vb_runtime.install_app, target_app);
+        return -RT_EBUSY;
+    }
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+
+    vb_runtime_install_close_file();
+    vb_build_install_dir(staging_dir, sizeof(staging_dir), VIBEBOARD_STAGING_PREFIX, target_app);
+    if (access(staging_dir, 0) == 0 && vb_remove_tree(staging_dir) != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime] install abort failed: clean staging %s\n", staging_dir);
+        result = -RT_ERROR;
+    }
+    if (g_vb_runtime.install_app[0] && rt_strcmp(g_vb_runtime.install_app, target_app) == 0)
+    {
+        vb_runtime_install_clear_session();
+    }
+    rt_kprintf("[vb_runtime] install abort: %s rc=%d\n", target_app, result);
+    return result;
+}
+
 static void vb_read_active_app(char *dst, rt_size_t cap)
 {
     char text[VB_MAX_APP_ID + 4];
@@ -2028,6 +3920,522 @@ static int vb_write_active_app(const char *app_id)
     return vb_write_text_file(VIBEBOARD_ACTIVE_APP_FILE, text);
 }
 
+static void vb_runtime_set_app_result(int status, const char *message)
+{
+    g_vb_runtime.app_last_status = status;
+    vb_safe_copy(g_vb_runtime.app_last_error, sizeof(g_vb_runtime.app_last_error), message ? message : "");
+}
+
+static const char *vb_runtime_app_state_name(void)
+{
+    if (g_vb_runtime.app_failed) return "failed";
+    if (g_vb_runtime.app_running) return "running";
+    return "idle";
+}
+
+static int vb_json_appendf(char *dst, rt_size_t cap, int *used, const char *fmt, ...)
+{
+    char temp[256];
+    va_list ap;
+    int written;
+    if (!dst || !used || *used < 0 || (rt_size_t)*used >= cap) return -RT_EINVAL;
+    va_start(ap, fmt);
+    written = rt_vsnprintf(temp, sizeof(temp), fmt, ap);
+    va_end(ap);
+    if (written < 0 || written >= (int)sizeof(temp)) return -RT_ERROR;
+    if ((rt_size_t)(*used + written) >= cap) return -RT_ERROR;
+    memcpy(dst + *used, temp, written);
+    *used += written;
+    dst[*used] = '\0';
+    return RT_EOK;
+}
+
+static int vb_json_append_string(char *dst, rt_size_t cap, int *used, const char *src, rt_size_t max_chars)
+{
+    rt_size_t needed = 2;
+    rt_size_t index = 0;
+    if (!dst || !used || *used < 0 || (rt_size_t)*used >= cap) return -RT_EINVAL;
+    if (!src) src = "";
+    while (src[index] && (!max_chars || index < max_chars))
+    {
+        char c = src[index++];
+        needed += (c == '"' || c == '\\') ? 2 : 1;
+    }
+    if ((rt_size_t)(*used) + needed >= cap) return -RT_ERROR;
+    dst[(*used)++] = '"';
+    index = 0;
+    while (src[index] && (!max_chars || index < max_chars))
+    {
+        char c = src[index++];
+        if (c == '"' || c == '\\')
+        {
+            dst[(*used)++] = '\\';
+            dst[(*used)++] = c;
+        }
+        else if (c == '\r' || c == '\n' || c == '\t')
+        {
+            dst[(*used)++] = ' ';
+        }
+        else
+        {
+            dst[(*used)++] = c;
+        }
+    }
+    dst[(*used)++] = '"';
+    dst[*used] = '\0';
+    return RT_EOK;
+}
+
+static void vb_app_info_copy_value(const char *text, const char *key, char *dst, rt_size_t cap, const char *fallback)
+{
+    const char *line;
+    rt_size_t key_len;
+    vb_safe_copy(dst, cap, fallback ? fallback : "");
+    if (!text || !key || !dst || cap == 0) return;
+    key_len = rt_strlen(key);
+    line = text;
+    while (*line)
+    {
+        const char *next = strchr(line, '\n');
+        const char *p = line;
+        const char *value;
+        const char *end = next ? next : line + rt_strlen(line);
+        char local[VB_MAX_TEXT];
+        rt_size_t len;
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) p++;
+        if ((rt_size_t)(end - p) > key_len && strncmp(p, key, key_len) == 0)
+        {
+            p += key_len;
+            while (p < end && (*p == ' ' || *p == '\t')) p++;
+            if (p < end && *p == '=')
+            {
+                p++;
+                while (p < end && (*p == ' ' || *p == '\t')) p++;
+                value = p;
+                while (end > value && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) end--;
+                len = (rt_size_t)(end - value);
+                if (len >= sizeof(local)) len = sizeof(local) - 1;
+                memcpy(local, value, len);
+                local[len] = '\0';
+                vb_safe_copy(dst, cap, local);
+                return;
+            }
+        }
+        if (!next) break;
+        line = next + 1;
+    }
+}
+
+static int vb_runtime_read_app_summary(const char *app_id, vb_app_summary_t *summary)
+{
+    char path[VB_MAX_PATH];
+    char *json;
+    char info[512];
+    if (!summary) return -RT_EINVAL;
+    rt_memset(summary, 0, sizeof(*summary));
+    if (!vb_is_safe_app_id(app_id)) return -RT_EINVAL;
+    vb_safe_copy(summary->id, sizeof(summary->id), app_id);
+    vb_safe_copy(summary->name, sizeof(summary->name), app_id);
+    vb_safe_copy(summary->description, sizeof(summary->description), "Runtime app package");
+
+    vb_build_app_path(path, sizeof(path), app_id, "main.lua");
+    summary->main_lua = vb_file_exists(path);
+
+    vb_build_app_path(path, sizeof(path), app_id, "manifest.json");
+    json = (char *)rt_malloc(VB_MAX_MANIFEST);
+    if (json)
+    {
+        if (vb_read_text_file(path, json, VB_MAX_MANIFEST) > 0)
+        {
+            summary->manifest = 1;
+            vb_json_copy_string(json, RT_NULL, "name", summary->name, sizeof(summary->name), app_id);
+            vb_json_copy_string(json, RT_NULL, "description", summary->description, sizeof(summary->description), summary->description);
+        }
+        rt_free(json);
+    }
+
+    vb_build_app_path(path, sizeof(path), app_id, "app.info");
+    if (vb_read_text_file(path, info, sizeof(info)) > 0)
+    {
+        summary->app_info = 1;
+        if (!summary->manifest)
+        {
+            vb_app_info_copy_value(info, "name", summary->name, sizeof(summary->name), app_id);
+            vb_app_info_copy_value(info, "description", summary->description, sizeof(summary->description), summary->description);
+        }
+    }
+
+    summary->compatible = summary->main_lua && (summary->manifest || summary->app_info);
+    return summary->compatible ? RT_EOK : -RT_ERROR;
+}
+
+static int vb_runtime_app_dir_summary(const char *name, const char *active, vb_app_summary_t *summary)
+{
+    char path[VB_MAX_PATH];
+    if (!vb_is_safe_app_id(name)) return -RT_EINVAL;
+    rt_snprintf(path, sizeof(path), "%s/%s", VIBEBOARD_APP_ROOT, name);
+    path[sizeof(path) - 1] = '\0';
+    if (!vb_path_is_dir(path)) return -RT_ERROR;
+    (void)vb_runtime_read_app_summary(name, summary);
+    if (summary) summary->active = active && rt_strcmp(name, active) == 0;
+    return RT_EOK;
+}
+
+static int vb_runtime_app_exists(const char *app_id, vb_app_summary_t *summary)
+{
+    char active[VB_MAX_APP_ID];
+    vb_read_active_app(active, sizeof(active));
+    return vb_runtime_app_dir_summary(app_id, active, summary);
+}
+
+static void vb_runtime_sort_apps(vb_app_summary_t *items, int count)
+{
+    int i;
+    if (!items || count <= 1) return;
+    for (i = 1; i < count; i++)
+    {
+        vb_app_summary_t current = items[i];
+        int j = i - 1;
+        while (j >= 0 && rt_strcmp(items[j].id, current.id) > 0)
+        {
+            items[j + 1] = items[j];
+            j--;
+        }
+        items[j + 1] = current;
+    }
+}
+
+static int vb_runtime_grow_app_list(vb_app_summary_t **items, int *cap, int used, int needed)
+{
+    vb_app_summary_t *next;
+    int new_cap;
+    if (!items || !cap || used < 0) return -RT_EINVAL;
+    if (*cap >= needed) return RT_EOK;
+    new_cap = *cap > 0 ? *cap * 2 : VB_LAUNCHER_MAX_ITEMS;
+    while (new_cap < needed) new_cap *= 2;
+    next = (vb_app_summary_t *)rt_malloc(sizeof(vb_app_summary_t) * new_cap);
+    if (!next) return -RT_ENOMEM;
+    if (*items && used > 0)
+    {
+        rt_memcpy(next, *items, sizeof(vb_app_summary_t) * used);
+        rt_free(*items);
+    }
+    *items = next;
+    *cap = new_cap;
+    return RT_EOK;
+}
+
+static int vb_runtime_load_apps(vb_app_summary_t **items, int *total)
+{
+    DIR *dir;
+    struct dirent *entry;
+    char active[VB_MAX_APP_ID];
+    int count = 0;
+    int cap = 0;
+    int result = RT_EOK;
+    if (!items || !total) return -RT_EINVAL;
+    *items = RT_NULL;
+    *total = 0;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    vb_read_active_app(active, sizeof(active));
+    dir = opendir(VIBEBOARD_APP_ROOT);
+    if (!dir) return -RT_ERROR;
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        vb_app_summary_t summary;
+        if (!entry->d_name || entry->d_name[0] == '.') continue;
+        if (vb_runtime_app_dir_summary(entry->d_name, active, &summary) != RT_EOK) continue;
+        result = vb_runtime_grow_app_list(items, &cap, count, count + 1);
+        if (result != RT_EOK)
+        {
+            break;
+        }
+        (*items)[count] = summary;
+        count++;
+    }
+    closedir(dir);
+    if (result != RT_EOK)
+    {
+        if (*items) rt_free(*items);
+        *items = RT_NULL;
+        return result;
+    }
+    vb_runtime_sort_apps(*items, count);
+    *total = count;
+    return RT_EOK;
+}
+
+static int vb_runtime_collect_apps(vb_app_summary_t *items, int cap, int offset, int *total)
+{
+    vb_app_summary_t *all = RT_NULL;
+    int count = 0;
+    int included = 0;
+    int i;
+    int result;
+    if (total) *total = 0;
+    if (offset < 0) offset = 0;
+    result = vb_runtime_load_apps(&all, &count);
+    if (result != RT_EOK) return result;
+    if (total) *total = count;
+    if (items && cap > 0)
+    {
+        for (i = offset; i < count && included < cap; i++)
+        {
+            items[included++] = all[i];
+        }
+    }
+    if (all) rt_free(all);
+    return included;
+}
+
+static int vb_runtime_app_status_json(char *dst, rt_size_t cap)
+{
+    char active[VB_MAX_APP_ID];
+    int used = 0;
+    int result = RT_EOK;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    vb_read_active_app(active, sizeof(active));
+    result |= vb_json_appendf(dst, cap, &used, "{\"api\":");
+    result |= vb_json_append_string(dst, cap, &used, VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"active\":");
+    result |= vb_json_append_string(dst, cap, &used, active, 0);
+    result |= vb_json_appendf(dst, cap, &used,
+                              ",\"state\":");
+    result |= vb_json_append_string(dst, cap, &used, vb_runtime_app_state_name(), 0);
+    result |= vb_json_appendf(dst, cap, &used,
+                              ",\"running\":%d,\"failed\":%d,\"last_status\":%d,\"last_error\":",
+                              g_vb_runtime.app_running,
+                              g_vb_runtime.app_failed,
+                              g_vb_runtime.app_last_status);
+    result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.app_last_error, 0);
+    result |= vb_json_appendf(dst, cap, &used,
+                              ",\"launches\":%lu,\"stops\":%lu,\"pending_reload\":%d,\"pending_stop\":%d,\"launcher_page\":%d,\"launcher_total\":%d,\"launcher_count\":%d,\"pending_delete\":",
+                              (unsigned long)g_vb_runtime.app_launch_count,
+                              (unsigned long)g_vb_runtime.app_stop_count,
+                              g_vb_runtime.pending_reload ? 1 : 0,
+                              g_vb_runtime.pending_stop ? 1 : 0,
+                              g_vb_runtime.launcher_page,
+                              g_vb_runtime.launcher_total,
+                              g_vb_runtime.launcher_count);
+    result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.launcher_pending_delete, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"lua\":");
+    result |= vb_json_append_string(dst, cap, &used,
+                                    vibeboard_lua_runtime_available() ? vibeboard_lua_runtime_name() : "manifest-fallback",
+                                    0);
+    result |= vb_json_appendf(dst, cap, &used, "}");
+    if (result != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_append_app_summary_json(char *dst, rt_size_t cap, int *used, const vb_app_summary_t *summary)
+{
+    int result = RT_EOK;
+    if (!summary) return -RT_EINVAL;
+    result |= vb_json_appendf(dst, cap, used, "{\"id\":");
+    result |= vb_json_append_string(dst, cap, used, summary->id, 0);
+    result |= vb_json_appendf(dst, cap, used, ",\"name\":");
+    result |= vb_json_append_string(dst, cap, used, summary->name, 0);
+    result |= vb_json_appendf(dst, cap, used,
+                              ",\"active\":%d,\"compatible\":%d,\"manifest\":%d,\"app_info\":%d,\"main_lua\":%d}",
+                              summary->active,
+                              summary->compatible,
+                              summary->manifest,
+                              summary->app_info,
+                              summary->main_lua);
+    return result;
+}
+
+static int vb_runtime_app_list_page_json(char *dst, rt_size_t cap, int offset, int limit)
+{
+    static vb_app_summary_t apps[VB_LAUNCHER_MAX_ITEMS];
+    char active[VB_MAX_APP_ID];
+    int total = 0;
+    int count;
+    int used = 0;
+    int first = 1;
+    int i;
+    int result = RT_EOK;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    if (offset < 0) offset = 0;
+    if (limit <= 0 || limit > VB_LAUNCHER_MAX_ITEMS) limit = VB_LAUNCHER_MAX_ITEMS;
+    dst[0] = '\0';
+    count = vb_runtime_collect_apps(apps, limit, offset, &total);
+    if (count < 0)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"fs\":0,\"offset\":%d,\"limit\":%d,\"count\":0,\"included\":0,\"apps\":[]}",
+                    VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, offset, limit);
+        dst[cap - 1] = '\0';
+        return count;
+    }
+    vb_read_active_app(active, sizeof(active));
+    result |= vb_json_appendf(dst, cap, &used, "{\"api\":");
+    result |= vb_json_append_string(dst, cap, &used, VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"active\":");
+    result |= vb_json_append_string(dst, cap, &used, active, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"state\":");
+    result |= vb_json_append_string(dst, cap, &used, vb_runtime_app_state_name(), 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"offset\":%d,\"limit\":%d,\"apps\":[", offset, limit);
+    for (i = 0; i < count; i++)
+    {
+        if (!first) result |= vb_json_appendf(dst, cap, &used, ",");
+        result |= vb_runtime_append_app_summary_json(dst, cap, &used, &apps[i]);
+        first = 0;
+    }
+    result |= vb_json_appendf(dst, cap, &used,
+                              "],\"count\":%d,\"included\":%d,\"truncated\":0}",
+                              total,
+                              count);
+    if (result != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\",\"offset\":%d,\"limit\":%d,\"count\":%d}",
+                    VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, offset, limit, total);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_app_list_json(char *dst, rt_size_t cap)
+{
+    vb_app_summary_t *apps = RT_NULL;
+    char active[VB_MAX_APP_ID];
+    int used = 0;
+    int first = 1;
+    int count = 0;
+    int included = 0;
+    int truncated = 0;
+    int i;
+    int result = RT_EOK;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    result = vb_runtime_load_apps(&apps, &count);
+    if (result != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"fs\":0,\"count\":0,\"apps\":[]}",
+                    VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION);
+        dst[cap - 1] = '\0';
+        return result;
+    }
+    vb_read_active_app(active, sizeof(active));
+    result = RT_EOK;
+    result |= vb_json_appendf(dst, cap, &used, "{\"api\":");
+    result |= vb_json_append_string(dst, cap, &used, VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"active\":");
+    result |= vb_json_append_string(dst, cap, &used, active, 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"state\":");
+    result |= vb_json_append_string(dst, cap, &used, vb_runtime_app_state_name(), 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"apps\":[");
+    if (result != RT_EOK) truncated = 1;
+
+    for (i = 0; i < count; i++)
+    {
+        if (truncated) continue;
+        if (!first && vb_json_appendf(dst, cap, &used, ",") != RT_EOK)
+        {
+            truncated = 1;
+            continue;
+        }
+        if (vb_runtime_append_app_summary_json(dst, cap, &used, &apps[i]) != RT_EOK)
+        {
+            truncated = 1;
+            continue;
+        }
+        first = 0;
+        included++;
+    }
+    if (vb_json_appendf(dst, cap, &used,
+                        "],\"count\":%d,\"included\":%d,\"truncated\":%d}",
+                        count,
+                        included,
+                        truncated) != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\",\"count\":%d}",
+                    VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION,
+                    count);
+        dst[cap - 1] = '\0';
+        if (apps) rt_free(apps);
+        return -RT_ERROR;
+    }
+    if (apps) rt_free(apps);
+    return truncated ? -RT_ERROR : RT_EOK;
+}
+
+static int vb_runtime_app_launch(const char *app_id)
+{
+    vb_app_summary_t summary;
+    int result;
+    if (!vb_is_safe_app_id(app_id)) return -RT_EINVAL;
+    result = vb_runtime_app_exists(app_id, &summary);
+    if (result != RT_EOK || !summary.compatible)
+    {
+        vb_runtime_set_app_result(-RT_ERROR, "app not found or incompatible");
+        return -RT_ERROR;
+    }
+    result = vb_runtime_select_app(app_id);
+    if (result == RT_EOK)
+    {
+        g_vb_runtime.app_launch_count++;
+        g_vb_runtime.app_failed = 0;
+        vb_runtime_set_app_result(RT_EOK, "launch requested");
+    }
+    return result;
+}
+
+static int vb_runtime_app_stop(void)
+{
+    if (!g_vb_runtime.running) return -RT_ERROR;
+    g_vb_runtime.pending_stop = 1;
+    vb_runtime_set_app_result(RT_EOK, "stop requested");
+    return RT_EOK;
+}
+
+static int vb_runtime_app_delete(const char *app_id)
+{
+    char active[VB_MAX_APP_ID];
+    char path[VB_MAX_PATH];
+    int is_active;
+    if (!vb_is_safe_app_id(app_id)) return -RT_EINVAL;
+    if (g_vb_runtime.install_app[0] && rt_strcmp(g_vb_runtime.install_app, app_id) == 0)
+    {
+        vb_runtime_set_app_result(-RT_EBUSY, "install session active");
+        return -RT_EBUSY;
+    }
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    vb_read_active_app(active, sizeof(active));
+    is_active = rt_strcmp(active, app_id) == 0;
+    if (is_active && (g_vb_runtime.app_running || g_vb_runtime.pending_reload))
+    {
+        vb_runtime_set_app_result(-RT_EBUSY, "stop active app before delete");
+        return -RT_EBUSY;
+    }
+    rt_snprintf(path, sizeof(path), "%s/%s", VIBEBOARD_APP_ROOT, app_id);
+    path[sizeof(path) - 1] = '\0';
+    if (!vb_path_is_dir(path))
+    {
+        vb_runtime_set_app_result(-RT_ERROR, "app not found");
+        return -RT_ERROR;
+    }
+    if (vb_remove_tree(path) != RT_EOK)
+    {
+        vb_runtime_set_app_result(-RT_ERROR, "delete failed");
+        return -RT_ERROR;
+    }
+    if (is_active)
+    {
+        (void)vb_write_active_app(VIBEBOARD_DEFAULT_APP_ID);
+        vb_safe_copy(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app), VIBEBOARD_DEFAULT_APP_ID);
+    }
+    vb_runtime_set_app_result(RT_EOK, "app deleted");
+    return RT_EOK;
+}
+
 static int vb_hex_value(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -2036,12 +4444,14 @@ static int vb_hex_value(char c)
     return -1;
 }
 
-static int vb_write_hex_chunk(int fd, const char *hex)
+static int vb_write_hex_chunk(int fd, const char *hex, int *written_bytes)
 {
     uint8_t buffer[128];
     int count = 0;
+    int total = 0;
     int i;
     int len;
+    if (written_bytes) *written_bytes = 0;
     if (!hex || rt_strcmp(hex, "-") == 0) return RT_EOK;
     len = rt_strlen(hex);
     if ((len % 2) != 0 || len > VB_MAX_HEX_CHARS) return -RT_EINVAL;
@@ -2054,14 +4464,861 @@ static int vb_write_hex_chunk(int fd, const char *hex)
         if (count == (int)sizeof(buffer))
         {
             if (write(fd, buffer, count) != count) return -RT_ERROR;
+            total += count;
             count = 0;
         }
     }
-    if (count > 0 && write(fd, buffer, count) != count) return -RT_ERROR;
+    if (count > 0)
+    {
+        if (write(fd, buffer, count) != count) return -RT_ERROR;
+        total += count;
+    }
+    if (written_bytes) *written_bytes = total;
     return RT_EOK;
 }
 
-static const char *vb_json_find_string(const char *begin, const char *end, const char *key)
+static int vb_is_safe_flow_channel(const char *channel)
+{
+    int i;
+    int len;
+    if (!channel || !channel[0]) return 0;
+    len = rt_strlen(channel);
+    if (len <= 0 || len >= VB_FLOW_MAX_CHANNEL) return 0;
+    for (i = 0; i < len; i++)
+    {
+        char c = channel[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')
+        {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int vb_decode_hex_text(const char *hex, char *dst, rt_size_t cap, uint32_t *bytes_out)
+{
+    int i;
+    int len;
+    uint32_t bytes = 0;
+
+    if (!hex || !dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    if (bytes_out) *bytes_out = 0;
+    if (rt_strcmp(hex, "-") == 0) return RT_EOK;
+
+    len = rt_strlen(hex);
+    if ((len % 2) != 0 || len > VB_FLOW_MAX_PAYLOAD * 2) return -RT_EINVAL;
+    for (i = 0; i < len; i += 2)
+    {
+        int hi = vb_hex_value(hex[i]);
+        int lo = vb_hex_value(hex[i + 1]);
+        char ch;
+        if (hi < 0 || lo < 0) return -RT_EINVAL;
+        if (bytes + 1 >= cap) return -RT_EINVAL;
+        ch = (char)((hi << 4) | lo);
+        if (ch == '\0' || ch == '\r' || ch == '\n' || ch == '\t') ch = ' ';
+        dst[bytes++] = ch;
+    }
+    dst[bytes] = '\0';
+    if (bytes_out) *bytes_out = bytes;
+    return RT_EOK;
+}
+
+static int vb_hex_encode_bytes(const uint8_t *src, uint32_t len, char *dst, rt_size_t cap)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    uint32_t i;
+    if (!src || !dst || cap == 0) return -RT_EINVAL;
+    if ((rt_size_t)len * 2 + 1 > cap) return -RT_EINVAL;
+    for (i = 0; i < len; i++)
+    {
+        dst[i * 2] = hexdigits[(src[i] >> 4) & 0x0f];
+        dst[i * 2 + 1] = hexdigits[src[i] & 0x0f];
+    }
+    dst[len * 2] = '\0';
+    return RT_EOK;
+}
+
+static int vb_runtime_ble_json_read(const char *kind, uint32_t offset, uint32_t max_bytes, char *dst, rt_size_t cap)
+{
+    char json[VB_JSON_READ_MAX];
+    const uint8_t *src;
+    uint32_t total;
+    uint32_t count;
+    int result = -RT_EINVAL;
+
+    if (!kind || !dst || cap == 0) return -RT_EINVAL;
+    if (max_bytes == 0 || max_bytes > 160) max_bytes = 160;
+
+    if (rt_strcmp(kind, "capabilities") == 0)
+    {
+        result = vb_runtime_capabilities_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "sensors") == 0)
+    {
+        result = vb_runtime_sensors_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "power") == 0)
+    {
+        result = vb_runtime_power_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "display") == 0 || rt_strcmp(kind, "screen") == 0)
+    {
+        result = vb_runtime_display_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "gpio") == 0)
+    {
+        result = vb_runtime_gpio_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "touch") == 0)
+    {
+        result = vb_runtime_touch_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "rgb") == 0)
+    {
+        result = vb_runtime_rgb_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "voice") == 0 || rt_strcmp(kind, "audio") == 0)
+    {
+        result = vb_runtime_voice_read_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "app") == 0 || rt_strcmp(kind, "app_status") == 0)
+    {
+        result = vb_runtime_app_status_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "apps") == 0 || rt_strcmp(kind, "app_list") == 0)
+    {
+        result = vb_runtime_app_list_json(json, sizeof(json));
+    }
+    else if (rt_strcmp(kind, "apps_page") == 0 || rt_strcmp(kind, "app_page") == 0)
+    {
+        result = vb_runtime_app_list_page_json(json, sizeof(json), 0, VB_LAUNCHER_MAX_ITEMS);
+    }
+    else
+    {
+        rt_snprintf(dst, cap, "err json_read kind=%s rc=%d", kind, -RT_EINVAL);
+        dst[cap - 1] = '\0';
+        return -RT_EINVAL;
+    }
+
+    if (result != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "err json_read kind=%s rc=%d", kind, result);
+        dst[cap - 1] = '\0';
+        return result;
+    }
+
+    total = (uint32_t)rt_strlen(json);
+    if (offset > total) offset = total;
+    count = total - offset;
+    if (count > max_bytes) count = max_bytes;
+    src = (const uint8_t *)json + offset;
+
+    rt_snprintf(dst, cap, "ok json_read kind=%s offset=%lu total=%lu bytes=%lu hex=",
+                kind,
+                (unsigned long)offset,
+                (unsigned long)total,
+                (unsigned long)count);
+    dst[cap - 1] = '\0';
+    if (vb_hex_encode_bytes(src, count, dst + rt_strlen(dst), cap - rt_strlen(dst)) != RT_EOK)
+    {
+        rt_snprintf(dst, cap, "err json_read kind=%s rc=%d", kind, -RT_ERROR);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+static int vb_runtime_voice_audio_callback(audio_server_callback_cmt_t cmd,
+                                           void *callback_userdata,
+                                           uint32_t reserved)
+{
+    vb_voice_state_t *voice = (vb_voice_state_t *)callback_userdata;
+    if (!voice) return 0;
+    if (cmd == as_callback_cmd_data_coming)
+    {
+        audio_server_coming_data_t *coming = (audio_server_coming_data_t *)reserved;
+        uint32_t copy_len;
+        if (!voice->recording || !coming || !coming->data || coming->data_len == 0)
+        {
+            return 0;
+        }
+        copy_len = coming->data_len;
+        if (voice->recorded_bytes + copy_len > voice->max_bytes)
+        {
+            copy_len = voice->max_bytes > voice->recorded_bytes ?
+                       voice->max_bytes - voice->recorded_bytes : 0;
+        }
+        if (copy_len > 0)
+        {
+            rt_memcpy(voice->buffer + voice->recorded_bytes, coming->data, copy_len);
+            voice->recorded_bytes += copy_len;
+        }
+        if (copy_len < coming->data_len)
+        {
+            voice->dropped_bytes += coming->data_len - copy_len;
+        }
+    }
+    else if (cmd == as_callback_cmd_closed || cmd == as_callback_cmd_suspended)
+    {
+        if (voice->done_sem)
+        {
+            rt_sem_release(voice->done_sem);
+        }
+    }
+    return 0;
+}
+#endif
+
+static int vb_runtime_voice_ensure_buffer(void)
+{
+    if (g_vb_voice.buffer) return RT_EOK;
+    g_vb_voice.max_bytes = VB_VOICE_MAX_BYTES;
+    g_vb_voice.buffer = (uint8_t *)rt_malloc(g_vb_voice.max_bytes);
+    if (!g_vb_voice.buffer)
+    {
+        g_vb_voice.max_bytes = 0;
+        return -RT_ENOMEM;
+    }
+    return RT_EOK;
+}
+
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+static void vb_runtime_voice_wait_for_worker(void)
+{
+    while (g_vb_voice.worker)
+    {
+        rt_thread_mdelay(20);
+    }
+}
+
+static void vb_runtime_voice_stop_client(void)
+{
+    if (g_vb_voice.client)
+    {
+        audio_close(g_vb_voice.client);
+        g_vb_voice.client = RT_NULL;
+    }
+}
+#endif
+
+static void vb_runtime_voice_clear(void)
+{
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+    if (g_vb_voice.worker)
+    {
+        g_vb_voice.stop_requested = 1;
+        vb_runtime_voice_stop_client();
+        vb_runtime_voice_wait_for_worker();
+    }
+    else
+    {
+        vb_runtime_voice_stop_client();
+    }
+    g_vb_voice.stop_requested = 0;
+#endif
+    g_vb_voice.recording = 0;
+    g_vb_voice.ready = 0;
+    g_vb_voice.last_error = 0;
+    g_vb_voice.requested_ms = 0;
+    g_vb_voice.recorded_bytes = 0;
+    g_vb_voice.dropped_bytes = 0;
+    if (g_vb_voice.buffer && g_vb_voice.max_bytes > 0)
+    {
+        rt_memset(g_vb_voice.buffer, 0, g_vb_voice.max_bytes);
+    }
+}
+
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+static void vb_runtime_voice_worker_entry(void *parameter)
+{
+    uint32_t duration_ms = (uint32_t)(rt_uint32_t)parameter;
+    audio_parameter_t param = {0};
+
+    if (!g_vb_voice.done_sem)
+    {
+        g_vb_voice.done_sem = rt_sem_create("vbv_done", 0, RT_IPC_FLAG_FIFO);
+        if (!g_vb_voice.done_sem)
+        {
+            g_vb_voice.recording = 0;
+            g_vb_voice.last_error = -RT_ENOMEM;
+            g_vb_voice.worker = RT_NULL;
+            return;
+        }
+    }
+
+    param.write_bits_per_sample = VB_VOICE_BITS_PER_SAMPLE;
+    param.write_channnel_num = VB_VOICE_CHANNELS;
+    param.write_samplerate = VB_VOICE_SAMPLE_RATE;
+    param.write_cache_size = VB_VOICE_CACHE_SIZE;
+    param.read_bits_per_sample = VB_VOICE_BITS_PER_SAMPLE;
+    param.read_channnel_num = VB_VOICE_CHANNELS;
+    param.read_samplerate = VB_VOICE_SAMPLE_RATE;
+    param.read_cache_size = VB_VOICE_CACHE_SIZE;
+
+    g_vb_voice.client = audio_open(AUDIO_TYPE_LOCAL_RECORD, AUDIO_RX, &param,
+                                   vb_runtime_voice_audio_callback, &g_vb_voice);
+    if (!g_vb_voice.client)
+    {
+        g_vb_voice.recording = 0;
+        g_vb_voice.last_error = -RT_ERROR;
+        g_vb_voice.worker = RT_NULL;
+        rt_kprintf("[vb_runtime][voice] audio_open failed\n");
+        return;
+    }
+
+    while (duration_ms > 0 && !g_vb_voice.stop_requested)
+    {
+        uint32_t step = duration_ms > 50 ? 50 : duration_ms;
+        rt_thread_mdelay(step);
+        duration_ms -= step;
+    }
+    vb_runtime_voice_stop_client();
+    g_vb_voice.client = RT_NULL;
+    g_vb_voice.recording = 0;
+    g_vb_voice.ready = g_vb_voice.recorded_bytes > 0 ? 1 : 0;
+    g_vb_voice.last_error = g_vb_voice.stop_requested ? -RT_EINTR :
+                            (g_vb_voice.ready ? RT_EOK : -RT_ERROR);
+    rt_kprintf("[vb_runtime][voice] captured seq=%lu ms=%lu bytes=%lu dropped=%lu\n",
+               (unsigned long)g_vb_voice.sequence,
+               (unsigned long)g_vb_voice.requested_ms,
+               (unsigned long)g_vb_voice.recorded_bytes,
+               (unsigned long)g_vb_voice.dropped_bytes);
+    g_vb_voice.stop_requested = 0;
+    g_vb_voice.worker = RT_NULL;
+}
+#endif
+
+static int vb_runtime_voice_start(uint32_t duration_ms)
+{
+#if VB_RUNTIME_HAS_VOICE_CAPTURE
+    int result;
+    rt_thread_t worker;
+
+    if (duration_ms == 0) duration_ms = VB_VOICE_DEFAULT_MS;
+    if (duration_ms > VB_VOICE_MAX_MS) duration_ms = VB_VOICE_MAX_MS;
+    if (g_vb_voice.recording || g_vb_voice.worker) return -RT_EBUSY;
+
+    result = vb_runtime_voice_ensure_buffer();
+    if (result != RT_EOK)
+    {
+        g_vb_voice.last_error = result;
+        return result;
+    }
+
+    vb_runtime_voice_clear();
+    g_vb_voice.requested_ms = duration_ms;
+    g_vb_voice.sequence++;
+    g_vb_voice.recording = 1;
+    g_vb_voice.ready = 0;
+    g_vb_voice.last_error = 1;
+
+    worker = rt_thread_create("vbvoice", vb_runtime_voice_worker_entry,
+                              (void *)(rt_uint32_t)duration_ms,
+                              VB_VOICE_THREAD_STACK,
+                              RT_THREAD_PRIORITY_MIDDLE + 4,
+                              RT_THREAD_TICK_DEFAULT);
+    if (!worker)
+    {
+        g_vb_voice.recording = 0;
+        g_vb_voice.last_error = -RT_ENOMEM;
+        return -RT_ENOMEM;
+    }
+    g_vb_voice.worker = worker;
+    rt_thread_startup(worker);
+    rt_kprintf("[vb_runtime][voice] capture started seq=%lu ms=%lu\n",
+               (unsigned long)g_vb_voice.sequence,
+               (unsigned long)duration_ms);
+    return RT_EOK;
+#else
+    (void)duration_ms;
+    g_vb_voice.last_error = -RT_ENOSYS;
+    return -RT_ENOSYS;
+#endif
+}
+
+static int vb_runtime_voice_status(char *dst, rt_size_t cap)
+{
+    if (!dst || cap == 0) return -RT_EINVAL;
+    rt_snprintf(dst, cap,
+                "ok voice api=%s built=%d ready=%d recording=%d seq=%lu bytes=%lu rate=%d bits=%d channels=%d dropped=%lu err=%d",
+                VIBEBOARD_RUNTIME_VOICE_API_VERSION,
+                VB_RUNTIME_HAS_VOICE_CAPTURE,
+                g_vb_voice.ready,
+                g_vb_voice.recording,
+                (unsigned long)g_vb_voice.sequence,
+                (unsigned long)g_vb_voice.recorded_bytes,
+                VB_VOICE_SAMPLE_RATE,
+                VB_VOICE_BITS_PER_SAMPLE,
+                VB_VOICE_CHANNELS,
+                (unsigned long)g_vb_voice.dropped_bytes,
+                g_vb_voice.last_error);
+    dst[cap - 1] = '\0';
+    return RT_EOK;
+}
+
+static int vb_runtime_voice_read_json(char *dst, rt_size_t cap)
+{
+    int used;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    used = rt_snprintf(dst, cap,
+                       "{\"api\":\"%s\",\"available\":%d,\"built\":%d,\"ready\":%d,"
+                       "\"recording\":%d,\"seq\":%lu,\"requested_ms\":%lu,\"bytes\":%lu,"
+                       "\"rate\":%d,\"bits\":%d,\"channels\":%d,\"dropped\":%lu,\"err\":%d}",
+                       VIBEBOARD_RUNTIME_VOICE_API_VERSION,
+                       VB_RUNTIME_HAS_VOICE_CAPTURE,
+                       VB_RUNTIME_HAS_VOICE_CAPTURE,
+                       g_vb_voice.ready,
+                       g_vb_voice.recording,
+                       (unsigned long)g_vb_voice.sequence,
+                       (unsigned long)g_vb_voice.requested_ms,
+                       (unsigned long)g_vb_voice.recorded_bytes,
+                       VB_VOICE_SAMPLE_RATE,
+                       VB_VOICE_BITS_PER_SAMPLE,
+                       VB_VOICE_CHANNELS,
+                       (unsigned long)g_vb_voice.dropped_bytes,
+                       g_vb_voice.last_error);
+    dst[cap - 1] = '\0';
+    if (used < 0 || used >= (int)cap)
+    {
+        rt_snprintf(dst, cap, "{\"api\":\"%s\",\"error\":\"truncated\"}",
+                    VIBEBOARD_RUNTIME_VOICE_API_VERSION);
+        dst[cap - 1] = '\0';
+        return -RT_ERROR;
+    }
+    return RT_EOK;
+}
+
+static uint32_t vb_runtime_voice_duration_from_text(const char *duration_text)
+{
+    const char *text = duration_text;
+    uint32_t duration;
+    while (text && (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n')) text++;
+    if (!text || !text[0] || rt_strcmp(text, "--") == 0) return 0;
+    duration = (uint32_t)strtoul(text, RT_NULL, 10);
+    if (duration > VB_VOICE_MAX_MS) duration = VB_VOICE_MAX_MS;
+    return duration;
+}
+
+static int vb_runtime_voice_start_text(const char *duration_text, char *dst, rt_size_t cap)
+{
+    uint32_t duration_ms = vb_runtime_voice_duration_from_text(duration_text);
+    int result;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    result = vb_runtime_voice_start(duration_ms);
+    vb_runtime_voice_read_json(dst, cap);
+    return result;
+}
+
+static int vb_runtime_voice_clear_json(char *dst, rt_size_t cap)
+{
+    if (!dst || cap == 0) return -RT_EINVAL;
+    vb_runtime_voice_clear();
+    return vb_runtime_voice_read_json(dst, cap);
+}
+
+static int vb_runtime_voice_is_start_action(const char *capability)
+{
+    return capability &&
+           (rt_strcmp(capability, "voice.start") == 0 ||
+            rt_strcmp(capability, "voice.record") == 0 ||
+            rt_strcmp(capability, "vibeboard.voice.start") == 0 ||
+            rt_strcmp(capability, "vibeboard.voice.record") == 0);
+}
+
+static int vb_runtime_voice_is_clear_action(const char *capability)
+{
+    return capability &&
+           (rt_strcmp(capability, "voice.clear") == 0 ||
+            rt_strcmp(capability, "vibeboard.voice.clear") == 0);
+}
+
+static const char *vb_runtime_voice_short_selector(const char *selector)
+{
+    if (!selector) return "";
+    if (rt_strncmp(selector, "voice.", 6) == 0) return selector + 6;
+    if (rt_strncmp(selector, "audio.", 6) == 0) return selector + 6;
+    if (rt_strncmp(selector, "vibeboard.voice.", 16) == 0) return selector + 16;
+    return selector;
+}
+
+static int vb_runtime_voice_format_text(const char *selector, char *dst, rt_size_t cap)
+{
+    const char *short_selector = vb_runtime_voice_short_selector(selector);
+    if (!short_selector || !dst || cap == 0) return 0;
+    if (rt_strcmp(short_selector, "ready") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", g_vb_voice.ready ? "ready" : "empty");
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "recording") == 0 || rt_strcmp(short_selector, "state") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", g_vb_voice.recording ? "recording" : "idle");
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "seq") == 0 || rt_strcmp(short_selector, "sequence") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu", (unsigned long)g_vb_voice.sequence);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "bytes") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu B", (unsigned long)g_vb_voice.recorded_bytes);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "duration") == 0 || rt_strcmp(short_selector, "requested_ms") == 0)
+    {
+        rt_snprintf(dst, cap, "%lums", (unsigned long)g_vb_voice.requested_ms);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "dropped") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu B", (unsigned long)g_vb_voice.dropped_bytes);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "error") == 0 || rt_strcmp(short_selector, "err") == 0)
+    {
+        rt_snprintf(dst, cap, "%d", g_vb_voice.last_error);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "rate") == 0)
+    {
+        rt_snprintf(dst, cap, "%d Hz", VB_VOICE_SAMPLE_RATE);
+        return 1;
+    }
+    if (rt_strcmp(short_selector, "built") == 0 || rt_strcmp(short_selector, "available") == 0)
+    {
+        rt_snprintf(dst, cap, "%d", VB_RUNTIME_HAS_VOICE_CAPTURE);
+        return 1;
+    }
+    return 0;
+}
+
+static int vb_runtime_voice_read_hex(uint32_t offset, uint32_t max_bytes, char *dst, rt_size_t cap)
+{
+    uint32_t count;
+    int result;
+    if (!dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    if (!g_vb_voice.ready || !g_vb_voice.buffer) return -RT_ERROR;
+    if (offset > g_vb_voice.recorded_bytes) return -RT_EINVAL;
+    if (max_bytes == 0 || max_bytes > VB_VOICE_CHUNK_BYTES) max_bytes = VB_VOICE_CHUNK_BYTES;
+    count = g_vb_voice.recorded_bytes - offset;
+    if (count > max_bytes) count = max_bytes;
+    if ((rt_size_t)count * 2 + 96 > cap) return -RT_EINVAL;
+    rt_snprintf(dst, cap, "ok voice_data seq=%lu offset=%lu bytes=%lu hex=",
+                (unsigned long)g_vb_voice.sequence,
+                (unsigned long)offset,
+                (unsigned long)count);
+    result = vb_hex_encode_bytes(g_vb_voice.buffer + offset, count,
+                                 dst + rt_strlen(dst), cap - rt_strlen(dst));
+    return result == RT_EOK ? RT_EOK : result;
+}
+
+static int vb_runtime_voice_json_status_command(void)
+{
+    char json[VB_VOICE_JSON_MAX];
+    int result = vb_runtime_voice_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+static int vb_runtime_voice_status_command(void)
+{
+    char status[VB_BLE_STATUS_MAX];
+    vb_runtime_voice_status(status, sizeof(status));
+    rt_kprintf("[vb_runtime][voice] %s\n", status);
+    return RT_EOK;
+}
+
+static void vb_runtime_flow_escape_text(const char *src, char *dst, rt_size_t cap)
+{
+    rt_size_t used = 0;
+    if (!dst || cap == 0) return;
+    if (!src) src = "";
+    while (*src && used + 1 < cap)
+    {
+        char c = *src++;
+        if ((c == '\\' || c == '"') && used + 2 < cap)
+        {
+            dst[used++] = '\\';
+            dst[used++] = c;
+        }
+        else if (c == '\n' && used + 2 < cap)
+        {
+            dst[used++] = '\\';
+            dst[used++] = 'n';
+        }
+        else if (c == '\r' && used + 2 < cap)
+        {
+            dst[used++] = '\\';
+            dst[used++] = 'r';
+        }
+        else if ((unsigned char)c >= 0x20)
+        {
+            dst[used++] = c;
+        }
+    }
+    dst[used] = '\0';
+}
+
+static void vb_runtime_flow_copy_json_string(const char *json, const char *key, char *dst, rt_size_t cap)
+{
+    vb_json_copy_string(json, RT_NULL, key, dst, cap, "");
+}
+
+static int vb_runtime_flow_latest_index(void)
+{
+    if (g_vb_flow.count <= 0) return -1;
+    return (g_vb_flow.write_index + VB_FLOW_HISTORY - 1) % VB_FLOW_HISTORY;
+}
+
+static void vb_runtime_flow_format_summary(char *dst, rt_size_t cap)
+{
+    int index;
+    vb_info_flow_item_t *item;
+    if (!dst || cap == 0) return;
+    index = vb_runtime_flow_latest_index();
+    if (index < 0)
+    {
+        rt_snprintf(dst, cap, "flow ready: waiting for phone");
+        dst[cap - 1] = '\0';
+        return;
+    }
+    item = &g_vb_flow.items[index];
+    rt_snprintf(dst, cap, "flow %lu/%s: %s",
+                (unsigned long)item->sequence,
+                item->channel,
+                item->payload[0] ? item->payload : "(empty)");
+    dst[cap - 1] = '\0';
+}
+
+static const char *vb_runtime_flow_field_from_capability(const char *capability)
+{
+    if (!capability) return RT_NULL;
+    if (rt_strncmp(capability, "vibeboard.flow.", 15) == 0) return capability + 15;
+    if (rt_strncmp(capability, "flow.", 5) == 0) return capability + 5;
+    return capability;
+}
+
+static int vb_runtime_flow_format_text(const char *capability, char *dst, rt_size_t cap)
+{
+    const char *field = vb_runtime_flow_field_from_capability(capability);
+    int index;
+    vb_info_flow_item_t *item;
+    if (!field || !dst || cap == 0) return 0;
+    if (rt_strcmp(field, "total") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu", (unsigned long)g_vb_flow.total_count);
+        dst[cap - 1] = '\0';
+        return 1;
+    }
+    if (rt_strcmp(field, "retained") == 0 || rt_strcmp(field, "count") == 0)
+    {
+        rt_snprintf(dst, cap, "%d", g_vb_flow.count);
+        dst[cap - 1] = '\0';
+        return 1;
+    }
+    if (rt_strcmp(field, "capacity") == 0)
+    {
+        rt_snprintf(dst, cap, "%d", VB_FLOW_HISTORY);
+        dst[cap - 1] = '\0';
+        return 1;
+    }
+
+    index = vb_runtime_flow_latest_index();
+    if (rt_strcmp(field, "latest") == 0 ||
+        rt_strcmp(field, "summary") == 0 ||
+        rt_strcmp(field, "last") == 0)
+    {
+        vb_runtime_flow_format_summary(dst, cap);
+        return 1;
+    }
+    if (index < 0)
+    {
+        rt_snprintf(dst, cap, "--");
+        dst[cap - 1] = '\0';
+        return 1;
+    }
+
+    item = &g_vb_flow.items[index];
+    if (rt_strcmp(field, "payload") == 0 || rt_strcmp(field, "text") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", item->payload[0] ? item->payload : "(empty)");
+    }
+    else if (rt_strcmp(field, "channel") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", item->channel);
+    }
+    else if (rt_strcmp(field, "seq") == 0 || rt_strcmp(field, "sequence") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu", (unsigned long)item->sequence);
+    }
+    else if (rt_strcmp(field, "bytes") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu", (unsigned long)item->bytes);
+    }
+    else
+    {
+        return 0;
+    }
+    dst[cap - 1] = '\0';
+    return 1;
+}
+
+static void vb_runtime_flow_update_label(void)
+{
+    char text[VB_FLOW_MAX_PAYLOAD + VB_FLOW_MAX_CHANNEL + 48];
+    if (!g_vb_runtime.flow_label) return;
+    vb_runtime_flow_format_summary(text, sizeof(text));
+    lv_label_set_text(g_vb_runtime.flow_label, text);
+    g_vb_runtime.flow_seen_total = g_vb_flow.total_count;
+}
+
+static int vb_runtime_flow_save_latest(void)
+{
+    int index = vb_runtime_flow_latest_index();
+    vb_info_flow_item_t *item;
+    char channel[VB_FLOW_MAX_CHANNEL * 2];
+    char payload[VB_FLOW_MAX_PAYLOAD * 2 + 8];
+    char json[VB_FLOW_MAX_PAYLOAD * 2 + VB_FLOW_MAX_CHANNEL * 2 + 128];
+    if (index < 0)
+    {
+        if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+        unlink(VIBEBOARD_FLOW_STATE_FILE);
+        return RT_EOK;
+    }
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    item = &g_vb_flow.items[index];
+    vb_runtime_flow_escape_text(item->channel, channel, sizeof(channel));
+    vb_runtime_flow_escape_text(item->payload, payload, sizeof(payload));
+    rt_snprintf(json, sizeof(json),
+                "{\"api\":\"%s\",\"seq\":%lu,\"channel\":\"%s\",\"bytes\":%lu,\"payload\":\"%s\"}\n",
+                VIBEBOARD_RUNTIME_FLOW_API_VERSION,
+                (unsigned long)item->sequence,
+                channel,
+                (unsigned long)item->bytes,
+                payload);
+    json[sizeof(json) - 1] = '\0';
+    return vb_write_text_file(VIBEBOARD_FLOW_STATE_FILE, json);
+}
+
+static int vb_runtime_flow_load_state(void)
+{
+    char json[VB_FLOW_MAX_PAYLOAD * 2 + VB_FLOW_MAX_CHANNEL * 2 + 128];
+    char api[64];
+    char channel[VB_FLOW_MAX_CHANNEL];
+    char payload[VB_FLOW_MAX_PAYLOAD + 1];
+    int seq = 0;
+    int bytes = 0;
+    vb_info_flow_item_t *item;
+    if (g_vb_flow.count > 0) return RT_EOK;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    if (vb_read_text_file(VIBEBOARD_FLOW_STATE_FILE, json, sizeof(json)) <= 0) return -RT_ERROR;
+    vb_runtime_flow_copy_json_string(json, "api", api, sizeof(api));
+    if (rt_strcmp(api, VIBEBOARD_RUNTIME_FLOW_API_VERSION) != 0) return -RT_EINVAL;
+    vb_runtime_flow_copy_json_string(json, "channel", channel, sizeof(channel));
+    vb_runtime_flow_copy_json_string(json, "payload", payload, sizeof(payload));
+    if (!vb_is_safe_flow_channel(channel)) return -RT_EINVAL;
+    if (!vb_json_read_int(json, RT_NULL, "seq", &seq)) return -RT_EINVAL;
+    if (!vb_json_read_int(json, RT_NULL, "bytes", &bytes)) bytes = rt_strlen(payload);
+    if (seq < 0 || bytes < 0) return -RT_EINVAL;
+
+    rt_memset(&g_vb_flow, 0, sizeof(g_vb_flow));
+    item = &g_vb_flow.items[0];
+    item->sequence = (uint32_t)seq;
+    item->bytes = (uint32_t)bytes;
+    item->tick = rt_tick_get();
+    vb_safe_copy(item->channel, sizeof(item->channel), channel);
+    vb_safe_copy(item->payload, sizeof(item->payload), payload);
+    g_vb_flow.write_index = 1 % VB_FLOW_HISTORY;
+    g_vb_flow.count = 1;
+    g_vb_flow.total_count = 1;
+    rt_kprintf("[vb_runtime][flow] restored seq=%lu channel=%s bytes=%lu\n",
+               (unsigned long)item->sequence,
+               item->channel,
+               (unsigned long)item->bytes);
+    return RT_EOK;
+}
+
+static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, const char *hex)
+{
+    char payload[VB_FLOW_MAX_PAYLOAD + 1];
+    uint32_t bytes = 0;
+    int result;
+    int slot;
+    vb_info_flow_item_t *item;
+
+    if (!vb_is_safe_flow_channel(channel))
+    {
+        rt_kprintf("[vb_runtime][flow] invalid channel\n");
+        return -RT_EINVAL;
+    }
+    result = vb_decode_hex_text(hex, payload, sizeof(payload), &bytes);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime][flow] invalid payload hex rc=%d\n", result);
+        return result;
+    }
+
+    slot = g_vb_flow.write_index;
+    item = &g_vb_flow.items[slot];
+    rt_memset(item, 0, sizeof(*item));
+    item->sequence = sequence;
+    item->bytes = bytes;
+    item->tick = rt_tick_get();
+    vb_safe_copy(item->channel, sizeof(item->channel), channel);
+    vb_safe_copy(item->payload, sizeof(item->payload), payload);
+
+    g_vb_flow.write_index = (slot + 1) % VB_FLOW_HISTORY;
+    if (g_vb_flow.count < VB_FLOW_HISTORY) g_vb_flow.count++;
+    g_vb_flow.total_count++;
+
+    rt_kprintf("[vb_runtime][flow] recv total=%lu seq=%lu channel=%s bytes=%lu text=%s\n",
+               (unsigned long)g_vb_flow.total_count,
+               (unsigned long)item->sequence,
+               item->channel,
+               (unsigned long)item->bytes,
+               item->payload);
+    vb_runtime_flow_save_latest();
+    return (int)bytes;
+}
+
+static void vb_runtime_flow_clear_state(void)
+{
+    rt_memset(&g_vb_flow, 0, sizeof(g_vb_flow));
+    if (vb_prepare_filesystem() == RT_EOK) unlink(VIBEBOARD_FLOW_STATE_FILE);
+    rt_kprintf("[vb_runtime][flow] cleared\n");
+}
+
+static int vb_runtime_flow_status_command(void)
+{
+    int i;
+    int start;
+    rt_kprintf("[vb_runtime][flow] api=%s\n", VIBEBOARD_RUNTIME_FLOW_API_VERSION);
+    rt_kprintf("[vb_runtime][flow] total=%lu retained=%d capacity=%d\n",
+               (unsigned long)g_vb_flow.total_count, g_vb_flow.count, VB_FLOW_HISTORY);
+    if (g_vb_flow.count <= 0) return RT_EOK;
+    start = (g_vb_flow.write_index + VB_FLOW_HISTORY - g_vb_flow.count) % VB_FLOW_HISTORY;
+    for (i = 0; i < g_vb_flow.count; i++)
+    {
+        int index = (start + i) % VB_FLOW_HISTORY;
+        vb_info_flow_item_t *item = &g_vb_flow.items[index];
+        rt_kprintf("[vb_runtime][flow] item=%d seq=%lu channel=%s bytes=%lu tick=%lu payload=%s\n",
+                   i,
+                   (unsigned long)item->sequence,
+                   item->channel,
+                   (unsigned long)item->bytes,
+                   (unsigned long)item->tick,
+                   item->payload);
+    }
+    return RT_EOK;
+}
+
+static const char *vb_json_find_value(const char *begin, const char *end, const char *key)
 {
     char needle[48];
     const char *cursor = begin;
@@ -2079,10 +5336,28 @@ static const char *vb_json_find_string(const char *begin, const char *end, const
         }
         hit++;
         while ((!end || hit < end) && (*hit == ' ' || *hit == '\t' || *hit == '\r' || *hit == '\n')) hit++;
-        if (*hit == '"') return hit + 1;
-        cursor = hit;
+        return hit;
     }
     return RT_NULL;
+}
+
+static const char *vb_json_find_string(const char *begin, const char *end, const char *key)
+{
+    const char *hit = vb_json_find_value(begin, end, key);
+    if (hit && *hit == '"') return hit + 1;
+    return RT_NULL;
+}
+
+static int vb_json_read_int(const char *begin, const char *end, const char *key, int *out)
+{
+    char *tail;
+    const char *src = vb_json_find_value(begin, end, key);
+    long value;
+    if (!src || !out) return 0;
+    value = strtol(src, &tail, 10);
+    if (tail == src) return 0;
+    *out = (int)value;
+    return 1;
 }
 
 static void vb_json_copy_string(const char *begin, const char *end, const char *key,
@@ -2137,6 +5412,64 @@ static int vb_parse_manifest_components(const char *json)
         cursor = obj_end + 1;
     }
     return count;
+}
+
+static int vb_runtime_validate_manifest_for_app(const char *app_id, const char *manifest_path)
+{
+    char *json;
+    char kind[48];
+    char manifest_id[VB_MAX_APP_ID];
+    char entry[VB_MAX_PATH];
+    int version = 0;
+    int len;
+    int result = RT_EOK;
+
+    if (!app_id || !manifest_path) return -RT_EINVAL;
+
+    json = (char *)rt_malloc(VB_MAX_MANIFEST);
+    if (!json) return -RT_ENOMEM;
+
+    len = vb_read_text_file(manifest_path, json, VB_MAX_MANIFEST);
+    if (len <= 0)
+    {
+        rt_kprintf("[vb_runtime] manifest invalid: read failed %s\n", manifest_path);
+        rt_free(json);
+        return -RT_ERROR;
+    }
+
+    vb_json_copy_string(json, RT_NULL, "kind", kind, sizeof(kind), "");
+    vb_json_copy_string(json, RT_NULL, "id", manifest_id, sizeof(manifest_id), "");
+    vb_json_copy_string(json, RT_NULL, "entry", entry, sizeof(entry), "");
+    if (!(vb_json_read_int(json, RT_NULL, "schemaVersion", &version) ||
+          vb_json_read_int(json, RT_NULL, "version", &version)))
+    {
+        version = 0;
+    }
+
+    if (rt_strcmp(kind, "huangshan-runtime-app-manifest") != 0)
+    {
+        rt_kprintf("[vb_runtime] manifest invalid: kind=%s\n", kind[0] ? kind : "--");
+        result = -RT_EINVAL;
+    }
+    else if (!vb_is_safe_app_id(manifest_id) || rt_strcmp(manifest_id, app_id) != 0)
+    {
+        rt_kprintf("[vb_runtime] manifest invalid: id=%s app=%s\n",
+                   manifest_id[0] ? manifest_id : "--", app_id);
+        result = -RT_EINVAL;
+    }
+    else if (entry[0] == '\0' || rt_strcmp(entry, "main.lua") != 0)
+    {
+        rt_kprintf("[vb_runtime] manifest invalid: entry=%s\n", entry[0] ? entry : "--");
+        result = -RT_EINVAL;
+    }
+    else if (version != 1)
+    {
+        rt_kprintf("[vb_runtime] manifest invalid: version=%d\n", version);
+        result = -RT_EINVAL;
+    }
+
+    rt_free(json);
+    return result;
 }
 
 static const char *vb_skip_spaces(const char *text)
@@ -2657,6 +5990,76 @@ static lv_obj_t *vb_weather_blob(lv_obj_t *parent, int x, int y, int w, int h, u
     return obj;
 }
 
+static lv_obj_t *vb_weather_layer(lv_obj_t *parent, int x, int y, int w, int h)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+    lv_obj_set_size(obj, w, h);
+    lv_obj_set_pos(obj, x, y);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    return obj;
+}
+
+static lv_obj_t *vb_weather_sticker_blob(lv_obj_t *parent, int x, int y, int w, int h,
+                                         uint32_t color, int radius, uint32_t border, int border_w)
+{
+    lv_obj_t *obj = vb_weather_blob(parent, x, y, w, h, color, radius);
+    if (border_w > 0)
+    {
+        lv_obj_set_style_border_width(obj, border_w, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(obj, lv_color_hex(border), LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    return obj;
+}
+
+static void vb_weather_soft_shadow(lv_obj_t *obj, uint32_t color, int width, int ofs_y, lv_opa_t opa)
+{
+    if (!obj) return;
+    lv_obj_set_style_shadow_width(obj, width, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_ofs_y(obj, ofs_y, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_color(obj, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_opa(obj, opa, LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+static const lv_point_t vb_weather_smile_points[] = {
+    {0, 0}, {10, 8}, {24, 9}, {36, 0}
+};
+
+static const lv_point_t vb_weather_bolt_points[] = {
+    {34, 0}, {12, 44}, {34, 44}, {22, 92}, {70, 30}, {46, 30}, {58, 0}
+};
+
+static const lv_point_t vb_weather_snow_h[] = {
+    {0, 8}, {18, 8}
+};
+
+static const lv_point_t vb_weather_snow_v[] = {
+    {9, 0}, {9, 18}
+};
+
+static const lv_point_t vb_weather_snow_d1[] = {
+    {2, 2}, {16, 16}
+};
+
+static const lv_point_t vb_weather_snow_d2[] = {
+    {16, 2}, {2, 16}
+};
+
+static lv_obj_t *vb_weather_line(lv_obj_t *parent, const lv_point_t *points, uint16_t point_count,
+                                 int x, int y, uint32_t color, int width)
+{
+    lv_obj_t *line = lv_line_create(parent);
+    lv_line_set_points(line, points, point_count);
+    lv_obj_set_pos(line, x, y);
+    lv_obj_set_style_line_color(line, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_line_width(line, width, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_line_rounded(line, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+    return line;
+}
+
 static vb_weather_kind_t vb_weather_kind_from_condition(const char *condition, int code)
 {
     if (condition)
@@ -2691,24 +6094,382 @@ static const char *vb_weather_kind_label(vb_weather_kind_t kind)
     }
 }
 
-static void vb_weather_create_cloud(int x_base, int y_base)
+static const char *vb_weather_kind_asset(vb_weather_kind_t kind)
 {
-    g_vb_runtime.weather.cloud[0] = vb_weather_blob(g_vb_runtime.root, x_base + 8, y_base + 40, 132, 58, 0xf8fafc, 28);
-    g_vb_runtime.weather.cloud[1] = vb_weather_blob(g_vb_runtime.root, x_base + 28, y_base + 18, 64, 64, 0xe2e8f0, 32);
-    g_vb_runtime.weather.cloud[2] = vb_weather_blob(g_vb_runtime.root, x_base + 80, y_base + 8, 74, 74, 0xf1f5f9, 37);
-    g_vb_runtime.weather.cloud[3] = vb_weather_blob(g_vb_runtime.root, x_base + 122, y_base + 34, 64, 64, 0xcbd5e1, 32);
+    switch (kind)
+    {
+    case VB_WEATHER_SUNNY: return "sunny";
+    case VB_WEATHER_CLOUDY: return "cloudy";
+    case VB_WEATHER_RAIN: return "rain";
+    case VB_WEATHER_SNOW: return "snow";
+    case VB_WEATHER_STORM: return "storm";
+    case VB_WEATHER_FOG: return "fog";
+    default: return "cloudy";
+    }
+}
+
+static void vb_script_to_lvgl_image_path(const char *fs_path, char *dst, rt_size_t cap)
+{
+    if (!dst || cap == 0) return;
+    if (!fs_path || !fs_path[0])
+    {
+        dst[0] = '\0';
+        return;
+    }
+    if (fs_path[0] == '/')
+    {
+        rt_snprintf(dst, cap, "/%s", fs_path);
+        dst[cap - 1] = '\0';
+        return;
+    }
+    vb_safe_copy(dst, cap, fs_path);
+}
+
+static int vb_weather_build_asset_path(vb_weather_kind_t kind, char *fs_dst, rt_size_t fs_cap,
+                                       char *lvgl_dst, rt_size_t lvgl_cap)
+{
+    if (!fs_dst || fs_cap == 0) return -RT_EINVAL;
+    rt_snprintf(fs_dst, fs_cap, "%s/%s/assets/weather/%s.png",
+                VIBEBOARD_APP_ROOT,
+                g_vb_runtime.active_app,
+                vb_weather_kind_asset(kind));
+    fs_dst[fs_cap - 1] = '\0';
+    if (lvgl_dst && lvgl_cap > 0) vb_script_to_lvgl_image_path(fs_dst, lvgl_dst, lvgl_cap);
+    return vb_file_exists(fs_dst) ? RT_EOK : -RT_ERROR;
+}
+
+static void vb_weather_release_image(void)
+{
+    if (g_vb_runtime.weather.image_dsc)
+    {
+        app_cache_img_free(g_vb_runtime.weather.image_dsc);
+        g_vb_runtime.weather.image_dsc = RT_NULL;
+    }
+    g_vb_runtime.weather.image_raw = 0;
+}
+
+static void vb_weather_init_image_decoders(void)
+{
+    static uint8_t initialized = 0;
+    if (initialized) return;
+    initialized = 1;
+#if defined(LV_USE_PNG) && LV_USE_PNG
+    lv_png_init();
+    rt_kprintf("[vb_runtime][weather] png decoder initialized\n");
+#endif
+}
+
+static int vb_weather_build_bin_asset_path(vb_weather_kind_t kind, char *fs_dst, rt_size_t fs_cap)
+{
+    if (!fs_dst || fs_cap == 0) return -RT_EINVAL;
+    rt_snprintf(fs_dst, fs_cap, "%s/%s/assets/weather/%s.bin",
+                VIBEBOARD_APP_ROOT,
+                g_vb_runtime.active_app,
+                vb_weather_kind_asset(kind));
+    fs_dst[fs_cap - 1] = '\0';
+    return vb_file_exists(fs_dst) ? RT_EOK : -RT_ERROR;
+}
+
+static uint16_t vb_read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t vb_read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int vb_read_full(int fd, void *dst, int bytes)
+{
+    uint8_t *out = (uint8_t *)dst;
+    int total = 0;
+    while (total < bytes)
+    {
+        int n = read(fd, out + total, bytes - total);
+        if (n <= 0) return total > 0 ? total : n;
+        total += n;
+    }
+    return total;
+}
+
+static int vb_weather_load_bin_image(vb_weather_kind_t kind, const char *path)
+{
+    uint8_t header[16];
+    uint32_t magic;
+    uint16_t version;
+    uint16_t width;
+    uint16_t height;
+    uint16_t cf;
+    uint32_t data_size;
+    struct stat st;
+    lv_img_dsc_t *dsc = RT_NULL;
+    int fd;
+    int read_bytes;
+
+    if (!path || !path[0]) return -RT_EINVAL;
+    if (stat(path, &st) != 0)
+    {
+        rt_kprintf("[vb_runtime][weather] bin stat failed: %s\n", path);
+        return -RT_ERROR;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+    {
+        rt_kprintf("[vb_runtime][weather] bin open failed: %s\n", path);
+        return -RT_ERROR;
+    }
+
+    read_bytes = vb_read_full(fd, header, sizeof(header));
+    if (read_bytes != (int)sizeof(header))
+    {
+        close(fd);
+        rt_kprintf("[vb_runtime][weather] bin header read failed: %s bytes=%d\n", path, read_bytes);
+        return -RT_ERROR;
+    }
+
+    magic = vb_read_le32(&header[0]);
+    version = vb_read_le16(&header[4]);
+    width = vb_read_le16(&header[6]);
+    height = vb_read_le16(&header[8]);
+    cf = vb_read_le16(&header[10]);
+    data_size = vb_read_le32(&header[12]);
+
+    if (magic != VB_WEATHER_IMG_MAGIC || version != VB_WEATHER_IMG_VERSION ||
+        width == 0 || height == 0 || width > 240 || height > 240 ||
+        cf != LV_IMG_CF_TRUE_COLOR_ALPHA ||
+        data_size != (uint32_t)(width * height * LV_IMG_PX_SIZE_ALPHA_BYTE) ||
+        st.st_size != (off_t)(sizeof(header) + data_size))
+    {
+        close(fd);
+        rt_kprintf("[vb_runtime][weather] bin invalid path=%s magic=%08x ver=%u w=%u h=%u cf=%u data=%lu size=%ld\n",
+                   path,
+                   (unsigned int)magic,
+                   (unsigned int)version,
+                   (unsigned int)width,
+                   (unsigned int)height,
+                   (unsigned int)cf,
+                   (unsigned long)data_size,
+                   (long)st.st_size);
+        return -RT_ERROR;
+    }
+
+    dsc = app_cache_img_alloc(width, height, LV_IMG_CF_TRUE_COLOR_ALPHA, data_size, IMAGE_CACHE_PSRAM);
+    if (!dsc)
+    {
+        close(fd);
+        rt_kprintf("[vb_runtime][weather] bin image alloc failed path=%s bytes=%lu\n", path, (unsigned long)data_size);
+        return -RT_ENOMEM;
+    }
+
+    read_bytes = vb_read_full(fd, (void *)dsc->data, (int)data_size);
+    close(fd);
+    if (read_bytes != (int)data_size)
+    {
+        app_cache_img_free(dsc);
+        rt_kprintf("[vb_runtime][weather] bin data read failed path=%s bytes=%d expected=%lu\n",
+                   path,
+                   read_bytes,
+                   (unsigned long)data_size);
+        return -RT_ERROR;
+    }
+
+    vb_weather_release_image();
+    g_vb_runtime.weather.image_dsc = dsc;
+    rt_kprintf("[vb_runtime][weather] bin image loaded path=%s kind=%s w=%u h=%u bytes=%lu\n",
+               path,
+               vb_weather_kind_asset(kind),
+               (unsigned int)width,
+               (unsigned int)height,
+               (unsigned long)data_size);
+    return RT_EOK;
+}
+
+static int vb_weather_create_image_pet(vb_weather_kind_t kind)
+{
+    char bin_path[VB_MAX_PATH];
+    char fs_path[VB_MAX_PATH];
+    char image_path[VB_MAX_PATH + 2];
+    lv_img_header_t header;
+    lv_img_src_t src_type;
+    lv_res_t info_res;
+    lv_obj_t *image;
+
+    if (vb_weather_build_bin_asset_path(kind, bin_path, sizeof(bin_path)) == RT_EOK &&
+        vb_weather_load_bin_image(kind, bin_path) == RT_EOK)
+    {
+        image = lv_img_create(g_vb_runtime.root);
+        lv_img_set_src(image, g_vb_runtime.weather.image_dsc);
+        lv_img_set_pivot(image,
+                         g_vb_runtime.weather.image_dsc->header.w / 2,
+                         g_vb_runtime.weather.image_dsc->header.h / 2);
+        lv_img_set_zoom(image, 256);
+        lv_img_set_antialias(image, true);
+        lv_obj_align(image, LV_ALIGN_TOP_MID, 0, 106);
+        g_vb_runtime.weather.image = image;
+        g_vb_runtime.weather.image_raw = 1;
+        rt_kprintf("[vb_runtime][weather] image asset=%s mode=bin\n", bin_path);
+        return RT_EOK;
+    }
+
+    if (vb_weather_build_asset_path(kind, fs_path, sizeof(fs_path), image_path, sizeof(image_path)) != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime][weather] image asset missing for %s\n", vb_weather_kind_asset(kind));
+        return -RT_ERROR;
+    }
+
+    vb_weather_init_image_decoders();
+    memset(&header, 0, sizeof(header));
+    src_type = lv_img_src_get_type(image_path);
+    info_res = lv_img_decoder_get_info(image_path, &header);
+    if (info_res != LV_RES_OK || header.w == 0 || header.h == 0)
+    {
+        rt_kprintf("[vb_runtime][weather] image decode failed fs=%s lvgl=%s type=%d res=%d w=%u h=%u cf=%u\n",
+                   fs_path,
+                   image_path,
+                   (int)src_type,
+                   (int)info_res,
+                   (unsigned int)header.w,
+                   (unsigned int)header.h,
+                   (unsigned int)header.cf);
+        return -RT_ERROR;
+    }
+
+    image = lv_img_create(g_vb_runtime.root);
+    lv_img_set_src(image, image_path);
+    lv_img_set_pivot(image, header.w / 2, header.h / 2);
+    lv_img_set_zoom(image, 256);
+    lv_img_set_antialias(image, true);
+    lv_obj_align(image, LV_ALIGN_TOP_MID, 0, 106);
+    g_vb_runtime.weather.image = image;
+    g_vb_runtime.weather.image_raw = 0;
+    rt_kprintf("[vb_runtime][weather] image asset=%s lvgl=%s type=%d w=%u h=%u cf=%u\n",
+               fs_path,
+               image_path,
+               (int)src_type,
+               (unsigned int)header.w,
+               (unsigned int)header.h,
+               (unsigned int)header.cf);
+    return RT_EOK;
+}
+
+static void vb_weather_create_cloud(vb_weather_kind_t kind)
+{
+    lv_obj_t *pet = g_vb_runtime.weather.pet;
+    uint32_t base = kind == VB_WEATHER_STORM ? 0x8aa0b5 : 0xf8fafc;
+    uint32_t mid = kind == VB_WEATHER_STORM ? 0x64748b : 0xe2e8f0;
+    uint32_t hi = kind == VB_WEATHER_STORM ? 0xcbd5e1 : 0xffffff;
+    uint32_t shade = kind == VB_WEATHER_STORM ? 0x475569 : 0xcbd5e1;
+    uint32_t outline = kind == VB_WEATHER_STORM ? 0x1e293b : 0xeff6ff;
+
+    if (!pet) return;
+    g_vb_runtime.weather.cloud[0] = vb_weather_sticker_blob(pet, 40, 92, 210, 66, outline, 33, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[1] = vb_weather_sticker_blob(pet, 66, 58, 88, 88, outline, 44, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[2] = vb_weather_sticker_blob(pet, 126, 38, 106, 106, outline, 53, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[3] = vb_weather_sticker_blob(pet, 202, 78, 78, 78, outline, 39, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[4] = vb_weather_sticker_blob(pet, 50, 98, 188, 52, base, 26, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[5] = vb_weather_sticker_blob(pet, 76, 66, 72, 72, mid, 36, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[6] = vb_weather_sticker_blob(pet, 134, 48, 88, 88, hi, 44, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[7] = vb_weather_sticker_blob(pet, 204, 86, 62, 62, base, 31, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[8] = vb_weather_sticker_blob(pet, 74, 132, 150, 14, shade, 7, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[9] = vb_weather_sticker_blob(pet, 110, 70, 50, 16, 0xffffff, 8, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[10] = vb_weather_sticker_blob(pet, 166, 58, 42, 14, 0xffffff, 7, 0x0f172a, 0);
+    g_vb_runtime.weather.cloud[11] = vb_weather_sticker_blob(pet, 232, 112, 18, 18, 0xffffff, 9, 0x0f172a, 0);
+    vb_weather_soft_shadow(g_vb_runtime.weather.cloud[0], 0x020617, 18, 10, LV_OPA_30);
+}
+
+static void vb_weather_create_sun_pet(void)
+{
+    lv_obj_t *pet = g_vb_runtime.weather.pet;
+    int i;
+    if (!pet) return;
+    for (i = 0; i < VB_WEATHER_RAY_COUNT; i++)
+    {
+        int horiz = (i == 0 || i == 4);
+        int diag = (i % 2) != 0;
+        int w = horiz ? 46 : (diag ? 16 : 14);
+        int h = horiz ? 14 : (diag ? 40 : 48);
+        int x = i == 0 ? 236 : i == 4 ? 18 : i == 1 ? 210 : i == 2 ? 136 : i == 3 ? 52 : i == 5 ? 54 : i == 6 ? 136 : 210;
+        int y = i == 0 ? 106 : i == 4 ? 106 : i == 1 ? 38 : i == 2 ? 12 : i == 3 ? 38 : i == 5 ? 176 : i == 6 ? 198 : 176;
+        g_vb_runtime.weather.rays[i] = vb_weather_sticker_blob(pet, x, y, w, h, 0xffd166, h / 2, 0x0f172a, 0);
+        if (diag)
+        {
+            lv_obj_set_style_transform_pivot_x(g_vb_runtime.weather.rays[i], w / 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_transform_pivot_y(g_vb_runtime.weather.rays[i], h / 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_transform_angle(g_vb_runtime.weather.rays[i], (i == 1 || i == 5) ? 450 : -450, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+    g_vb_runtime.weather.sun = vb_weather_sticker_blob(pet, 74, 48, 154, 154, 0xfbbf24, 77, 0xfff7ad, 5);
+    vb_weather_soft_shadow(g_vb_runtime.weather.sun, 0x78350f, 18, 8, LV_OPA_30);
+    g_vb_runtime.weather.decor[0] = vb_weather_blob(pet, 112, 76, 76, 28, 0xffe08a, 14);
+    g_vb_runtime.weather.decor[1] = vb_weather_blob(pet, 178, 120, 18, 18, 0xffe08a, 9);
 }
 
 static void vb_weather_create_drops(vb_weather_kind_t kind)
 {
     int i;
+    lv_obj_t *parent = g_vb_runtime.weather.pet ? g_vb_runtime.weather.pet : g_vb_runtime.root;
     for (i = 0; i < VB_WEATHER_DROP_COUNT; i++)
     {
-        int x = 78 + i * 28;
-        int y = 218 + (i % 3) * 18;
+        int x = 58 + i * 28;
+        int y = 164 + (i % 3) * 20;
         uint32_t color = kind == VB_WEATHER_SNOW ? 0xf8fafc : 0x38bdf8;
-        int size = kind == VB_WEATHER_SNOW ? 10 : 8;
-        g_vb_runtime.weather.drops[i] = vb_weather_blob(g_vb_runtime.root, x, y, size, kind == VB_WEATHER_SNOW ? size : 22, color, size / 2);
+        int size = kind == VB_WEATHER_SNOW ? 20 : 12;
+        if (kind == VB_WEATHER_SNOW)
+        {
+            lv_obj_t *flake = vb_weather_layer(parent, x, y, 22, 22);
+            vb_weather_line(flake, vb_weather_snow_h, 2, 2, 2, color, 3);
+            vb_weather_line(flake, vb_weather_snow_v, 2, 2, 2, color, 3);
+            vb_weather_line(flake, vb_weather_snow_d1, 2, 2, 2, color, 2);
+            vb_weather_line(flake, vb_weather_snow_d2, 2, 2, 2, color, 2);
+            g_vb_runtime.weather.drops[i] = flake;
+        }
+        else
+        {
+            g_vb_runtime.weather.drops[i] = vb_weather_sticker_blob(parent, x, y, size, 26, color, size / 2, 0xbae6fd, 2);
+            lv_obj_set_style_transform_pivot_x(g_vb_runtime.weather.drops[i], size / 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_transform_pivot_y(g_vb_runtime.weather.drops[i], 13, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_transform_angle(g_vb_runtime.weather.drops[i], 180, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+}
+
+static void vb_weather_create_image_effects(vb_weather_kind_t kind)
+{
+    lv_obj_t *root = g_vb_runtime.root;
+    if (!root) return;
+
+    if (kind == VB_WEATHER_RAIN || kind == VB_WEATHER_SNOW || kind == VB_WEATHER_STORM)
+    {
+        vb_weather_create_drops(kind);
+    }
+
+    if (kind == VB_WEATHER_STORM)
+    {
+        g_vb_runtime.weather.bolt = vb_weather_line(root, vb_weather_bolt_points, 7, 154, 172, 0xfacc15, 7);
+        vb_weather_soft_shadow(g_vb_runtime.weather.bolt, 0xfacc15, 12, 0, LV_OPA_50);
+        lv_obj_add_flag(g_vb_runtime.weather.bolt, LV_OBJ_FLAG_HIDDEN);
+    }
+    else if (kind == VB_WEATHER_FOG)
+    {
+        int i;
+        for (i = 0; i < VB_WEATHER_FOG_COUNT; i++)
+        {
+            g_vb_runtime.weather.fog[i] = vb_weather_sticker_blob(
+                root, 86 + i * 18, 232 + i * 22, 220 - i * 36, 13,
+                0xdbeafe, 7, 0xffffff, 1);
+            lv_obj_set_style_bg_opa(g_vb_runtime.weather.fog[i], LV_OPA_70, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+    else
+    {
+        g_vb_runtime.weather.decor[0] = vb_weather_blob(root, 82, 142, 9, 9, kind == VB_WEATHER_SUNNY ? 0xfff7ad : 0xe0f2fe, 5);
+        g_vb_runtime.weather.decor[1] = vb_weather_blob(root, 292, 152, 7, 7, kind == VB_WEATHER_SUNNY ? 0xffd166 : 0xffffff, 4);
+        g_vb_runtime.weather.decor[2] = vb_weather_blob(root, 96, 266, 6, 6, 0xffffff, 3);
+        g_vb_runtime.weather.decor[3] = vb_weather_blob(root, 276, 250, 8, 8, kind == VB_WEATHER_CLOUDY ? 0xbfdbfe : 0xfff7ad, 4);
+        g_vb_runtime.weather.decor[4] = vb_weather_blob(root, 118, 112, 5, 5, 0xffffff, 3);
+        g_vb_runtime.weather.decor[5] = vb_weather_blob(root, 258, 122, 5, 5, 0xffffff, 3);
     }
 }
 
@@ -2720,6 +6481,7 @@ static int vb_weather_start(const char *city, const char *condition, int temp_c,
     uint32_t bg = 0x0f172a;
 
     if (!g_vb_runtime.root) return -RT_ERROR;
+    vb_weather_release_image();
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
     g_vb_runtime.weather.active = 1;
     g_vb_runtime.weather.kind = kind;
@@ -2751,52 +6513,61 @@ static int vb_weather_start(const char *city, const char *condition, int temp_c,
     lv_obj_set_style_text_align(g_vb_runtime.weather.summary_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(g_vb_runtime.weather.summary_label, LV_ALIGN_TOP_MID, 0, 70);
 
+    if (vb_weather_create_image_pet(kind) == RT_EOK)
+    {
+        vb_weather_create_image_effects(kind);
+        rt_kprintf("[vb_runtime][weather] started city=%s kind=%s temp=%d humidity=%d code=%d mode=%s\n",
+                   g_vb_runtime.weather.city,
+                   vb_weather_kind_label(kind),
+                   temp_c,
+                   humidity,
+                   weather_code,
+                   g_vb_runtime.weather.image_raw ? "bin" : "png");
+        return RT_EOK;
+    }
+
+    g_vb_runtime.weather.pet = vb_weather_layer(g_vb_runtime.root, 44, 104, 300, 260);
     if (kind == VB_WEATHER_SUNNY)
     {
-        for (i = 0; i < 8; i++)
-        {
-            int horiz = (i == 0 || i == 4);
-            int x = 172 + (i == 0 ? 82 : i == 4 ? -38 : i == 1 || i == 7 ? 62 : i == 3 || i == 5 ? -18 : 20);
-            int y = 144 + (i == 2 ? -40 : i == 6 ? 82 : i == 1 || i == 3 ? -18 : i == 5 || i == 7 ? 62 : 20);
-            vb_weather_blob(g_vb_runtime.root, x, y, horiz ? 36 : 12, horiz ? 12 : 36, 0xfacc15, 6);
-        }
-        g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 132, 116, 126, 126, 0xfbbf24, 63);
+        vb_weather_create_sun_pet();
+        g_vb_runtime.weather.left_eye = vb_weather_blob(g_vb_runtime.weather.pet, 116, 108, 16, 22, 0x0f172a, 8);
+        g_vb_runtime.weather.right_eye = vb_weather_blob(g_vb_runtime.weather.pet, 168, 108, 16, 22, 0x0f172a, 8);
+        g_vb_runtime.weather.mouth = vb_weather_line(g_vb_runtime.weather.pet, vb_weather_smile_points, 4, 132, 148, 0x0f172a, 5);
+        g_vb_runtime.weather.blush_l = vb_weather_blob(g_vb_runtime.weather.pet, 86, 138, 28, 12, 0xfb7185, 6);
+        g_vb_runtime.weather.blush_r = vb_weather_blob(g_vb_runtime.weather.pet, 188, 138, 28, 12, 0xfb7185, 6);
     }
     else
     {
         if (kind == VB_WEATHER_CLOUDY)
         {
-            g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 102, 110, 90, 90, 0xfbbf24, 45);
+            g_vb_runtime.weather.sun = vb_weather_sticker_blob(g_vb_runtime.weather.pet, 28, 36, 86, 86, 0xfbbf24, 43, 0xfff7ad, 4);
+            vb_weather_soft_shadow(g_vb_runtime.weather.sun, 0x78350f, 12, 6, LV_OPA_20);
         }
-        vb_weather_create_cloud(84, 112);
+        vb_weather_create_cloud(kind);
+        g_vb_runtime.weather.left_eye = vb_weather_blob(g_vb_runtime.weather.pet, 120, 112, 15, 20, 0x0f172a, 8);
+        g_vb_runtime.weather.right_eye = vb_weather_blob(g_vb_runtime.weather.pet, 172, 112, 15, 20, 0x0f172a, 8);
+        g_vb_runtime.weather.mouth = vb_weather_line(g_vb_runtime.weather.pet, vb_weather_smile_points, 4, 136, 148, 0x0f172a, 5);
+        g_vb_runtime.weather.blush_l = vb_weather_blob(g_vb_runtime.weather.pet, 92, 134, 28, 12, 0xfb7185, 6);
+        g_vb_runtime.weather.blush_r = vb_weather_blob(g_vb_runtime.weather.pet, 190, 134, 28, 12, 0xfb7185, 6);
         if (kind == VB_WEATHER_RAIN || kind == VB_WEATHER_SNOW || kind == VB_WEATHER_STORM)
         {
             vb_weather_create_drops(kind);
         }
         if (kind == VB_WEATHER_STORM)
         {
-            g_vb_runtime.weather.bolt = vb_create_label(g_vb_runtime.root, "Z", FONT_BIGL, lv_color_hex(0xfacc15));
-            lv_obj_set_width(g_vb_runtime.weather.bolt, 90);
-            lv_obj_align(g_vb_runtime.weather.bolt, LV_ALIGN_TOP_MID, 18, 202);
+            g_vb_runtime.weather.bolt = vb_weather_line(g_vb_runtime.weather.pet, vb_weather_bolt_points, 7, 120, 154, 0xfacc15, 9);
+            vb_weather_soft_shadow(g_vb_runtime.weather.bolt, 0xfacc15, 12, 0, LV_OPA_50);
         }
         if (kind == VB_WEATHER_FOG)
         {
-            for (i = 0; i < 3; i++)
+            for (i = 0; i < VB_WEATHER_FOG_COUNT; i++)
             {
-                g_vb_runtime.weather.fog[i] = vb_weather_blob(g_vb_runtime.root, 70 + i * 26, 186 + i * 26, 220 - i * 24, 12, 0xcbd5e1, 6);
+                g_vb_runtime.weather.fog[i] = vb_weather_sticker_blob(
+                    g_vb_runtime.weather.pet, 44 + i * 18, 170 + i * 24,
+                    220 - i * 32, 14, 0xdbeafe, 7, 0xffffff, 1);
             }
         }
     }
-
-    if (!g_vb_runtime.weather.sun)
-    {
-        g_vb_runtime.weather.sun = vb_weather_blob(g_vb_runtime.root, 138, 124, 112, 112, 0xf8fafc, 56);
-    }
-    g_vb_runtime.weather.left_eye = vb_weather_blob(g_vb_runtime.root, 164, 164, 14, 18, 0x0f172a, 7);
-    g_vb_runtime.weather.right_eye = vb_weather_blob(g_vb_runtime.root, 212, 164, 14, 18, 0x0f172a, 7);
-    g_vb_runtime.weather.mouth = vb_weather_blob(g_vb_runtime.root, 178, 202, 42, 12, 0x0f172a, 6);
-    g_vb_runtime.weather.blush_l = vb_weather_blob(g_vb_runtime.root, 140, 190, 22, 10, 0xfb7185, 5);
-    g_vb_runtime.weather.blush_r = vb_weather_blob(g_vb_runtime.root, 228, 190, 22, 10, 0xfb7185, 5);
 
     rt_kprintf("[vb_runtime][weather] started city=%s kind=%s temp=%d humidity=%d code=%d\n",
                g_vb_runtime.weather.city, vb_weather_kind_label(kind), temp_c, humidity, weather_code);
@@ -2808,35 +6579,47 @@ static void vb_weather_step(void)
     int i;
     int bob;
     int blink;
+    int sway;
+    int slow;
+    int breathe;
+    int angle;
+    int zoom;
     vb_weather_state_t *w = &g_vb_runtime.weather;
     if (!w->active) return;
     w->frame++;
     bob = (w->frame % 12) < 6 ? (w->frame % 6) : (11 - (w->frame % 12));
+    sway = (w->frame % 18) < 9 ? (w->frame % 9) : (17 - (w->frame % 18));
+    slow = w->frame % 36;
+    breathe = slow < 18 ? slow : 35 - slow;
+    angle = (w->frame % 28) < 14 ? (w->frame % 14) - 7 : 7 - (w->frame % 14);
+    zoom = 252 + (breathe / 3);
     blink = (w->frame % 24) == 0 || (w->frame % 24) == 1;
 
-    if (w->sun) lv_obj_set_pos(w->sun, 132, 116 + bob);
+    if (w->image)
+    {
+        lv_obj_align(w->image, LV_ALIGN_TOP_MID, (sway / 3) - 1, 106 + bob);
+        lv_img_set_zoom(w->image, (uint16_t)zoom);
+        lv_img_set_angle(w->image, (int16_t)(angle * 4));
+    }
+
+    if (w->pet)
+    {
+        lv_obj_set_pos(w->pet, 44 + sway / 3, 104 + bob);
+    }
     if (w->left_eye)
     {
-        lv_obj_set_pos(w->left_eye, 164, 164 + bob);
-        lv_obj_set_size(w->left_eye, 14, blink ? 4 : 18);
+        lv_obj_set_height(w->left_eye, blink ? 4 : 20);
     }
     if (w->right_eye)
     {
-        lv_obj_set_pos(w->right_eye, 212, 164 + bob);
-        lv_obj_set_size(w->right_eye, 14, blink ? 4 : 18);
+        lv_obj_set_height(w->right_eye, blink ? 4 : 20);
     }
-    if (w->mouth) lv_obj_set_pos(w->mouth, 178, 202 + bob);
-    if (w->blush_l) lv_obj_set_pos(w->blush_l, 140, 190 + bob);
-    if (w->blush_r) lv_obj_set_pos(w->blush_r, 228, 190 + bob);
-
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < VB_WEATHER_RAY_COUNT; i++)
     {
-        if (w->cloud[i])
+        if (w->rays[i])
         {
-            int dx = ((w->frame + i * 3) % 18) - 9;
-            int y = i == 0 ? 152 : i == 1 ? 130 : i == 2 ? 120 : 146;
-            int x = i == 0 ? 92 : i == 1 ? 112 : i == 2 ? 164 : 206;
-            lv_obj_set_pos(w->cloud[i], x + dx, y);
+            lv_obj_set_style_bg_opa(w->rays[i], (w->frame + i) % 8 < 4 ? LV_OPA_COVER : LV_OPA_70,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
         }
     }
 
@@ -2844,26 +6627,59 @@ static void vb_weather_step(void)
     {
         if (w->drops[i])
         {
-            int x = 78 + i * 28;
-            int y = 214 + ((w->frame * 8 + i * 19) % 78);
+            int base_x = w->image ? 70 : 58;
+            int base_y = w->image ? 154 : 164;
+            int span_y = w->image ? 142 : 82;
+            int x = base_x + i * 28;
+            int y = base_y + ((w->frame * (w->kind == VB_WEATHER_SNOW ? 3 : 9) + i * 19) % span_y);
             if (w->kind == VB_WEATHER_SNOW)
             {
-                x += ((w->frame + i) % 7) - 3;
+                x += ((w->frame + i * 2) % 15) - 7;
+                lv_obj_set_style_transform_angle(w->drops[i], (w->frame * 18 + i * 140) % 3600,
+                                                 LV_PART_MAIN | LV_STATE_DEFAULT);
+            }
+            else
+            {
+                lv_obj_set_style_bg_opa(w->drops[i], ((w->frame + i) % 8) < 5 ? LV_OPA_80 : LV_OPA_50,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
             }
             lv_obj_set_pos(w->drops[i], x, y);
         }
     }
     if (w->bolt)
     {
-        if ((w->frame % 10) < 4) lv_obj_clear_flag(w->bolt, LV_OBJ_FLAG_HIDDEN);
+        if ((w->frame % 13) == 0 || (w->frame % 13) == 1 || (w->frame % 29) == 2) lv_obj_clear_flag(w->bolt, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(w->bolt, LV_OBJ_FLAG_HIDDEN);
     }
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < VB_WEATHER_FOG_COUNT; i++)
     {
         if (w->fog[i])
         {
             int dx = ((w->frame * 3 + i * 11) % 34) - 17;
-            lv_obj_set_pos(w->fog[i], 70 + i * 26 + dx, 186 + i * 26);
+            int x = w->image ? 86 + i * 18 : 44 + i * 18;
+            int y = w->image ? 232 + i * 22 : 170 + i * 24;
+            lv_obj_set_pos(w->fog[i], x + dx, y);
+            lv_obj_set_style_bg_opa(w->fog[i], ((w->frame + i * 3) % 16) < 8 ? LV_OPA_70 : LV_OPA_40,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+    if (w->image)
+    {
+        for (i = 0; i < VB_WEATHER_DECOR_COUNT; i++)
+        {
+            if (w->decor[i])
+            {
+                int phase = (w->frame + i * 5) % 24;
+                int dy = phase < 12 ? phase / 3 : (23 - phase) / 3;
+                lv_obj_set_style_bg_opa(w->decor[i], phase < 12 ? LV_OPA_90 : LV_OPA_50,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+                if (i == 0) lv_obj_set_pos(w->decor[i], 82, 142 - dy);
+                else if (i == 1) lv_obj_set_pos(w->decor[i], 292, 152 + dy);
+                else if (i == 2) lv_obj_set_pos(w->decor[i], 96, 266 - dy);
+                else if (i == 3) lv_obj_set_pos(w->decor[i], 276, 250 + dy);
+                else if (i == 4) lv_obj_set_pos(w->decor[i], 118, 112 - dy);
+                else if (i == 5) lv_obj_set_pos(w->decor[i], 258, 122 + dy);
+            }
         }
     }
 }
@@ -2988,6 +6804,9 @@ static int vb_script_execute_lvgl_call(const char *line)
                 int i;
                 g_vb_runtime.status_label = RT_NULL;
                 g_vb_runtime.clock_label = RT_NULL;
+                g_vb_runtime.flow_label = RT_NULL;
+                g_vb_runtime.script_flow_label = RT_NULL;
+                g_vb_runtime.script_flow_field[0] = '\0';
                 for (i = 0; i < g_vb_runtime.component_count; i++)
                 {
                     g_vb_runtime.components[i].value_label = RT_NULL;
@@ -3086,9 +6905,11 @@ static int vb_script_execute_lvgl_call(const char *line)
     if (vb_extract_call_args(line, "lv_img_set_src", args, &argc) && argc >= 2)
     {
         char resolved[VB_MAX_PATH];
+        char image_path[VB_MAX_PATH + 2];
         target = vb_script_find_object(args[0]);
         vb_script_resolve_asset_path(args[1], resolved, sizeof(resolved));
-        if (target && target->obj && resolved[0]) lv_img_set_src(target->obj, resolved);
+        vb_script_to_lvgl_image_path(resolved, image_path, sizeof(image_path));
+        if (target && target->obj && image_path[0]) lv_img_set_src(target->obj, image_path);
         return 1;
     }
     return 0;
@@ -3123,9 +6944,11 @@ static int vb_script_execute_helper_call(const char *line)
     if (vb_extract_call_args(line, "vibe_image", args, &argc) && argc >= 3)
     {
         char resolved[VB_MAX_PATH];
+        char image_path[VB_MAX_PATH + 2];
         lv_obj_t *image = lv_img_create(g_vb_runtime.root);
         vb_script_resolve_asset_path(args[0], resolved, sizeof(resolved));
-        if (resolved[0]) lv_img_set_src(image, resolved);
+        vb_script_to_lvgl_image_path(resolved, image_path, sizeof(image_path));
+        if (image_path[0]) lv_img_set_src(image, image_path);
         lv_obj_align(image, LV_ALIGN_TOP_LEFT, atoi(args[1]), atoi(args[2]));
         return 1;
     }
@@ -3201,6 +7024,162 @@ static int vb_script_execute_helper_call(const char *line)
         rt_kprintf("[vb_runtime][lua] sensor.%s %s rc=%d\n", args[1], text, result);
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_touch_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (rt_strcmp(args[1], "count") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "Touch %lu", (unsigned long)g_vb_runtime.touch.count);
+        }
+        else if (rt_strcmp(args[1], "event") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "%s", vb_runtime_touch_event_name(g_vb_runtime.touch.last_event));
+        }
+        else if (rt_strcmp(args[1], "gesture") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "%s", vb_runtime_touch_gesture_name(g_vb_runtime.touch.gesture_dir));
+        }
+        else if (rt_strcmp(args[1], "delta") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "%d,%d", g_vb_runtime.touch.delta.x, g_vb_runtime.touch.delta.y);
+        }
+        else if (rt_strcmp(args[1], "duration") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "%lums", (unsigned long)g_vb_runtime.touch.last_duration_ms);
+        }
+        else if (rt_strcmp(args[1], "active") == 0)
+        {
+            rt_snprintf(text, sizeof(text), "%s", g_vb_runtime.touch.active ? "active" : "idle");
+        }
+        else if (g_vb_runtime.touch.ready)
+        {
+            rt_snprintf(text, sizeof(text), "%d,%d", g_vb_runtime.touch.point.x, g_vb_runtime.touch.point.y);
+        }
+        else
+        {
+            rt_snprintf(text, sizeof(text), "Touch --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+        }
+        rt_kprintf("[vb_runtime][lua] touch.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_gpio_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (!vb_runtime_gpio_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "GPIO --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+        }
+        rt_kprintf("[vb_runtime][lua] gpio.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_power_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (!vb_runtime_power_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "Power --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+        }
+        rt_kprintf("[vb_runtime][lua] power.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_display_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (!vb_runtime_display_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "Display --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+        }
+        rt_kprintf("[vb_runtime][lua] display.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_display_brightness", args, &argc) && argc >= 1)
+    {
+        char json[VB_DISPLAY_JSON_MAX];
+        int result = vb_runtime_display_set_brightness_text(args[0], json, sizeof(json));
+        rt_kprintf("[vb_runtime][lua] display.brightness %s rc=%d %s\n", args[0], result, json);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_voice_start", args, &argc))
+    {
+        char json[VB_VOICE_JSON_MAX];
+        const char *duration = argc >= 1 ? args[0] : "";
+        int result = vb_runtime_voice_start_text(duration, json, sizeof(json));
+        rt_kprintf("[vb_runtime][lua] voice.start %s rc=%d %s\n", duration[0] ? duration : "default", result, json);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_voice_clear", args, &argc))
+    {
+        char json[VB_VOICE_JSON_MAX];
+        int result = vb_runtime_voice_clear_json(json, sizeof(json));
+        rt_kprintf("[vb_runtime][lua] voice.clear rc=%d %s\n", result, json);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_voice_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (!vb_runtime_voice_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "Voice --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+        }
+        rt_kprintf("[vb_runtime][lua] voice.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_flow_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[VB_FLOW_MAX_PAYLOAD + VB_FLOW_MAX_CHANNEL + 48];
+        if (!vb_runtime_flow_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "Flow --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_last_label = target->obj;
+            g_vb_runtime.script_flow_label = target->obj;
+            vb_safe_copy(g_vb_runtime.script_flow_field, sizeof(g_vb_runtime.script_flow_field), args[1]);
+            g_vb_runtime.script_flow_seen_total = g_vb_flow.total_count;
+        }
+        rt_kprintf("[vb_runtime][lua] flow.%s %s\n", args[1], text);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_rgb", args, &argc) && argc >= 1)
+    {
+        char json[VB_RGB_JSON_MAX];
+        int result = vb_runtime_rgb_set_text(args[0], json, sizeof(json));
+        rt_kprintf("[vb_runtime][lua] rgb %s rc=%d %s\n", args[0], result, json);
+        return 1;
+    }
     if (vb_extract_call_args(line, "vibe_snake_autoplay", args, &argc) && argc >= 4)
     {
         vb_snake_start(args[0], atoi(args[1]), atoi(args[2]), atoi(args[3]));
@@ -3252,8 +7231,11 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
     g_vb_runtime.script_objects[0].type = VB_SCRIPT_OBJ_ROOT;
     g_vb_runtime.script_last_label = RT_NULL;
     g_vb_runtime.script_tick_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_tick_prefix[0] = '\0';
+    g_vb_runtime.script_flow_field[0] = '\0';
+    g_vb_runtime.script_flow_seen_total = g_vb_flow.total_count;
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
 
@@ -3290,8 +7272,10 @@ static void vb_builtin_script_stop(void)
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_last_label = RT_NULL;
     g_vb_runtime.script_tick_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
     g_vb_runtime.script_object_count = 0;
     g_vb_runtime.script_tick_prefix[0] = '\0';
+    g_vb_runtime.script_flow_field[0] = '\0';
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
 }
@@ -3321,6 +7305,62 @@ static void vb_set_status(const char *text)
     }
 }
 
+static void vb_runtime_touch_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t *indev;
+    lv_point_t point = {0, 0};
+    uint32_t now;
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING &&
+        code != LV_EVENT_RELEASED && code != LV_EVENT_CLICKED &&
+        code != LV_EVENT_GESTURE)
+    {
+        return;
+    }
+    indev = lv_event_get_indev(event);
+    if (!indev) indev = lv_indev_get_act();
+    if (indev) lv_indev_get_point(indev, &point);
+    now = rt_tick_get();
+    g_vb_runtime.touch.available = 1;
+    g_vb_runtime.touch.ready = 1;
+    g_vb_runtime.touch.active = (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) ? 1 : 0;
+    g_vb_runtime.touch.last_event = code;
+    g_vb_runtime.touch.point = point;
+    g_vb_runtime.touch.last_tick = now;
+    if (code == LV_EVENT_PRESSED)
+    {
+        g_vb_runtime.touch.count++;
+        g_vb_runtime.touch.press_tick = now;
+        g_vb_runtime.touch.press_point = point;
+        g_vb_runtime.touch.release_point = point;
+        g_vb_runtime.touch.delta.x = 0;
+        g_vb_runtime.touch.delta.y = 0;
+        g_vb_runtime.touch.last_duration_ms = 0;
+        g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
+    }
+    else if (code == LV_EVENT_PRESSING)
+    {
+        g_vb_runtime.touch.delta.x = point.x - g_vb_runtime.touch.press_point.x;
+        g_vb_runtime.touch.delta.y = point.y - g_vb_runtime.touch.press_point.y;
+        g_vb_runtime.touch.last_duration_ms = vb_runtime_touch_tick_elapsed_ms(g_vb_runtime.touch.press_tick, now);
+    }
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
+    {
+        g_vb_runtime.touch.release_point = point;
+        g_vb_runtime.touch.delta.x = point.x - g_vb_runtime.touch.press_point.x;
+        g_vb_runtime.touch.delta.y = point.y - g_vb_runtime.touch.press_point.y;
+        g_vb_runtime.touch.last_duration_ms = vb_runtime_touch_tick_elapsed_ms(g_vb_runtime.touch.press_tick, now);
+    }
+    else if (code == LV_EVENT_GESTURE)
+    {
+        g_vb_runtime.touch.gesture_dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
+        g_vb_runtime.touch.release_point = point;
+        g_vb_runtime.touch.delta.x = point.x - g_vb_runtime.touch.press_point.x;
+        g_vb_runtime.touch.delta.y = point.y - g_vb_runtime.touch.press_point.y;
+        g_vb_runtime.touch.last_duration_ms = vb_runtime_touch_tick_elapsed_ms(g_vb_runtime.touch.press_tick, now);
+    }
+}
+
 static void vb_action_event_cb(lv_event_t *event)
 {
     vb_component_t *component;
@@ -3334,6 +7374,28 @@ static void vb_action_event_cb(lv_event_t *event)
         rt_kprintf("[vb_runtime] action reload\n");
         return;
     }
+    if (vb_runtime_voice_is_start_action(component->capability))
+    {
+        char json[VB_VOICE_JSON_MAX];
+        int result = vb_runtime_voice_start_text(component->value, json, sizeof(json));
+        if (result == RT_EOK) vb_set_status("voice recording requested");
+        else if (result == -RT_EBUSY) vb_set_status("voice already recording");
+        else vb_set_status("voice recording failed");
+        rt_kprintf("[vb_runtime] action %s value=%s rc=%d %s\n",
+                   component->capability,
+                   component->value[0] ? component->value : "--",
+                   result,
+                   json);
+        return;
+    }
+    if (vb_runtime_voice_is_clear_action(component->capability))
+    {
+        char json[VB_VOICE_JSON_MAX];
+        int result = vb_runtime_voice_clear_json(json, sizeof(json));
+        vb_set_status(result == RT_EOK ? "voice cleared" : "voice clear failed");
+        rt_kprintf("[vb_runtime] action %s rc=%d %s\n", component->capability, result, json);
+        return;
+    }
     vb_set_status("Runtime update required for native action");
     rt_kprintf("[vb_runtime] action %s requires runtime binding\n", component->capability);
 }
@@ -3344,6 +7406,91 @@ static void vb_back_event_cb(lv_event_t *event)
     {
         gui_app_run("Main");
     }
+}
+
+static void vb_launcher_open_event_cb(lv_event_t *event)
+{
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    vb_set_status("opening app manager");
+    (void)vb_runtime_app_stop();
+}
+
+static void vb_launcher_refresh_event_cb(lv_event_t *event)
+{
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    g_vb_runtime.launcher_page = 0;
+    g_vb_runtime.launcher_pending_delete[0] = '\0';
+    vb_runtime_request_manager_refresh("refreshed");
+}
+
+static void vb_launcher_page_event_cb(lv_event_t *event)
+{
+    vb_launcher_page_action_t *action;
+    int max_page;
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    action = (vb_launcher_page_action_t *)lv_event_get_user_data(event);
+    if (!action) return;
+    max_page = g_vb_runtime.launcher_total > 0 ? (g_vb_runtime.launcher_total - 1) / VB_LAUNCHER_MAX_ITEMS : 0;
+    g_vb_runtime.launcher_page += action->delta;
+    if (g_vb_runtime.launcher_page < 0) g_vb_runtime.launcher_page = 0;
+    if (g_vb_runtime.launcher_page > max_page) g_vb_runtime.launcher_page = max_page;
+    g_vb_runtime.launcher_pending_delete[0] = '\0';
+    vb_runtime_request_manager_refresh("page changed");
+}
+
+static void vb_launcher_launch_event_cb(lv_event_t *event)
+{
+    vb_launcher_item_t *item;
+    int result;
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    item = (vb_launcher_item_t *)lv_event_get_user_data(event);
+    if (!item || !item->id[0]) return;
+    result = vb_runtime_app_launch(item->id);
+    if (result == RT_EOK)
+    {
+        char text[VB_MAX_TEXT];
+        rt_snprintf(text, sizeof(text), "launching %s", item->id);
+        vb_set_status(text);
+    }
+    else
+    {
+        vb_set_status(g_vb_runtime.app_last_error[0] ? g_vb_runtime.app_last_error : "launch failed");
+    }
+    rt_kprintf("[vb_runtime][launcher] launch app=%s rc=%d\n", item->id, result);
+}
+
+static void vb_launcher_delete_event_cb(lv_event_t *event)
+{
+    vb_launcher_item_t *item;
+    int result;
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    item = (vb_launcher_item_t *)lv_event_get_user_data(event);
+    if (!item || !item->id[0]) return;
+    if (rt_strcmp(g_vb_runtime.launcher_pending_delete, item->id) != 0)
+    {
+        char text[VB_MAX_TEXT];
+        vb_safe_copy(g_vb_runtime.launcher_pending_delete, sizeof(g_vb_runtime.launcher_pending_delete), item->id);
+        rt_snprintf(text, sizeof(text), "confirm delete %s", item->id);
+        vb_runtime_request_manager_refresh(text);
+        return;
+    }
+    result = vb_runtime_app_delete(item->id);
+    g_vb_runtime.launcher_pending_delete[0] = '\0';
+    if (result == RT_EOK)
+    {
+        char text[VB_MAX_TEXT];
+        int max_page;
+        rt_snprintf(text, sizeof(text), "deleted %s", item->id);
+        if (g_vb_runtime.launcher_total > 0) g_vb_runtime.launcher_total--;
+        max_page = g_vb_runtime.launcher_total > 0 ? (g_vb_runtime.launcher_total - 1) / VB_LAUNCHER_MAX_ITEMS : 0;
+        if (g_vb_runtime.launcher_page > max_page) g_vb_runtime.launcher_page = max_page;
+        vb_runtime_request_manager_refresh(text);
+    }
+    else
+    {
+        vb_set_status(g_vb_runtime.app_last_error[0] ? g_vb_runtime.app_last_error : "delete failed");
+    }
+    rt_kprintf("[vb_runtime][launcher] delete app=%s rc=%d\n", item->id, result);
 }
 
 static void vb_render_component(vb_component_t *component, int index)
@@ -3372,16 +7519,232 @@ static void vb_render_component(vb_component_t *component, int index)
     lv_obj_align(component->value_label, LV_ALIGN_TOP_LEFT, 188, y);
 }
 
+static void vb_runtime_request_manager_refresh(const char *message)
+{
+    vb_safe_copy(g_vb_runtime.manager_message, sizeof(g_vb_runtime.manager_message), message ? message : "App manager");
+    g_vb_runtime.pending_manager_refresh = 1;
+}
+
+static void vb_render_app_manager_ui(const char *reason)
+{
+    vb_app_summary_t apps[VB_LAUNCHER_MAX_ITEMS];
+    char active[VB_MAX_APP_ID];
+    char line[VB_MAX_TEXT + 48];
+    int total = 0;
+    int count;
+    int i;
+
+    if (g_vb_runtime.root)
+    {
+        lv_obj_del(g_vb_runtime.root);
+        g_vb_runtime.root = RT_NULL;
+    }
+    g_vb_runtime.status_label = RT_NULL;
+    g_vb_runtime.clock_label = RT_NULL;
+    g_vb_runtime.flow_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
+    g_vb_runtime.component_count = 0;
+    g_vb_runtime.launcher_count = 0;
+    g_vb_runtime.launcher_total = 0;
+
+    g_vb_runtime.touch.available = 1;
+    g_vb_runtime.touch.ready = 1;
+    g_vb_runtime.touch.active = 0;
+    g_vb_runtime.touch.last_event = 0;
+    g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
+
+    vb_read_active_app(active, sizeof(active));
+    count = vb_runtime_collect_apps(apps, VB_LAUNCHER_MAX_ITEMS, g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS, &total);
+    if (count < 0)
+    {
+        count = 0;
+        total = 0;
+    }
+    if (total > 0 && g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS >= total)
+    {
+        g_vb_runtime.launcher_page = (total - 1) / VB_LAUNCHER_MAX_ITEMS;
+        count = vb_runtime_collect_apps(apps, VB_LAUNCHER_MAX_ITEMS, g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS, &total);
+        if (count < 0) count = 0;
+    }
+    if (g_vb_runtime.launcher_page < 0) g_vb_runtime.launcher_page = 0;
+    g_vb_runtime.launcher_total = total;
+
+    g_vb_runtime.root = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(g_vb_runtime.root, LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_obj_align(g_vb_runtime.root, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(g_vb_runtime.root, LV_OBJ_FLAG_SCROLLABLE);
+    vb_set_obj_bg(g_vb_runtime.root, 0x0b1120);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
+
+    lv_obj_t *back = lv_btn_create(g_vb_runtime.root);
+    lv_obj_set_size(back, 72, 34);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 12, 12);
+    lv_obj_set_style_radius(back, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(back, vb_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_t *back_label = vb_create_label(back, "Back", FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_center(back_label);
+
+    lv_obj_t *refresh = lv_btn_create(g_vb_runtime.root);
+    lv_obj_set_size(refresh, 72, 34);
+    lv_obj_align(refresh, LV_ALIGN_TOP_RIGHT, -12, 12);
+    lv_obj_set_style_radius(refresh, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(refresh, lv_color_hex(0x0f766e), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(refresh, vb_launcher_refresh_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_t *refresh_label = vb_create_label(refresh, "Refresh", FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_center(refresh_label);
+
+    lv_obj_t *title = vb_create_label(g_vb_runtime.root, "App Manager", FONT_BIGL, lv_color_hex(0x5eead4));
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
+
+    rt_snprintf(line, sizeof(line), "active=%s state=%s apps=%d page=%d/%d", active, vb_runtime_app_state_name(), total, total ? g_vb_runtime.launcher_page + 1 : 0, total ? ((total - 1) / VB_LAUNCHER_MAX_ITEMS) + 1 : 0);
+    lv_obj_t *state = vb_create_label(g_vb_runtime.root, line, FONT_SMALL, lv_color_hex(0x93c5fd));
+    lv_obj_set_width(state, 350);
+    lv_obj_set_style_text_align(state, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(state, LV_ALIGN_TOP_MID, 0, 58);
+
+    lv_obj_t *hint = vb_create_label(g_vb_runtime.root,
+                                     reason && reason[0] ? reason : "Tap Launch to run an installed app",
+                                     FONT_SMALL,
+                                     g_vb_runtime.app_failed ? lv_color_hex(0xfca5a5) : lv_color_hex(0xcbd5e1));
+    lv_obj_set_width(hint, 350);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 82);
+
+    if (count == 0)
+    {
+        lv_obj_t *panel = lv_obj_create(g_vb_runtime.root);
+        lv_obj_set_size(panel, 318, 126);
+        lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 146);
+        vb_set_obj_bg(panel, 0x172554);
+        lv_obj_set_style_radius(panel, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_t *empty = vb_create_label(panel, "No Runtime apps found\nInstall over serial or BLE", FONT_NORMAL, LV_COLOR_WHITE);
+        lv_obj_set_width(empty, 260);
+        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(empty);
+    }
+    else
+    {
+        for (i = 0; i < count; i++)
+        {
+            lv_coord_t y = 112 + i * 52;
+            lv_obj_t *row = lv_obj_create(g_vb_runtime.root);
+            lv_obj_set_size(row, 358, 48);
+            lv_obj_align(row, LV_ALIGN_TOP_MID, 0, y);
+            vb_set_obj_bg(row, apps[i].active ? 0x1e3a8a : 0x111827);
+            lv_obj_set_style_radius(row, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_width(row, apps[i].active ? 1 : 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_color(row, lv_color_hex(0x5eead4), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t *name = vb_create_label(row, apps[i].name, FONT_SMALL, LV_COLOR_WHITE);
+            lv_obj_set_width(name, 188);
+            lv_obj_align(name, LV_ALIGN_TOP_LEFT, 12, 6);
+
+            rt_snprintf(line, sizeof(line), "%s  %s", apps[i].id, apps[i].compatible ? "ready" : "incompatible");
+            lv_obj_t *meta = vb_create_label(row, line, FONT_SMALL, apps[i].compatible ? lv_color_hex(0x93c5fd) : lv_color_hex(0xfca5a5));
+            lv_obj_set_width(meta, 190);
+            lv_obj_align(meta, LV_ALIGN_TOP_LEFT, 12, 28);
+
+            vb_safe_copy(g_vb_runtime.launcher_items[i].id, sizeof(g_vb_runtime.launcher_items[i].id), apps[i].id);
+            g_vb_runtime.launcher_count++;
+
+            lv_obj_t *launch = lv_btn_create(row);
+            lv_obj_set_size(launch, 72, 30);
+            lv_obj_align(launch, LV_ALIGN_RIGHT_MID, -62, 0);
+            lv_obj_set_style_radius(launch, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_color(launch, lv_color_hex(apps[i].compatible ? 0x2dd4bf : 0x475569), LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (apps[i].compatible)
+            {
+                lv_obj_add_event_cb(launch, vb_launcher_launch_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_items[i]);
+            }
+            lv_obj_t *launch_label = vb_create_label(launch, apps[i].active ? "Open" : "Launch", FONT_SMALL,
+                                                     apps[i].compatible ? lv_color_hex(0x0f172a) : lv_color_hex(0xcbd5e1));
+            lv_obj_center(launch_label);
+
+            lv_obj_t *del = lv_btn_create(row);
+            int confirming = rt_strcmp(g_vb_runtime.launcher_pending_delete, apps[i].id) == 0;
+            lv_obj_set_size(del, 48, 30);
+            lv_obj_align(del, LV_ALIGN_RIGHT_MID, -8, 0);
+            lv_obj_set_style_radius(del, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_color(del, lv_color_hex(confirming ? 0xf97316 : 0x7f1d1d), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_add_event_cb(del, vb_launcher_delete_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_items[i]);
+            lv_obj_t *del_label = vb_create_label(del, confirming ? "OK" : "Del", FONT_SMALL, LV_COLOR_WHITE);
+            lv_obj_center(del_label);
+        }
+    }
+
+    if (total > VB_LAUNCHER_MAX_ITEMS)
+    {
+        lv_obj_t *prev;
+        lv_obj_t *next;
+        lv_obj_t *prev_label;
+        lv_obj_t *next_label;
+        int max_page = (total - 1) / VB_LAUNCHER_MAX_ITEMS;
+        g_vb_runtime.launcher_page_actions[0].delta = -1;
+        g_vb_runtime.launcher_page_actions[1].delta = 1;
+        prev = lv_btn_create(g_vb_runtime.root);
+        lv_obj_set_size(prev, 72, 30);
+        lv_obj_align(prev, LV_ALIGN_BOTTOM_LEFT, 24, -34);
+        lv_obj_set_style_radius(prev, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(prev, lv_color_hex(g_vb_runtime.launcher_page > 0 ? 0x334155 : 0x1f2937), LV_PART_MAIN | LV_STATE_DEFAULT);
+        if (g_vb_runtime.launcher_page > 0) lv_obj_add_event_cb(prev, vb_launcher_page_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_page_actions[0]);
+        prev_label = vb_create_label(prev, "Prev", FONT_SMALL, g_vb_runtime.launcher_page > 0 ? LV_COLOR_WHITE : lv_color_hex(0x64748b));
+        lv_obj_center(prev_label);
+
+        next = lv_btn_create(g_vb_runtime.root);
+        lv_obj_set_size(next, 72, 30);
+        lv_obj_align(next, LV_ALIGN_BOTTOM_RIGHT, -24, -34);
+        lv_obj_set_style_radius(next, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(next, lv_color_hex(g_vb_runtime.launcher_page < max_page ? 0x334155 : 0x1f2937), LV_PART_MAIN | LV_STATE_DEFAULT);
+        if (g_vb_runtime.launcher_page < max_page) lv_obj_add_event_cb(next, vb_launcher_page_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_page_actions[1]);
+        next_label = vb_create_label(next, "Next", FONT_SMALL, g_vb_runtime.launcher_page < max_page ? LV_COLOR_WHITE : lv_color_hex(0x64748b));
+        lv_obj_center(next_label);
+        rt_snprintf(line, sizeof(line), "%d-%d/%d",
+                    g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS + (count ? 1 : 0),
+                    g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS + count,
+                    total);
+    }
+    else
+    {
+        rt_snprintf(line, sizeof(line), "Tap Apps from any app to return here");
+    }
+    lv_obj_t *foot = vb_create_label(g_vb_runtime.root, line, FONT_SMALL, lv_color_hex(0x94a3b8));
+    lv_obj_set_width(foot, 170);
+    lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -40);
+
+    g_vb_runtime.status_label = vb_create_label(g_vb_runtime.root, "launcher ready", FONT_SMALL, lv_color_hex(0xa7f3d0));
+    lv_obj_set_width(g_vb_runtime.status_label, 350);
+    lv_obj_set_style_text_align(g_vb_runtime.status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+}
+
 static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
 {
     int i;
     char line[VB_MAX_TEXT + 32];
+
+    g_vb_runtime.touch.available = 1;
+    g_vb_runtime.touch.ready = 1;
+    g_vb_runtime.touch.active = 0;
+    g_vb_runtime.touch.last_event = 0;
+    g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
 
     g_vb_runtime.root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(g_vb_runtime.root, LV_HOR_RES_MAX, LV_VER_RES_MAX);
     lv_obj_align(g_vb_runtime.root, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(g_vb_runtime.root, LV_OBJ_FLAG_SCROLLABLE);
     vb_set_obj_bg(g_vb_runtime.root, 0x0f172a);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
 
     lv_obj_t *back = lv_btn_create(g_vb_runtime.root);
     lv_obj_set_size(back, 72, 36);
@@ -3391,6 +7754,15 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
     lv_obj_add_event_cb(back, vb_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
     lv_obj_t *back_label = vb_create_label(back, "Back", FONT_SMALL, LV_COLOR_WHITE);
     lv_obj_center(back_label);
+
+    lv_obj_t *apps = lv_btn_create(g_vb_runtime.root);
+    lv_obj_set_size(apps, 72, 36);
+    lv_obj_align(apps, LV_ALIGN_TOP_RIGHT, -12, 14);
+    lv_obj_set_style_radius(apps, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(apps, lv_color_hex(0x0f766e), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(apps, vb_launcher_open_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_t *apps_label = vb_create_label(apps, "Apps", FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_center(apps_label);
 
     lv_obj_t *title = vb_create_label(g_vb_runtime.root, "VibeBoard Runtime", FONT_BIGL, lv_color_hex(0x5eead4));
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
@@ -3434,12 +7806,18 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
     }
 
     g_vb_runtime.clock_label = vb_create_label(g_vb_runtime.root, "tick=0", FONT_SMALL, lv_color_hex(0xfbbf24));
-    lv_obj_align(g_vb_runtime.clock_label, LV_ALIGN_BOTTOM_MID, 0, -48);
+    lv_obj_align(g_vb_runtime.clock_label, LV_ALIGN_BOTTOM_MID, 0, -64);
+
+    g_vb_runtime.flow_label = vb_create_label(g_vb_runtime.root, "flow ready: waiting for phone", FONT_SMALL, lv_color_hex(0xbfdbfe));
+    lv_obj_set_width(g_vb_runtime.flow_label, 350);
+    lv_obj_set_style_text_align(g_vb_runtime.flow_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.flow_label, LV_ALIGN_BOTTOM_MID, 0, -38);
+    vb_runtime_flow_update_label();
 
     g_vb_runtime.status_label = vb_create_label(g_vb_runtime.root, "serial bridge ready", FONT_SMALL, lv_color_hex(0xa7f3d0));
     lv_obj_set_width(g_vb_runtime.status_label, 350);
     lv_obj_set_style_text_align(g_vb_runtime.status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -14);
 }
 
 static int vb_load_active_package(void)
@@ -3449,13 +7827,16 @@ static int vb_load_active_package(void)
     char *json;
     int manifest_loaded = 0;
     int main_lua_present = 0;
+    int start_result = RT_EOK;
 
     vibeboard_lua_stop_app();
     rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
     g_vb_runtime.component_count = 0;
+    g_vb_runtime.app_running = 0;
+    g_vb_runtime.app_failed = 0;
     vb_read_active_app(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app));
     vb_safe_copy(g_vb_runtime.app_name, sizeof(g_vb_runtime.app_name), g_vb_runtime.active_app);
-    vb_safe_copy(g_vb_runtime.description, sizeof(g_vb_runtime.description), "Install app packages over USB serial. No firmware flash needed.");
+    vb_safe_copy(g_vb_runtime.description, sizeof(g_vb_runtime.description), "Install app packages over USB serial or BLE. No firmware flash needed.");
 
     vb_build_app_path(manifest_path, sizeof(manifest_path), g_vb_runtime.active_app, "manifest.json");
     vb_build_app_path(lua_path, sizeof(lua_path), g_vb_runtime.active_app, "main.lua");
@@ -3478,25 +7859,86 @@ static int vb_load_active_package(void)
     {
         rt_kprintf("[vb_runtime] missing manifest: %s, using built-in panel\n", manifest_path);
     }
+    vb_runtime_flow_load_state();
     rt_kprintf("[vb_runtime] active app: %s\n", g_vb_runtime.active_app);
+    if (!manifest_loaded && !main_lua_present)
+    {
+        if (rt_strcmp(g_vb_runtime.active_app, VIBEBOARD_DEFAULT_APP_ID) == 0)
+        {
+            vb_runtime_set_app_result(RT_EOK, "app manager idle");
+            vb_render_app_manager_ui("Ready. Install or launch a Runtime app.");
+            return RT_EOK;
+        }
+        g_vb_runtime.app_failed = 1;
+        vb_runtime_set_app_result(-RT_ERROR, "active package missing manifest and main.lua");
+        vb_render_app_manager_ui(g_vb_runtime.app_last_error);
+        return -RT_ERROR;
+    }
     vb_render_runtime_ui(manifest_loaded, main_lua_present);
 
     if (vibeboard_lua_runtime_available() && main_lua_present)
     {
-        if (vibeboard_lua_start_script(lua_path, manifest_path) == RT_EOK)
+        start_result = vibeboard_lua_start_script(lua_path, manifest_path);
+        if (start_result == RT_EOK)
         {
+            g_vb_runtime.app_running = 1;
+            g_vb_runtime.app_failed = 0;
+            vb_runtime_set_app_result(RT_EOK, "lua app running");
             rt_kprintf("[vb_runtime] lua app started: %s engine=%s\n", lua_path, vibeboard_lua_runtime_name());
         }
         else
         {
+            g_vb_runtime.app_failed = 1;
+            vb_runtime_set_app_result(start_result, "lua adapter failed, manifest fallback shown");
+            vb_set_status("lua failed; Apps opens manager");
             rt_kprintf("[vb_runtime] lua adapter failed, using manifest fallback\n");
         }
     }
-    else if (main_lua_present)
+    else if (manifest_loaded)
     {
-        rt_kprintf("[vb_runtime] main.lua present, lua adapter unavailable: %s\n", lua_path);
+        g_vb_runtime.app_running = 1;
+        vb_runtime_set_app_result(RT_EOK, "manifest app running");
+        if (main_lua_present)
+        {
+            rt_kprintf("[vb_runtime] main.lua present, lua adapter unavailable: %s\n", lua_path);
+        }
     }
-    return RT_EOK;
+    else if (rt_strcmp(g_vb_runtime.active_app, VIBEBOARD_DEFAULT_APP_ID) == 0)
+    {
+        vb_runtime_set_app_result(RT_EOK, "app manager idle");
+    }
+    else
+    {
+        g_vb_runtime.app_failed = 1;
+        vb_runtime_set_app_result(-RT_ERROR, "active package missing manifest and main.lua");
+    }
+    return start_result;
+}
+
+static void vb_runtime_stop_current_app(void)
+{
+    if (g_vb_runtime.root)
+    {
+        lv_obj_del(g_vb_runtime.root);
+        g_vb_runtime.root = RT_NULL;
+    }
+    vibeboard_lua_stop_app();
+    vb_weather_release_image();
+    rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
+    g_vb_runtime.component_count = 0;
+    g_vb_runtime.status_label = RT_NULL;
+    g_vb_runtime.clock_label = RT_NULL;
+    g_vb_runtime.flow_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
+    g_vb_runtime.app_running = 0;
+    g_vb_runtime.app_failed = 0;
+    g_vb_runtime.app_stop_count++;
+    vb_runtime_set_app_result(RT_EOK, "stopped");
+    vb_read_active_app(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app));
+    vb_safe_copy(g_vb_runtime.app_name, sizeof(g_vb_runtime.app_name), "Runtime App Manager");
+    vb_safe_copy(g_vb_runtime.description, sizeof(g_vb_runtime.description), "Tap an installed app to launch it.");
+    vb_render_app_manager_ui("App stopped. Choose another app.");
+    rt_kprintf("[vb_runtime] app stopped active=%s\n", g_vb_runtime.active_app);
 }
 
 static int vb_runtime_reload_current(void)
@@ -3510,8 +7952,10 @@ static int vb_runtime_reload_current(void)
         lv_obj_del(g_vb_runtime.root);
         g_vb_runtime.root = RT_NULL;
     }
+    vb_weather_release_image();
     g_vb_runtime.status_label = RT_NULL;
     g_vb_runtime.clock_label = RT_NULL;
+    g_vb_runtime.flow_label = RT_NULL;
     return vb_load_active_package();
 }
 
@@ -3542,16 +7986,45 @@ static int vb_runtime_select_app(const char *app_id)
     return RT_EOK;
 }
 
+static void vb_runtime_install_close_file(void)
+{
+    if (g_vb_runtime.install_fd >= 0)
+    {
+        if (fsync(g_vb_runtime.install_fd) != 0)
+        {
+            rt_kprintf("[vb_runtime] install file sync failed: %s\n",
+                       g_vb_runtime.install_path[0] ? g_vb_runtime.install_path : "--");
+        }
+        close(g_vb_runtime.install_fd);
+        g_vb_runtime.install_fd = -1;
+    }
+    g_vb_runtime.install_path[0] = '\0';
+    g_vb_runtime.install_offset = 0;
+}
+
+static int vb_runtime_install_session_matches(const char *app_id)
+{
+    return app_id && g_vb_runtime.install_app[0] &&
+           rt_strcmp(g_vb_runtime.install_app, app_id) == 0;
+}
+
 static int vb_runtime_install_begin_app(const char *app_id)
 {
     char staging_dir[VB_MAX_PATH];
     char marker[VB_MAX_PATH];
+    int cleanup;
     if (!vb_is_safe_app_id(app_id))
     {
         rt_kprintf("usage: vb_runtime_install_begin <app_id>\n");
         return -RT_EINVAL;
     }
     if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    if (g_vb_runtime.install_app[0])
+    {
+        cleanup = vb_runtime_install_abort_app(g_vb_runtime.install_app);
+        if (cleanup != RT_EOK) return cleanup;
+    }
+    vb_runtime_install_close_file();
     vb_build_install_dir(staging_dir, sizeof(staging_dir), VIBEBOARD_STAGING_PREFIX, app_id);
     if (access(staging_dir, 0) == 0 && vb_remove_tree(staging_dir) != RT_EOK)
     {
@@ -3565,6 +8038,7 @@ static int vb_runtime_install_begin_app(const char *app_id)
     }
     rt_snprintf(marker, sizeof(marker), "%s/.installing", staging_dir);
     vb_write_text_file(marker, "1\n");
+    vb_safe_copy(g_vb_runtime.install_app, sizeof(g_vb_runtime.install_app), app_id);
     rt_kprintf("[vb_runtime] install begin: %s\n", app_id);
     return RT_EOK;
 }
@@ -3576,8 +8050,8 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
     char dir_path[VB_MAX_PATH];
     char *slash;
     long offset;
-    int fd;
     int result;
+    int written = 0;
     int flags;
 
     if (!vb_is_safe_app_id(app_id) || !vb_is_runtime_package_path(path) ||
@@ -3585,6 +8059,12 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
     {
         rt_kprintf("[vb_runtime] install file failed: invalid args\n");
         return -RT_EINVAL;
+    }
+    if (!vb_runtime_install_session_matches(app_id))
+    {
+        rt_kprintf("[vb_runtime] install file failed: session=%s app=%s\n",
+                   g_vb_runtime.install_app[0] ? g_vb_runtime.install_app : "--", app_id);
+        return -RT_EBUSY;
     }
 
     offset = strtol(offset_text, RT_NULL, 10);
@@ -3610,27 +8090,45 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
         }
     }
 
-    flags = O_WRONLY | O_CREAT;
-    if (offset == 0) flags |= O_TRUNC;
-    fd = open(file_path, flags, 0);
-    if (fd < 0)
+    if (g_vb_runtime.install_fd < 0 || rt_strcmp(g_vb_runtime.install_path, file_path) != 0)
     {
-        rt_kprintf("[vb_runtime] install file open failed: %s\n", file_path);
-        return -RT_ERROR;
+        vb_runtime_install_close_file();
+        flags = O_WRONLY | O_CREAT;
+        if (offset == 0) flags |= O_TRUNC;
+        g_vb_runtime.install_fd = open(file_path, flags, 0);
+        if (g_vb_runtime.install_fd < 0)
+        {
+            rt_kprintf("[vb_runtime] install file open failed: %s\n", file_path);
+            return -RT_ERROR;
+        }
+        vb_safe_copy(g_vb_runtime.install_path, sizeof(g_vb_runtime.install_path), file_path);
+        g_vb_runtime.install_offset = -1;
     }
-    if (lseek(fd, offset, SEEK_SET) < 0)
+
+    if (g_vb_runtime.install_offset != offset)
     {
-        close(fd);
-        rt_kprintf("[vb_runtime] install file seek failed: %s\n", file_path);
-        return -RT_ERROR;
+        if (lseek(g_vb_runtime.install_fd, offset, SEEK_SET) < 0)
+        {
+            vb_runtime_install_close_file();
+            rt_kprintf("[vb_runtime] install file seek failed: %s\n", file_path);
+            return -RT_ERROR;
+        }
     }
-    result = vb_write_hex_chunk(fd, hex);
-    close(fd);
+    result = vb_write_hex_chunk(g_vb_runtime.install_fd, hex, &written);
     if (result != RT_EOK)
     {
+        vb_runtime_install_close_file();
         rt_kprintf("[vb_runtime] install file write failed: %s (%d)\n", path, result);
         return result;
     }
+    if (fsync(g_vb_runtime.install_fd) != 0)
+    {
+        vb_runtime_install_close_file();
+        rt_kprintf("[vb_runtime] install file sync failed: %s\n", path);
+        return -RT_ERROR;
+    }
+    g_vb_runtime.install_offset = offset + written;
+    vb_runtime_install_close_file();
     if (!g_vb_runtime.quiet_logs)
     {
         rt_kprintf("[vb_runtime] install chunk: %s %ld %u\n", path, offset,
@@ -3655,6 +8153,13 @@ static int vb_runtime_install_end_app(const char *app_id)
         rt_kprintf("usage: vb_runtime_install_end <app_id>\n");
         return -RT_EINVAL;
     }
+    if (!vb_runtime_install_session_matches(app_id))
+    {
+        rt_kprintf("[vb_runtime] install end failed: session=%s app=%s\n",
+                   g_vb_runtime.install_app[0] ? g_vb_runtime.install_app : "--", app_id);
+        return -RT_EBUSY;
+    }
+    vb_runtime_install_close_file();
     vb_build_install_dir(staging_dir, sizeof(staging_dir), VIBEBOARD_STAGING_PREFIX, app_id);
     rt_snprintf(app_dir, sizeof(app_dir), "%s/%s", VIBEBOARD_APP_ROOT, app_id);
     app_dir[sizeof(app_dir) - 1] = '\0';
@@ -3669,6 +8174,15 @@ static int vb_runtime_install_end_app(const char *app_id)
     {
         rt_kprintf("[vb_runtime] install end failed: package incomplete %s\n", app_id);
         return -RT_ERROR;
+    }
+    if (vb_file_exists(manifest_path))
+    {
+        int validate = vb_runtime_validate_manifest_for_app(app_id, manifest_path);
+        if (validate != RT_EOK)
+        {
+            rt_kprintf("[vb_runtime] install end failed: manifest invalid %s rc=%d\n", app_id, validate);
+            return validate;
+        }
     }
     if (access(backup_dir, 0) == 0 && vb_remove_tree(backup_dir) != RT_EOK)
     {
@@ -3713,6 +8227,7 @@ static int vb_runtime_install_end_app(const char *app_id)
     {
         vb_remove_tree(backup_dir);
     }
+    vb_runtime_install_clear_session();
     rt_kprintf("[vb_runtime] install complete: %s\n", app_id);
     if (g_vb_runtime.running)
     {
@@ -3721,6 +8236,7 @@ static int vb_runtime_install_end_app(const char *app_id)
     return RT_EOK;
 }
 
+#if VB_RUNTIME_HAS_HTTP_APP_OTA
 static int vb_is_safe_http_base_url(const char *url)
 {
     int i;
@@ -3767,7 +8283,6 @@ static int vb_build_staging_file_path(char *dst, rt_size_t cap, const char *app_
     return RT_EOK;
 }
 
-#if VB_RUNTIME_HAS_HTTP_APP_OTA
 static int vb_http_download_to_file(const char *url, const char *file_path, int required, int max_size)
 {
     struct webclient_session *session = RT_NULL;
@@ -3952,11 +8467,8 @@ static int vb_http_download_listed_files(const char *app_id, const char *base_ur
     rt_free(list);
     return result;
 }
-#endif
-
 static int vb_runtime_install_url_app(const char *app_id, const char *base_url)
 {
-#if VB_RUNTIME_HAS_HTTP_APP_OTA
     char staging_dir[VB_MAX_PATH];
     char files_txt_path[VB_MAX_PATH];
     int result;
@@ -4013,24 +8525,56 @@ static int vb_runtime_install_url_app(const char *app_id, const char *base_url)
 
     rt_kprintf("[vb_runtime][ota] install url complete: %s from %s\n", app_id, base_url);
     return RT_EOK;
-#else
-    (void)app_id;
-    (void)base_url;
-    rt_kprintf("[vb_runtime][ota] unavailable: bt-pan or webclient not built\n");
-    return -RT_ENOSYS;
-#endif
 }
+#endif
 
 static int vb_runtime_status_command(void)
 {
     char active[VB_MAX_APP_ID];
     int fs = vb_prepare_filesystem();
     vb_read_active_app(active, sizeof(active));
+    vb_runtime_gpio_refresh();
     rt_kprintf("[vb_runtime] api=%s\n", VIBEBOARD_RUNTIME_API_VERSION);
     rt_kprintf("[vb_runtime] root=%s\n", VIBEBOARD_APP_ROOT);
     rt_kprintf("[vb_runtime] active=%s\n", active);
     rt_kprintf("[vb_runtime] fs=%s\n", fs == RT_EOK ? "ready" : "unavailable");
+    rt_kprintf("[vb_runtime] capabilities=%s\n", VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION);
+    rt_kprintf("[vb_runtime] power_api=%s battery=%d charger=%d\n",
+               VIBEBOARD_RUNTIME_POWER_API_VERSION, VB_RUNTIME_HAS_POWER_BATTERY,
+               VB_RUNTIME_HAS_POWER_CHARGER);
+    rt_kprintf("[vb_runtime] display_api=%s display=%d brightness=%d ready=%d\n",
+               VIBEBOARD_RUNTIME_DISPLAY_API_VERSION, VB_RUNTIME_HAS_DISPLAY,
+               g_vb_runtime.display_brightness, g_vb_runtime.display_last_ready);
+    rt_kprintf("[vb_runtime] rgb_api=%s rgb=%d color=%06lx\n",
+               VIBEBOARD_RUNTIME_RGB_API_VERSION, VB_RUNTIME_HAS_RGB,
+               (unsigned long)(g_vb_runtime.rgb_color & 0xffffffu));
+    rt_kprintf("[vb_runtime] touch_api=%s ready=%d active=%d count=%lu event=%s gesture=%s x=%d y=%d dx=%d dy=%d dur=%lums\n",
+               VIBEBOARD_RUNTIME_TOUCH_API_VERSION,
+               g_vb_runtime.touch.ready,
+               g_vb_runtime.touch.active,
+               (unsigned long)g_vb_runtime.touch.count,
+               vb_runtime_touch_event_name(g_vb_runtime.touch.last_event),
+               vb_runtime_touch_gesture_name(g_vb_runtime.touch.gesture_dir),
+               g_vb_runtime.touch.point.x,
+               g_vb_runtime.touch.point.y,
+               g_vb_runtime.touch.delta.x,
+               g_vb_runtime.touch.delta.y,
+               (unsigned long)g_vb_runtime.touch.last_duration_ms);
+    rt_kprintf("[vb_runtime] gpio_api=%s ready=%d key1=%s(%d) key2=%s(%d)\n",
+               VIBEBOARD_RUNTIME_GPIO_API_VERSION,
+               g_vb_runtime.gpio.ready,
+               g_vb_runtime.gpio.key1_ok ? (g_vb_runtime.gpio.key1_pressed ? "pressed" : "released") : "--",
+               g_vb_runtime.gpio.key1_level,
+               g_vb_runtime.gpio.key2_ok ? (g_vb_runtime.gpio.key2_pressed ? "pressed" : "released") : "--",
+               g_vb_runtime.gpio.key2_level);
     rt_kprintf("[vb_runtime] lua=%s\n", vibeboard_lua_runtime_available() ? vibeboard_lua_runtime_name() : "manifest-fallback");
+    rt_kprintf("[vb_runtime] app_manager=%s state=%s launches=%lu stops=%lu last=%d error=%s\n",
+               VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION,
+               vb_runtime_app_state_name(),
+               (unsigned long)g_vb_runtime.app_launch_count,
+               (unsigned long)g_vb_runtime.app_stop_count,
+               g_vb_runtime.app_last_status,
+               g_vb_runtime.app_last_error[0] ? g_vb_runtime.app_last_error : "--");
     rt_kprintf("[vb_runtime] transport=serial-msh\n");
     rt_kprintf("[vb_runtime] running=%d\n", g_vb_runtime.running);
     rt_kprintf("[vb_runtime] quiet_logs=%d\n", g_vb_runtime.quiet_logs);
@@ -4042,63 +8586,88 @@ static int vb_runtime_status_command(void)
     return RT_EOK;
 }
 
-static int vb_runtime_net_status_command(void)
+static int vb_runtime_app_status_command(void)
 {
-    rt_kprintf("[vb_runtime][net] api=%s\n", VIBEBOARD_RUNTIME_NET_API_VERSION);
-    rt_kprintf("[vb_runtime][net] hardware=sf32lb52-mod-1\n");
-    rt_kprintf("[vb_runtime][net] native_wifi=0\n");
-    rt_kprintf("[vb_runtime][net] recommended_transport=ble-gatt-app-install\n");
-#if VB_RUNTIME_HAS_BT_PAN
-    rt_kprintf("[vb_runtime][net] available=1\n");
-    rt_kprintf("[vb_runtime][net] transport=bt-pan\n");
-    rt_kprintf("[vb_runtime][net] built=1\n");
-    rt_kprintf("[vb_runtime][net] initialized=%d\n", g_vb_pan.initialized);
-    rt_kprintf("[vb_runtime][net] bt_opened=%d\n", g_vb_pan.bt_opened);
-    rt_kprintf("[vb_runtime][net] stack_ready=%d\n", g_vb_pan.stack_ready);
-    rt_kprintf("[vb_runtime][net] name_requested=%d\n", g_vb_pan.name_requested);
-    rt_kprintf("[vb_runtime][net] name_confirmed=%d\n", g_vb_pan.name_confirmed);
-    rt_kprintf("[vb_runtime][net] final_name_requested=%d\n", g_vb_pan.final_name_requested);
-    rt_kprintf("[vb_runtime][net] scan_mode=%d\n", g_vb_pan.scan_mode);
-    rt_kprintf("[vb_runtime][net] target_scan_mode=%d\n", g_vb_pan.target_scan_mode);
-    rt_kprintf("[vb_runtime][net] scan_mode_fsm=%d\n", g_vb_pan.scan_mode_fsm);
-    rt_kprintf("[vb_runtime][net] scan_confirmed=%d\n", g_vb_pan.scan_confirmed);
-    rt_kprintf("[vb_runtime][net] bt_connected=%d\n", g_vb_pan.bt_connected);
-    rt_kprintf("[vb_runtime][net] pan_connected=%d\n", g_vb_pan.pan_connected);
-    rt_kprintf("[vb_runtime][net] connecting=%d\n", g_vb_pan.connecting);
-    rt_kprintf("[vb_runtime][net] pairing_pending=%d\n", g_vb_pan.pairing_pending);
-    rt_kprintf("[vb_runtime][net] open_retries=%d\n", g_vb_pan.open_retries);
-    rt_kprintf("[vb_runtime][net] last_error=%d\n", g_vb_pan.last_error);
-    rt_kprintf("[vb_runtime][net] local_name=%s\n",
-               g_vb_pan.local_name[0] ? g_vb_pan.local_name : VIBEBOARD_BT_PAN_NAME);
-    rt_kprintf("[vb_runtime][net] lwip=1\n");
-    rt_kprintf("[vb_runtime][net] app_ota_http=%d\n", VB_RUNTIME_HAS_HTTP_APP_OTA);
-#else
-    rt_kprintf("[vb_runtime][net] available=0\n");
-    rt_kprintf("[vb_runtime][net] transport=bt-pan\n");
-    rt_kprintf("[vb_runtime][net] reason=not_built\n");
-#if defined(RT_USING_BLUETOOTH)
-    rt_kprintf("[vb_runtime][net] bluetooth_config=1\n");
-#else
-    rt_kprintf("[vb_runtime][net] bluetooth_config=0\n");
-#endif
-#if defined(CFG_PAN)
-    rt_kprintf("[vb_runtime][net] pan_config=1\n");
-#else
-    rt_kprintf("[vb_runtime][net] pan_config=0\n");
-#endif
-#if defined(RT_USING_LWIP)
-    rt_kprintf("[vb_runtime][net] lwip=1\n");
-#else
-    rt_kprintf("[vb_runtime][net] lwip=0\n");
-#endif
-#endif
-    return RT_EOK;
+    char json[VB_APP_JSON_MAX];
+    int result = vb_runtime_app_status_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
 }
 
+static int vb_runtime_apps_status_command(void)
+{
+    char json[VB_APP_JSON_MAX];
+    int result = vb_runtime_app_list_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+#if VB_RUNTIME_HAS_BT_PAN
+static int vb_runtime_pan_status_command(void)
+{
+    rt_kprintf("[vb_runtime][pan] api=diagnostic/v1\n");
+    rt_kprintf("[vb_runtime][pan] product_transport=ble-gatt-or-serial\n");
+    rt_kprintf("[vb_runtime][pan] available=1\n");
+    rt_kprintf("[vb_runtime][pan] built=1\n");
+    rt_kprintf("[vb_runtime][pan] initialized=%d\n", g_vb_pan.initialized);
+    rt_kprintf("[vb_runtime][pan] bt_opened=%d\n", g_vb_pan.bt_opened);
+    rt_kprintf("[vb_runtime][pan] stack_ready=%d\n", g_vb_pan.stack_ready);
+    rt_kprintf("[vb_runtime][pan] name_requested=%d\n", g_vb_pan.name_requested);
+    rt_kprintf("[vb_runtime][pan] name_confirmed=%d\n", g_vb_pan.name_confirmed);
+    rt_kprintf("[vb_runtime][pan] final_name_requested=%d\n", g_vb_pan.final_name_requested);
+    rt_kprintf("[vb_runtime][pan] scan_mode=%d\n", g_vb_pan.scan_mode);
+    rt_kprintf("[vb_runtime][pan] target_scan_mode=%d\n", g_vb_pan.target_scan_mode);
+    rt_kprintf("[vb_runtime][pan] scan_mode_fsm=%d\n", g_vb_pan.scan_mode_fsm);
+    rt_kprintf("[vb_runtime][pan] scan_confirmed=%d\n", g_vb_pan.scan_confirmed);
+    rt_kprintf("[vb_runtime][pan] bt_connected=%d\n", g_vb_pan.bt_connected);
+    rt_kprintf("[vb_runtime][pan] pan_connected=%d\n", g_vb_pan.pan_connected);
+    rt_kprintf("[vb_runtime][pan] connecting=%d\n", g_vb_pan.connecting);
+    rt_kprintf("[vb_runtime][pan] pairing_pending=%d\n", g_vb_pan.pairing_pending);
+    rt_kprintf("[vb_runtime][pan] open_retries=%d\n", g_vb_pan.open_retries);
+    rt_kprintf("[vb_runtime][pan] last_error=%d\n", g_vb_pan.last_error);
+    rt_kprintf("[vb_runtime][pan] local_name=%s\n",
+               g_vb_pan.local_name[0] ? g_vb_pan.local_name : VIBEBOARD_BT_PAN_NAME);
+    rt_kprintf("[vb_runtime][pan] lwip=1\n");
+    rt_kprintf("[vb_runtime][pan] app_ota_http=%d\n", VB_RUNTIME_HAS_HTTP_APP_OTA);
+    return RT_EOK;
+}
+#endif
+
+static int vb_runtime_rgb_status_command(void)
+{
+    char json[VB_RGB_JSON_MAX];
+    int result = vb_runtime_rgb_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
 static int vb_runtime_sensors_status_command(void)
 {
     char json[VB_SENSOR_JSON_MAX];
     int result = vb_runtime_sensors_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+static int vb_runtime_power_status_command(void)
+{
+    char json[VB_POWER_JSON_MAX];
+    int result = vb_runtime_power_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+static int vb_runtime_display_status_command(void)
+{
+    char json[VB_DISPLAY_JSON_MAX];
+    int result = vb_runtime_display_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+static int vb_runtime_gpio_status_command(void)
+{
+    char json[VB_GPIO_JSON_MAX];
+    int result = vb_runtime_gpio_read_json(json, sizeof(json));
     vb_runtime_print_json_line(json);
     return result;
 }
@@ -4180,16 +8749,163 @@ static int vb_runtime_component_sensor_text(const char *capability, char *dst, r
                     (unsigned long)g_vb_sensor.step_data.data.step);
         return 1;
     }
+    if (rt_strcmp(capability, "display.brightness") == 0 ||
+        rt_strcmp(capability, "display.size") == 0 ||
+        rt_strcmp(capability, "display.resolution") == 0 ||
+        rt_strcmp(capability, "display.state") == 0 ||
+        rt_strcmp(capability, "display.bpp") == 0 ||
+        rt_strcmp(capability, "screen.brightness") == 0 ||
+        rt_strcmp(capability, "screen.size") == 0 ||
+        rt_strcmp(capability, "vibeboard.display.brightness") == 0 ||
+        rt_strcmp(capability, "vibeboard.display.size") == 0 ||
+        rt_strcmp(capability, "vibeboard.display.state") == 0 ||
+        rt_strcmp(capability, "vibeboard.display.bpp") == 0)
+    {
+        return vb_runtime_display_format_text(capability, dst, cap);
+    }
+    if (rt_strncmp(capability, "flow.", 5) == 0 ||
+        rt_strncmp(capability, "vibeboard.flow.", 15) == 0)
+    {
+        return vb_runtime_flow_format_text(capability, dst, cap);
+    }
+    if (rt_strcmp(capability, "voice.ready") == 0 ||
+        rt_strcmp(capability, "voice.recording") == 0 ||
+        rt_strcmp(capability, "voice.state") == 0 ||
+        rt_strcmp(capability, "voice.seq") == 0 ||
+        rt_strcmp(capability, "voice.bytes") == 0 ||
+        rt_strcmp(capability, "voice.duration") == 0 ||
+        rt_strcmp(capability, "voice.dropped") == 0 ||
+        rt_strcmp(capability, "voice.error") == 0 ||
+        rt_strcmp(capability, "voice.rate") == 0 ||
+        rt_strcmp(capability, "voice.built") == 0 ||
+        rt_strcmp(capability, "voice.available") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.ready") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.recording") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.state") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.seq") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.bytes") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.duration") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.dropped") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.error") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.rate") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.built") == 0 ||
+        rt_strcmp(capability, "vibeboard.voice.available") == 0)
+    {
+        return vb_runtime_voice_format_text(capability, dst, cap);
+    }
+    if (rt_strcmp(capability, "power.battery") == 0 ||
+        rt_strcmp(capability, "battery") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.battery") == 0)
+    {
+        return vb_runtime_power_format_text(capability, dst, cap);
+    }
+    if (rt_strcmp(capability, "charger") == 0 ||
+        rt_strcmp(capability, "power.charger") == 0 ||
+        rt_strcmp(capability, "power.charger.status") == 0 ||
+        rt_strcmp(capability, "power.charger.state") == 0 ||
+        rt_strcmp(capability, "power.charger.det") == 0 ||
+        rt_strcmp(capability, "power.charger.en") == 0 ||
+        rt_strcmp(capability, "power.charger.fault") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger.status") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger.state") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger.det") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger.en") == 0 ||
+        rt_strcmp(capability, "vibeboard.power.charger.fault") == 0)
+    {
+        return vb_runtime_power_format_text(capability, dst, cap);
+    }
+    if (rt_strcmp(capability, "gpio.key1") == 0 ||
+        rt_strcmp(capability, "vibeboard.gpio.key1") == 0)
+    {
+        return vb_runtime_gpio_format_text("key1", dst, cap);
+    }
+    if (rt_strcmp(capability, "gpio.key1.level") == 0 ||
+        rt_strcmp(capability, "vibeboard.gpio.key1.level") == 0)
+    {
+        return vb_runtime_gpio_format_text("key1.level", dst, cap);
+    }
+    if (rt_strcmp(capability, "gpio.key2") == 0 ||
+        rt_strcmp(capability, "vibeboard.gpio.key2") == 0)
+    {
+        return vb_runtime_gpio_format_text("key2", dst, cap);
+    }
+    if (rt_strcmp(capability, "gpio.key2.level") == 0 ||
+        rt_strcmp(capability, "vibeboard.gpio.key2.level") == 0)
+    {
+        return vb_runtime_gpio_format_text("key2.level", dst, cap);
+    }
+    if (rt_strcmp(capability, "touch.last") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.last") == 0)
+    {
+        if (g_vb_runtime.touch.ready)
+        {
+            rt_snprintf(dst, cap, "%d,%d", g_vb_runtime.touch.point.x, g_vb_runtime.touch.point.y);
+        }
+        else
+        {
+            rt_snprintf(dst, cap, "--");
+        }
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.count") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.count") == 0)
+    {
+        rt_snprintf(dst, cap, "%lu", (unsigned long)g_vb_runtime.touch.count);
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.event") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.event") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", vb_runtime_touch_event_name(g_vb_runtime.touch.last_event));
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.gesture") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.gesture") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", vb_runtime_touch_gesture_name(g_vb_runtime.touch.gesture_dir));
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.delta") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.delta") == 0)
+    {
+        rt_snprintf(dst, cap, "%d,%d", g_vb_runtime.touch.delta.x, g_vb_runtime.touch.delta.y);
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.duration") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.duration") == 0)
+    {
+        rt_snprintf(dst, cap, "%lums", (unsigned long)g_vb_runtime.touch.last_duration_ms);
+        return 1;
+    }
+    if (rt_strcmp(capability, "touch.active") == 0 ||
+        rt_strcmp(capability, "vibeboard.touch.active") == 0)
+    {
+        rt_snprintf(dst, cap, "%s", g_vb_runtime.touch.active ? "active" : "idle");
+        return 1;
+    }
     return 0;
 }
 
 static void vb_timer_cb(lv_timer_t *timer)
 {
     int i;
-    char text[48];
+    char text[VB_FLOW_MAX_PAYLOAD + VB_FLOW_MAX_CHANNEL + 48];
     uint32_t now = rt_tick_get();
     int sensor_refreshed = 0;
     (void)timer;
+    if (g_vb_runtime.pending_stop)
+    {
+        g_vb_runtime.pending_stop = 0;
+        vb_runtime_stop_current_app();
+        return;
+    }
+    if (g_vb_runtime.pending_manager_refresh)
+    {
+        g_vb_runtime.pending_manager_refresh = 0;
+        vb_render_app_manager_ui(g_vb_runtime.manager_message[0] ? g_vb_runtime.manager_message : "App manager");
+        return;
+    }
     if (g_vb_runtime.pending_reload)
     {
         g_vb_runtime.pending_reload = 0;
@@ -4203,6 +8919,18 @@ static void vb_timer_cb(lv_timer_t *timer)
         rt_snprintf(text, sizeof(text), "tick=%lu", (unsigned long)g_vb_runtime.tick_count);
         lv_label_set_text(g_vb_runtime.clock_label, text);
         g_vb_runtime.last_clock_update = now;
+    }
+    if (g_vb_runtime.flow_label && g_vb_runtime.flow_seen_total != g_vb_flow.total_count)
+    {
+        vb_runtime_flow_update_label();
+    }
+    if (g_vb_runtime.script_flow_label && g_vb_runtime.script_flow_seen_total != g_vb_flow.total_count)
+    {
+        if (vb_runtime_flow_format_text(g_vb_runtime.script_flow_field, text, sizeof(text)))
+        {
+            lv_label_set_text(g_vb_runtime.script_flow_label, text);
+        }
+        g_vb_runtime.script_flow_seen_total = g_vb_flow.total_count;
     }
     for (i = 0; i < g_vb_runtime.component_count; i++)
     {
@@ -4220,7 +8948,22 @@ static void vb_timer_cb(lv_timer_t *timer)
             }
         }
         else if (rt_strncmp(component->capability, "sensor.", 7) == 0 ||
-                 rt_strncmp(component->capability, "vibeboard.sensor.", 17) == 0)
+                 rt_strncmp(component->capability, "vibeboard.sensor.", 17) == 0 ||
+                 rt_strcmp(component->capability, "battery") == 0 ||
+                 rt_strcmp(component->capability, "charger") == 0 ||
+                 rt_strncmp(component->capability, "power.", 6) == 0 ||
+                 rt_strncmp(component->capability, "display.", 8) == 0 ||
+                 rt_strncmp(component->capability, "screen.", 7) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.display.", 18) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.power.", 16) == 0 ||
+                 rt_strncmp(component->capability, "voice.", 6) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.voice.", 16) == 0 ||
+                 rt_strncmp(component->capability, "flow.", 5) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.flow.", 15) == 0 ||
+                 rt_strncmp(component->capability, "touch.", 6) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.touch.", 17) == 0 ||
+                 rt_strncmp(component->capability, "gpio.", 5) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.gpio.", 16) == 0)
         {
             if (!sensor_refreshed)
             {
@@ -4266,9 +9009,16 @@ static void vb_timer_cb(lv_timer_t *timer)
 static void on_start(void)
 {
     rt_memset(&g_vb_runtime, 0, sizeof(g_vb_runtime));
+    g_vb_runtime.install_fd = -1;
     g_vb_runtime.running = 1;
     g_vb_runtime.quiet_logs = 1;
+    g_vb_runtime.rgb_color = 0x000000u;
+    g_vb_runtime.display_brightness = -1;
+    g_vb_runtime.display_target_brightness = -1;
     vb_prepare_filesystem();
+    (void)vb_runtime_display_load_state();
+    (void)vb_runtime_rgb_load_state();
+    vb_runtime_recover_install_state();
     vb_load_active_package();
     g_vb_runtime.timer = lv_timer_create(vb_timer_cb, VB_TIMER_PERIOD_MS, RT_NULL);
     rt_kprintf("[vb_runtime] start api=%s root=%s\n", VIBEBOARD_RUNTIME_API_VERSION, VIBEBOARD_APP_ROOT);
@@ -4277,6 +9027,7 @@ static void on_start(void)
 static void on_stop(void)
 {
     g_vb_runtime.running = 0;
+    vb_runtime_install_close_file();
     if (g_vb_runtime.timer)
     {
         lv_timer_del(g_vb_runtime.timer);
@@ -4288,6 +9039,7 @@ static void on_stop(void)
         lv_obj_del(g_vb_runtime.root);
         g_vb_runtime.root = RT_NULL;
     }
+    vb_weather_release_image();
     rt_kprintf("[vb_runtime] stop\n");
 }
 
@@ -4371,13 +9123,89 @@ static int vb_runtime_status(int argc, char **argv)
 }
 MSH_CMD_EXPORT(vb_runtime_status, show VibeBoard runtime status);
 
-static int vb_runtime_net_status(int argc, char **argv)
+static int vb_runtime_app(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    return vb_runtime_net_status_command();
+    return vb_runtime_app_status_command();
 }
-MSH_CMD_EXPORT(vb_runtime_net_status, show VibeBoard runtime network status);
+MSH_CMD_EXPORT(vb_runtime_app, show VibeBoard runtime app manager status as JSON);
+
+static int vb_runtime_apps(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_apps_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_apps, list VibeBoard runtime apps as JSON);
+
+static int vb_runtime_apps_page(int argc, char **argv)
+{
+    char json[VB_BLE_STATUS_MAX];
+    int offset = argc >= 2 ? (int)strtol(argv[1], RT_NULL, 10) : 0;
+    int limit = argc >= 3 ? (int)strtol(argv[2], RT_NULL, 10) : VB_LAUNCHER_MAX_ITEMS;
+    int result = vb_runtime_app_list_page_json(json, sizeof(json), offset, limit);
+    vb_runtime_print_json_line(json);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_apps_page, list one VibeBoard runtime app page as JSON);
+
+static int vb_runtime_launch(int argc, char **argv)
+{
+    int result;
+    if (argc < 2)
+    {
+        rt_kprintf("usage: vb_runtime_launch <app_id>\n");
+        return -RT_EINVAL;
+    }
+    result = vb_runtime_app_launch(argv[1]);
+    rt_kprintf("%s launch app=%s rc=%d\n", result == RT_EOK ? "ok" : "err", argv[1], result);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_launch, launch VibeBoard runtime app);
+
+static int vb_runtime_stop_app_msh(int argc, char **argv)
+{
+    int result;
+    (void)argc;
+    (void)argv;
+    result = vb_runtime_app_stop();
+    rt_kprintf("%s stop rc=%d\n", result == RT_EOK ? "ok" : "err", result);
+    return result;
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_stop_app_msh, vb_runtime_stop, stop active VibeBoard runtime app);
+
+static int vb_runtime_delete(int argc, char **argv)
+{
+    int result;
+    if (argc < 2)
+    {
+        rt_kprintf("usage: vb_runtime_delete <app_id>\n");
+        return -RT_EINVAL;
+    }
+    result = vb_runtime_app_delete(argv[1]);
+    rt_kprintf("%s delete app=%s rc=%d\n", result == RT_EOK ? "ok" : "err", argv[1], result);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_delete, delete stopped VibeBoard runtime app);
+
+static int vb_runtime_capabilities(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_capabilities_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_capabilities, show VibeBoard runtime capabilities as JSON);
+
+#if VB_RUNTIME_HAS_BT_PAN
+static int vb_runtime_pan_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_pan_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_pan_status, show VibeBoard PAN experiment status);
+#endif
 
 static int vb_runtime_sensors(int argc, char **argv)
 {
@@ -4386,6 +9214,170 @@ static int vb_runtime_sensors(int argc, char **argv)
     return vb_runtime_sensors_status_command();
 }
 MSH_CMD_EXPORT(vb_runtime_sensors, read VibeBoard built-in sensors as JSON);
+
+static int vb_runtime_power(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_power_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_power, read VibeBoard power status as JSON);
+
+static int vb_runtime_display(int argc, char **argv)
+{
+    char json[VB_DISPLAY_JSON_MAX];
+    int result;
+    if (argc >= 2)
+    {
+        result = vb_runtime_display_set_brightness_text(argv[1], json, sizeof(json));
+        vb_runtime_print_json_line(json);
+        return result;
+    }
+    return vb_runtime_display_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_display, read or set VibeBoard display brightness as JSON);
+
+static int vb_runtime_gpio(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_gpio_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_gpio, read VibeBoard GPIO whitelist status as JSON);
+
+static int vb_runtime_touch_status_command(void)
+{
+    char json[VB_TOUCH_JSON_MAX];
+    int result = vb_runtime_touch_read_json(json, sizeof(json));
+    vb_runtime_print_json_line(json);
+    return result;
+}
+
+static int vb_runtime_touch(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_touch_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_touch, read VibeBoard touch status as JSON);
+
+static int vb_runtime_rgb(int argc, char **argv)
+{
+    char json[VB_RGB_JSON_MAX];
+    int result;
+    if (argc >= 2)
+    {
+        result = vb_runtime_rgb_set_text(argv[1], json, sizeof(json));
+        vb_runtime_print_json_line(json);
+        return result;
+    }
+    return vb_runtime_rgb_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_rgb, read or set VibeBoard RGB LED color);
+static int vb_runtime_json_read_msh(int argc, char **argv)
+{
+    char text[VB_BLE_STATUS_MAX];
+    uint32_t offset;
+    uint32_t max_bytes;
+    int result;
+    if (argc < 4)
+    {
+        rt_kprintf("usage: json_read <kind> <offset> <max_bytes>\n");
+        return -RT_EINVAL;
+    }
+    offset = (uint32_t)strtoul(argv[2], RT_NULL, 10);
+    max_bytes = (uint32_t)strtoul(argv[3], RT_NULL, 10);
+    result = vb_runtime_ble_json_read(argv[1], offset, max_bytes, text, sizeof(text));
+    rt_kprintf("%s\n", text);
+    return result;
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_json_read_msh, json_read, read VibeBoard Runtime JSON as hex chunks);
+MSH_CMD_EXPORT_ALIAS(vb_runtime_json_read_msh, vb_runtime_json_read, read VibeBoard Runtime JSON as hex chunks);
+
+static int vb_runtime_flow_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_flow_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_flow_status, show VibeBoard BLE info flow status);
+
+static int vb_runtime_flow_send(int argc, char **argv)
+{
+    uint32_t sequence;
+    int result;
+    if (argc < 4)
+    {
+        rt_kprintf("usage: vb_runtime_flow_send <channel> <seq> <hex_utf8_payload>\n");
+        return -RT_EINVAL;
+    }
+    sequence = (uint32_t)strtoul(argv[2], RT_NULL, 10);
+    result = vb_runtime_flow_send_hex(argv[1], sequence, argv[3]);
+    rt_kprintf("%s flow_send channel=%s seq=%lu bytes=%d total=%lu\n",
+               result >= 0 ? "ok" : "err",
+               argv[1],
+               (unsigned long)sequence,
+               result >= 0 ? result : 0,
+               (unsigned long)g_vb_flow.total_count);
+    return result >= 0 ? RT_EOK : result;
+}
+MSH_CMD_EXPORT(vb_runtime_flow_send, append one VibeBoard BLE info flow frame);
+
+static int vb_runtime_flow_clear(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    vb_runtime_flow_clear_state();
+    rt_kprintf("ok flow_clear total=0\n");
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(vb_runtime_flow_clear, clear VibeBoard BLE info flow history);
+
+static int vb_runtime_voice(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_voice_json_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_voice, read VibeBoard voice bridge status as JSON);
+
+static int vb_runtime_voice_status_msh(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_voice_status_command();
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_voice_status_msh, vb_runtime_voice_status, show VibeBoard voice bridge status);
+
+static int vb_runtime_voice_start_msh(int argc, char **argv)
+{
+    uint32_t duration_ms = argc >= 2 ? (uint32_t)strtoul(argv[1], RT_NULL, 10) : VB_VOICE_DEFAULT_MS;
+    int result = vb_runtime_voice_start(duration_ms);
+    vb_runtime_voice_status_command();
+    return result;
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_voice_start_msh, vb_runtime_voice_start, capture VibeBoard microphone audio);
+
+static int vb_runtime_voice_read_msh(int argc, char **argv)
+{
+    char text[VB_BLE_STATUS_MAX];
+    uint32_t offset = argc >= 2 ? (uint32_t)strtoul(argv[1], RT_NULL, 10) : 0;
+    uint32_t max_bytes = argc >= 3 ? (uint32_t)strtoul(argv[2], RT_NULL, 10) : VB_VOICE_CHUNK_BYTES;
+    int result = vb_runtime_voice_read_hex(offset, max_bytes, text, sizeof(text));
+    rt_kprintf("[vb_runtime][voice] %s\n", result == RT_EOK ? text : "err voice_read");
+    return result;
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_voice_read_msh, vb_runtime_voice_read, read VibeBoard microphone PCM as hex);
+
+static int vb_runtime_voice_clear_msh(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    vb_runtime_voice_clear();
+    rt_kprintf("[vb_runtime][voice] cleared\n");
+    return RT_EOK;
+}
+MSH_CMD_EXPORT_ALIAS(vb_runtime_voice_clear_msh, vb_runtime_voice_clear, clear VibeBoard voice bridge capture);
 
 static int vb_runtime_sensor_probe(int argc, char **argv)
 {
@@ -4400,11 +9392,21 @@ static int vb_runtime_ble_status(int argc, char **argv)
     (void)argc;
     (void)argv;
 #if VB_RUNTIME_HAS_BLE_INSTALL
-    rt_kprintf("[vb_runtime][ble] api=%s name=%s init=%d power=%d service=%d adv=%d conn=%d notify=%d mtu=%d status=%s\n",
+    rt_kprintf("[vb_runtime][ble] ok ble_core api=%s name=%s init=%d power=%d service=%d\n",
                VIBEBOARD_RUNTIME_BLE_API_VERSION, VIBEBOARD_BLE_NAME,
-               g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready,
+               g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready);
+    rt_kprintf("[vb_runtime][ble] ok ble_conn adv=%d conn=%d notify=%d mtu=%d state=%d\n",
                g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.notify_cccd ? 1 : 0,
-               g_vb_ble.mtu, g_vb_ble.status);
+               g_vb_ble.mtu, (int)vb_ble_adv_context_state());
+    rt_kprintf("[vb_runtime][ble] ok ble_adv idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu\n",
+               (int)vb_ble_adv_context_index(),
+               (int)vb_ble_adv_context_transist(),
+               (int)g_vb_ble.last_adv_start_rc,
+               (int)g_vb_ble.last_adv_stop_rc,
+               (int)g_vb_ble.last_adv_stop_reason,
+               (unsigned long)g_vb_ble.adv_start_events,
+               (unsigned long)g_vb_ble.adv_stop_events,
+               (unsigned long)g_vb_ble.adv_restart_requests);
     return RT_EOK;
 #else
     rt_kprintf("[vb_runtime][ble] unavailable\n");
@@ -4413,6 +9415,22 @@ static int vb_runtime_ble_status(int argc, char **argv)
 }
 MSH_CMD_EXPORT(vb_runtime_ble_status, show VibeBoard BLE install status);
 
+static int vb_runtime_ble_restart(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    uint8_t result = vb_ble_advertising_force_restart();
+    rt_kprintf("[vb_runtime][ble] restart rc=%d\n", (int)result);
+    return result == SIBLES_ADV_NO_ERR ? RT_EOK : -RT_ERROR;
+#else
+    rt_kprintf("[vb_runtime][ble] unavailable\n");
+    return -RT_ENOSYS;
+#endif
+}
+MSH_CMD_EXPORT(vb_runtime_ble_restart, force restart VibeBoard BLE advertising);
+
+#if VB_RUNTIME_HAS_BT_PAN
 static int vb_runtime_pan_start(int argc, char **argv)
 {
     (void)argc;
@@ -4479,40 +9497,83 @@ static int vb_runtime_pan_forget(int argc, char **argv)
     return vb_pan_forget();
 }
 MSH_CMD_EXPORT(vb_runtime_pan_forget, clear VibeBoard Bluetooth paired devices);
+#endif
 
 static int vb_runtime_install_begin(int argc, char **argv)
 {
+    int result;
     if (argc < 2)
     {
         rt_kprintf("usage: vb_runtime_install_begin <app_id>\n");
         return -RT_EINVAL;
     }
-    return vb_runtime_install_begin_app(argv[1]);
+    result = vb_runtime_install_begin_app(argv[1]);
+    rt_kprintf("%s install_begin app=%s rc=%d\n",
+               result == RT_EOK ? "ok" : "err",
+               argv[1],
+               result);
+    return result;
 }
 MSH_CMD_EXPORT(vb_runtime_install_begin, begin VibeBoard runtime app serial install);
 
 static int vb_runtime_install_file(int argc, char **argv)
 {
+    int result;
     if (argc < 5)
     {
         rt_kprintf("usage: vb_runtime_install_file <app_id> <path> <offset> <hex>\n");
         return -RT_EINVAL;
     }
-    return vb_runtime_install_file_chunk(argv[1], argv[2], argv[3], argv[4]);
+    result = vb_runtime_install_file_chunk(argv[1], argv[2], argv[3], argv[4]);
+    rt_kprintf("%s install_file app=%s path=%s offset=%s rc=%d\n",
+               result == RT_EOK ? "ok" : "err",
+               argv[1],
+               argv[2],
+               argv[3],
+               result);
+    return result;
 }
 MSH_CMD_EXPORT(vb_runtime_install_file, write hex chunk to VibeBoard runtime app file);
 
+static int vb_runtime_install_abort(int argc, char **argv)
+{
+    int result;
+    if (argc < 2)
+    {
+        rt_kprintf("usage: vb_runtime_install_abort <app_id>\n");
+        return -RT_EINVAL;
+    }
+    result = vb_runtime_install_abort_app(argv[1]);
+    rt_kprintf("%s install_abort app=%s rc=%d\n",
+               result == RT_EOK ? "ok" : "err",
+               argv[1],
+               result);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_install_abort, abort VibeBoard runtime app serial install);
+
 static int vb_runtime_install_end(int argc, char **argv)
 {
+    int result;
     if (argc < 2)
     {
         rt_kprintf("usage: vb_runtime_install_end <app_id>\n");
         return -RT_EINVAL;
     }
-    return vb_runtime_install_end_app(argv[1]);
+    result = vb_runtime_install_end_app(argv[1]);
+    if (result == RT_EOK)
+    {
+        rt_kprintf("ok install_end app=%s active=%s rc=%d\n", argv[1], argv[1], result);
+    }
+    else
+    {
+        rt_kprintf("err install_end app=%s rc=%d\n", argv[1], result);
+    }
+    return result;
 }
 MSH_CMD_EXPORT(vb_runtime_install_end, finish VibeBoard runtime app serial install);
 
+#if VB_RUNTIME_HAS_HTTP_APP_OTA
 static int vb_runtime_install_url(int argc, char **argv)
 {
     if (argc < 3)
@@ -4522,7 +9583,8 @@ static int vb_runtime_install_url(int argc, char **argv)
     }
     return vb_runtime_install_url_app(argv[1], argv[2]);
 }
-MSH_CMD_EXPORT(vb_runtime_install_url, install VibeBoard runtime app from HTTP base URL);
+MSH_CMD_EXPORT(vb_runtime_install_url, install VibeBoard runtime app from experimental HTTP base URL);
+#endif
 
 static int vb_runtime_quiet(int argc, char **argv)
 {

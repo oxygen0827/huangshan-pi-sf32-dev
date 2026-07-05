@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "gpio_keys_stage",
+  "name": "GPIO Keys Stage",
+  "description": "Live KEY1 / KEY2 whitelist GPIO state.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "gpio.key1",
+      "label": "KEY1",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "gpio.key1.level",
+      "label": "KEY1 Level",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "gpio.key2",
+      "label": "KEY2",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "gpio.key2.level",
+      "label": "KEY2 Level",
+      "value": "--"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "display_stage",
+  "name": "Display Stage",
+  "description": "Runtime display brightness and panel snapshot stage.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "display.brightness",
+      "label": "Brightness",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "display.size",
+      "label": "Panel",
+      "value": "--"
+    },
+    {
+      "type": "status",
+      "capability": "display.state",
+      "label": "State",
+      "value": "--"
+    },
+    {
+      "type": "clock",
+      "capability": "clock",
+      "label": "Refresh",
+      "value": "--:--:--"
+    }
+  ]
+}

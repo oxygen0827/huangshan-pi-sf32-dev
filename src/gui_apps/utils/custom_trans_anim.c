@@ -9,7 +9,7 @@
 #include "custom_trans_anim.h"
 
 
-#ifdef APP_TRANS_ANIMATION_SCALE
+#if 0 && defined(APP_TRANS_ANIMATION_SCALE)
 static void enter_or_exit_anim0(gui_anim_obj_t img, void *user_data, uint32_t flag, gui_anim_value_t process)
 {
 #if  LV_USE_IMG

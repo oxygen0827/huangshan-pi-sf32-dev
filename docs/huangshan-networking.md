@@ -30,6 +30,9 @@ This matches the product goal better than Bluetooth PAN: no hotspot password,
 no phone tethering, and no board-initiated scan of the phone.
 
 Serial install remains the development fallback and reliability baseline.
+The local Web UI follows the same rule: the browser talks to a localhost bridge,
+and that bridge uses a RuntimeTransport adapter for either BLE or serial. The
+board itself does not expose an ESP32-style HTTP server or stable LAN IP.
 
 ## Board API
 
@@ -45,19 +48,67 @@ Expected healthy state:
 [vb_runtime][ble] api=vibeboard-huangshan-ble-install/v1 name=VibeBoard init=1 power=1 service=1 adv=1 conn=0 notify=0 mtu=23 ...
 ```
 
-The BLE command characteristic accepts newline-terminated text commands:
+The BLE command characteristic accepts newline-terminated text commands.
+The same command names are mirrored by serial/MSH where practical, so desktop
+bridges and phone apps should treat serial and BLE as transport adapters over
+the same Runtime protocol:
 
 ```text
+capabilities
+json_read <kind> <offset> <maxBytes>
 status
-vb_runtime_status
+app
+apps
+launch <appId>
+stop
+delete <appId>
+power
+display [brightness0To100]
+display_brightness <brightness0To100>
+gpio
+touch
+rgb [off|red|green|blue|yellow|cyan|magenta|white|RRGGBB]
+flow_status
+flow_send <channel> <seq> <hexUtf8Payload>
+flow_clear
+voice
+voice_status
+voice_start <durationMs>
+voice_read <offset> <maxBytes>
+voice_clear
+sensors
 vb_runtime_install_begin <appId>
 vb_runtime_install_file <appId> <path> <offset> <hexChunk>
+vb_runtime_install_abort <appId>
 vb_runtime_install_end <appId>
 vb_runtime_select <appId>
 vb_runtime_reload
 ```
 
+`json_read` currently supports `capabilities`, `sensors`, `power`, `display`,
+`gpio`, `touch`, `rgb`, `voice`, `app`, and `apps`. Short aliases such as
+`app_status`, `app_list`, and the `vb_runtime_*` command names are accepted for
+compatibility, but new bridge clients should use the compact names above.
+
 The status characteristic can be read or subscribed to for command results.
+The `capabilities` command returns compact JSON under
+`vibeboard-huangshan-capabilities/v1`; phone and AI clients should use it as
+the first handshake before assuming that manifest/Lua, sensors, voice, info
+flow, power, RGB, or future hardware APIs are available. `power` returns the
+`vibeboard-huangshan-power/v1` JSON snapshot for the read-only battery voltage
+and AW32001 charger status API; charger register writes/control remain
+intentionally unavailable. `rgb` returns or sets the `vibeboard-huangshan-rgb/v1`
+session state for the single onboard `rgbled` device. The color resets to `off`
+after a board reboot; apps that need a persistent visual state should call
+`vibe_rgb(...)` from their active `main.lua`.
+
+
+Install commands acknowledge with per-command status lines such as
+`ok install_begin app=<appId> rc=0`,
+`ok install_file app=<appId> path=<path> offset=<offset> rc=0`, and
+`ok install_end app=<appId> active=<appId> rc=0`.
+Clients should wait for the matching ack instead of assuming the most recent
+status value belongs to the latest command.
 
 UUIDs as seen by CoreBluetooth/Bleak:
 
@@ -74,6 +125,10 @@ python3 -m venv .venv-ble
 .venv-ble/bin/python -m pip install bleak
 ./scripts/runtime_install_ble.sh --scan-only
 ./scripts/runtime_install_ble.sh --status-only
+./scripts/runtime_install_ble.sh --capabilities-only
+./scripts/runtime_install_ble.sh --power-only
+./scripts/runtime_install_ble.sh --rgb-color 3366ff
+./scripts/runtime_install_ble.sh --rgb-only
 ./scripts/runtime_install_ble.sh \
   --package-dir scripts/runtime_apps/clock_test \
   --app-id clock_test
@@ -81,9 +136,31 @@ python3 -m venv .venv-ble
 
 It caches the first successful peripheral identifier/address at
 `~/.vibeboard/huangshan_ble.json`, then tries that cached device before falling
-back to a fresh scan for `VibeBoard`. The iPhone app should follow the same
-model using CoreBluetooth's `retrievePeripherals(withIdentifiers:)` and then
-scan only if retrieval/reconnect fails.
+back to a fresh scan for `VibeBoard`. App listing uses `apps_page <offset> <limit>`
+and combines pages on the host; the BLE adapter currently uses a 2-app page to
+avoid long status JSON truncation, while the serial adapter keeps a 5-app page.
+If the board reports advertising but the Mac cannot find `VibeBoard` after a
+failed connection, use the serial diagnostic command `vb_runtime_ble_restart` to
+force a BLE advertising stop/start. The iPhone app should follow the same cached
+reconnect model using CoreBluetooth's `retrievePeripherals(withIdentifiers:)` and
+then scan only if retrieval/reconnect fails.
+
+The localhost App Store bridge now uses `scripts/runtime_transport.py` for the
+same protocol surface. It exposes local HTTP endpoints for transport status,
+Runtime capabilities handshake, Runtime App listing, launch, stop, delete, and
+install; every board-facing operation is serialized through one transport lock so
+browser polling cannot race with install, capabilities, or App Manager commands. The desktop serial/BLE install scripts also
+route their standard query, App Manager, `install_abort`, flow, voice
+capture/reply, flow persistence, normal install paths, and staged install fault
+injection through that adapter. Script-local direct serial/BLE code is intentionally
+limited to bottom-layer exceptions: BLE scan/connect-hold, RTS reset inside
+cold-recovery tests, flashing, and monitor tools. Those paths discover, reset,
+or observe the board; they are not normal App management APIs.
+Run `./scripts/app_store_mac.sh --transport ble`
+for normal phone-like BLE transport. Use `--ble-name VibeBoard` to select a
+non-default BLE local name and `--ble-no-cache` to force a fresh scan when the
+cached peripheral is stale. Use `./scripts/app_store_mac.sh --transport serial
+--serial-port /dev/cu.usbserial-13220` when using the CH340/UART fallback.
 
 The iOS/CoreBluetooth reference package lives at:
 
@@ -91,8 +168,11 @@ The iOS/CoreBluetooth reference package lives at:
 mobile/ios/VibeBoardBLE
 ```
 
-It exposes `VibeBoardBLEClient.connect()`, `status()`, and `install(_:)`, plus
-the shared `RuntimePackage` command builder used by phone-side App transfer.
+It exposes `VibeBoardBLEClient.connect()`, `status()`, `capabilities()`,
+`power()`, `rgb(color:)`, `sendInfoFlow(...)`, `voiceStatus()`,
+`voiceStart()`, `voiceRead(offset:maxBytes:expectedSequence:)`, `voiceClear()`,
+`captureVoice(...)`, `sendVoiceReply(...)`, `install(_:)`, and `abortInstall(_:)`, plus the shared
+`RuntimePackage` command builder used by phone-side App transfer. Failed phone-side installs now attempt the same staging cleanup as the desktop serial/BLE adapter before surfacing the original error.
 
 A minimal iPhone app target that uses the same implementation lives at:
 
@@ -150,8 +230,11 @@ Verified on the Huangshan board connected as `/dev/cu.usbserial-13220`:
   - `BTS2 Demo Main Menu`
   - `PAN enable`
   - `VibeBoard-PAN`
-- `vb_runtime_ble_status` reports `init=1 power=1 service=1 adv=1`.
+- `vb_runtime_ble_status` reports `init=1 power=1 service=1 adv=1`, and
+  `vb_runtime_ble_restart` can force a diagnostic advertising stop/start.
 - Mac CoreBluetooth/Bleak scan finds `VibeBoard`.
+- BLE App Manager listing succeeds through 2-app `apps_page` reads and combines
+  the complete installed App list on the host.
 - Mac CoreBluetooth/Bleak status connects by cached peripheral identifier and
   reads `ok status api=vibeboard-huangshan-ble-install/v1 active=clock_test`.
 - BLE package install succeeds for `scripts/runtime_apps/status_test`:
@@ -202,9 +285,13 @@ The current demo app already integrates those pieces. To validate on iPhone:
    cached connect or scan states to `Connected`.
 6. Tap `Read Runtime Status`; success should show
    `ok status api=vibeboard-huangshan-ble-install/v1 active=...`.
-7. Tap `Install Demo App Over BLE`; success should switch the board to
+7. Tap `Read Capabilities`, `Read Power`, or `Read RGB` to confirm the Runtime
+   hardware APIs are reachable from iPhone.
+8. Tap `Capture` in the Voice section to pull a short microphone clip over BLE,
+   then tap `Send Voice Reply` to write text back to the board flow label.
+9. Tap `Install Demo App Over BLE`; success should switch the board to
    `ios_demo`.
-8. To install a generated App package, save a folder containing
+10. To install a generated App package, save a folder containing
    `manifest.json`, `main.lua`, and optional `assets/`, `images/`, `fonts/`, or
    `lib/` resources into the iOS Files app, then tap
    `Import App Folder Over BLE` and select that folder.
@@ -239,6 +326,20 @@ doing this.
 
 ## Product Boundary
 
+Huangshan Runtime packages target the `huangshan` profile. Package manifests may
+declare `runtimeProfile`, `targetProfile`, or `target`, but those values must
+resolve to Huangshan/SF32. Top-level `capabilities`, `requires`, and
+`permissions` are also checked by the host packager. ESP32-era or board-native
+network capabilities such as `wifi`, `http`, `network`, `ntp`, `board_ip`,
+`native`, `camera`, `gamepad`, and `i2s` are intentionally rejected for normal
+Huangshan App packages. Cloud, weather, and AI data should be fetched by the
+phone or desktop bridge and injected through Runtime APIs such as `flow_send` or
+manifest data like `weather.current`; they are not a promise that the board owns
+a Wi-Fi/TCP stack. Host-side Python tools share `scripts/runtime_transport.py` for
+normal App management, install, flow, and voice capture/reply paths, with serial
+and BLE adapters underneath. The product firmware does not export board-native
+HTTP App OTA; that path is hidden behind explicit experimental compile flags.
+
 App-package updates can change:
 
 - UI layout and text.
@@ -260,4 +361,7 @@ The SDK includes BT PAN examples and they were brought up earlier as a possible
 network path. That path worked on the Mac side but did not match the desired
 phone-first BLE pairing model. It also introduced classic Bluetooth profile
 noise and hotspot/tethering requirements. The current product direction is
-therefore BLE GATT App install, with PAN kept only as reference material.
+therefore BLE GATT App install. PAN and HTTP App OTA are not part of the default
+product firmware; they only compile/export when explicit experimental macros
+(such as `VB_RUNTIME_ENABLE_BT_PAN` and `VB_RUNTIME_ENABLE_HTTP_APP_OTA`) are
+provided.

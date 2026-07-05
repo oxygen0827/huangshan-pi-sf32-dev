@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "touch_stage",
+  "name": "Touch Stage",
+  "description": "A compact stage for live Runtime touch state.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "touch.count",
+      "label": "Touches",
+      "value": "0"
+    },
+    {
+      "type": "status",
+      "capability": "touch.gesture",
+      "label": "Gesture",
+      "value": "none"
+    },
+    {
+      "type": "status",
+      "capability": "touch.delta",
+      "label": "Delta",
+      "value": "0,0"
+    },
+    {
+      "type": "status",
+      "capability": "touch.duration",
+      "label": "Hold",
+      "value": "0ms"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "power_stage",
+  "name": "Power Stage",
+  "description": "Read-only VBAT and charger Runtime API stage.",
+  "entry": "main.lua",
+  "components": [
+    {
+      "type": "status",
+      "capability": "power.battery",
+      "label": "Battery",
+      "value": "--mV"
+    },
+    {
+      "type": "status",
+      "capability": "power.charger",
+      "label": "Charger",
+      "value": "--"
+    },
+    {
+      "type": "clock",
+      "capability": "clock",
+      "label": "Refresh",
+      "value": "--:--:--"
+    }
+  ]
+}

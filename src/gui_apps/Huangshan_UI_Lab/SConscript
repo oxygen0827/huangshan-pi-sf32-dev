@@ -1,0 +1,16 @@
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+
+if GetDepend('PKG_USING_LITTLEVGL2RTT'):
+    objs = Glob('*.c')
+    group = DefineGroup(
+        'App_Huangshan_UI_Lab',
+        objs,
+        depend=['PKG_USING_LITTLEVGL2RTT'],
+        CPPPATH=[cwd],
+        LOCAL_CCFLAGS=' -include compat_sdk25.h'
+    )
+
+Return('objs')
