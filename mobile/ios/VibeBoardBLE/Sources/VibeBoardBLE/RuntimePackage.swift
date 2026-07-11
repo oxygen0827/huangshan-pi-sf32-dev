@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum RuntimePackageError: Error, Equatable {
     case unsafeAppId(String)
@@ -58,6 +59,7 @@ public struct RuntimePackage: Sendable {
         }
         if let manifestData = normalizedFiles["manifest.json"] {
             try Self.validateManifest(manifestData, appId: appId)
+            normalizedFiles["manifest.json"] = try Self.manifestWithIntegrity(manifestData, appId: appId, files: normalizedFiles)
         }
         self.appId = appId
         self.files = normalizedFiles
@@ -304,6 +306,14 @@ public struct RuntimePackage: Sendable {
 
     private static let manifestProfileFields = ["runtimeProfile", "runtime_profile", "targetProfile", "target"]
     private static let manifestCapabilityListFields = ["capabilities", "requires", "permissions"]
+    private static let manifestMetadataStringFields: [String: Int] = [
+        "category": 32,
+        "icon": 32,
+        "author": 64,
+        "screenshot": 96,
+    ]
+    private static let manifestRequirementsMax = 8
+    private static let manifestRequirementMaxLength = 48
 
     private static let esp32NativeCapabilityNames: Set<String> = [
         "audio",
@@ -314,6 +324,7 @@ public struct RuntimePackage: Sendable {
         "http",
         "i2s",
         "native",
+        "nes",
         "network",
         "ntp",
         "pan",
@@ -362,6 +373,7 @@ public struct RuntimePackage: Sendable {
         "vibe_flow_label",
         "vibe_rgb",
         "vibe_snake_autoplay",
+        "vibe_2048_game",
         "vibe_weather_pet",
     ]
 
@@ -466,6 +478,7 @@ public struct RuntimePackage: Sendable {
         }
         try validateManifestProfile(object)
         try validateManifestCapabilityLists(object)
+        try validateManifestMetadata(object)
 
         guard let componentsValue = object["components"] else { return }
         guard let components = componentsValue as? [Any] else {
@@ -480,6 +493,54 @@ public struct RuntimePackage: Sendable {
             }
             try validateManifestComponent(component, index: offset + 1)
         }
+    }
+
+    private static func manifestWithIntegrity(_ data: Data, appId: String, files: [String: Data]) throws -> Data {
+        var object = try manifestObject(from: data)
+        let entries = manifestFileEntries(files)
+        object["files"] = entries
+        object["integrity"] = [
+            "algorithm": "sha256",
+            "filesDigest": digestManifestFiles(entries)
+        ]
+        let manifestData = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        var withNewline = manifestData
+        withNewline.append(0x0a)
+        try validateManifest(withNewline, appId: appId)
+        return withNewline
+    }
+
+    private static func manifestFileEntries(_ files: [String: Data]) -> [[String: Any]] {
+        files.keys
+            .filter { $0 != "manifest.json" }
+            .sorted()
+            .map { path in
+                [
+                    "path": path,
+                    "size": files[path]?.count ?? 0,
+                    "sha256": sha256Hex(files[path] ?? Data())
+                ]
+            }
+    }
+
+    private static func digestManifestFiles(_ entries: [[String: Any]]) -> String {
+        let canonical = entries.map { entry -> String in
+            let path = entry["path"] as? String ?? ""
+            let size = entry["size"] as? Int ?? 0
+            let sha256 = entry["sha256"] as? String ?? ""
+            return #"{"path":"\#(jsonEscaped(path))","size":\#(size),"sha256":"\#(sha256)"}"#
+        }.joined(separator: ",")
+        return sha256Hex(Data("[\(canonical)]\n".utf8))
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func jsonEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
     private static func isESP32NativeCapability(_ value: String) -> Bool {
@@ -529,6 +590,54 @@ public struct RuntimePackage: Sendable {
                     context: "manifest.json \(key)[\(offset + 1)]",
                     allowed: manifestDeclaredCapabilities
                 )
+            }
+        }
+    }
+
+    private static func validateManifestMetadata(_ object: [String: Any]) throws {
+        for (key, maxLength) in manifestMetadataStringFields {
+            guard let value = object[key] else { continue }
+            guard let text = value as? String else {
+                throw RuntimePackageError.invalidManifest("manifest.json \(key) must be a string when present")
+            }
+            guard text.count <= maxLength else {
+                throw RuntimePackageError.invalidManifest("manifest.json \(key) must be at most \(maxLength) characters")
+            }
+            guard !text.unicodeScalars.contains(where: { $0.value < 32 }) else {
+                throw RuntimePackageError.invalidManifest("manifest.json \(key) must not contain control characters")
+            }
+            if key == "screenshot" {
+                if text.hasPrefix("generated:") {
+                    continue
+                }
+                guard text.range(of: #"^(?:assets|images)/[A-Za-z0-9_./-]+\.(?:png|jpg|jpeg)$"#, options: .regularExpression) != nil else {
+                    throw RuntimePackageError.invalidManifest("manifest.json screenshot must be generated:<name> or an assets/images PNG/JPEG path")
+                }
+            }
+        }
+
+        guard let value = object["requirements"] else { return }
+        guard let requirements = value as? [Any] else {
+            throw RuntimePackageError.invalidManifest("manifest.json requirements must be a list of strings when present")
+        }
+        guard requirements.count <= manifestRequirementsMax else {
+            throw RuntimePackageError.invalidManifest("manifest.json requirements supports at most \(manifestRequirementsMax) entries")
+        }
+        for (offset, item) in requirements.enumerated() {
+            guard let text = item as? String else {
+                throw RuntimePackageError.invalidManifest("manifest.json requirements[\(offset + 1)] must be a string")
+            }
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RuntimePackageError.invalidManifest("manifest.json requirements[\(offset + 1)] must not be empty")
+            }
+            guard text.count <= manifestRequirementMaxLength else {
+                throw RuntimePackageError.invalidManifest("manifest.json requirements[\(offset + 1)] must be at most \(manifestRequirementMaxLength) characters")
+            }
+            guard !text.unicodeScalars.contains(where: { $0.value < 32 }) else {
+                throw RuntimePackageError.invalidManifest("manifest.json requirements[\(offset + 1)] must not contain control characters")
+            }
+            if isESP32NativeCapability(text) {
+                throw RuntimePackageError.invalidManifest("manifest.json requirements[\(offset + 1)] \(text) is not supported by Huangshan Runtime profile; use BLE/serial plus a phone or desktop bridge instead")
             }
         }
     }

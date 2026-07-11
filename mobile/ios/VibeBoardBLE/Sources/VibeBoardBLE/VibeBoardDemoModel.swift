@@ -25,6 +25,7 @@ public final class VibeBoardDemoModel: ObservableObject {
     @Published public var appManagerAppId = "flow_stage"
     @Published public private(set) var latestAppManagerStatus = "app manager --"
     @Published public private(set) var installedAppsText = "apps --"
+    @Published public private(set) var latestPackageSummary = "package --"
     @Published public var voiceReplyText = "Hello from iPhone voice"
     @Published public var voiceDurationMs: Double = 1200
     @Published public private(set) var voiceSequence: UInt32 = 0
@@ -350,6 +351,8 @@ public final class VibeBoardDemoModel: ObservableObject {
                     "main.lua": Data(Self.demoLua.utf8)
                 ]
             )
+            self.latestPackageSummary = Self.packageSummary(package)
+            self.statusText = "Installing \(package.appId) · \(self.latestPackageSummary)"
             try await self.client.install(package)
             self.statusText = try await self.client.status()
             self.trace("demo app installed over BLE")
@@ -366,7 +369,8 @@ public final class VibeBoardDemoModel: ObservableObject {
             }
 
             let package = try RuntimePackage.fromDirectory(directory)
-            self.statusText = "Installing \(package.appId)"
+            self.latestPackageSummary = Self.packageSummary(package)
+            self.statusText = "Installing \(package.appId) · \(self.latestPackageSummary)"
             try await self.client.connect(scanTimeout: 12, connectTimeout: 12)
             try await self.client.install(package)
             self.statusText = try await self.client.status()
@@ -404,6 +408,19 @@ public final class VibeBoardDemoModel: ObservableObject {
             return description
         }
         return String(describing: error)
+    }
+
+    private static func packageSummary(_ package: RuntimePackage) -> String {
+        let byteCount = package.files.values.reduce(0) { $0 + $1.count }
+        let fileCount = package.files.count
+        guard let manifestData = package.files["manifest.json"],
+              let object = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+              let entries = object["files"] as? [Any] else {
+            return "\(fileCount) files · \(byteCount) bytes · legacy manifest"
+        }
+        let digest = (object["integrity"] as? [String: Any])?["filesDigest"] as? String
+        let digestPrefix = digest.map { String($0.prefix(8)) } ?? "missing"
+        return "\(fileCount) files · \(byteCount) bytes · sha256 \(entries.count) files · \(digestPrefix)"
     }
 
     private static let demoManifest = """

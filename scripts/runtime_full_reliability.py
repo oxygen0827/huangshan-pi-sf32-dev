@@ -23,7 +23,10 @@ def run_step(label: str, cmd: list[str], env: dict[str, str] | None = None) -> i
         stderr=subprocess.STDOUT,
         bufsize=1,
     )
-    assert proc.stdout is not None
+    if proc.stdout is None:
+        proc.kill()
+        print(f"[runtime-full-reliability] {label} -> fail")
+        return 1
     for line in proc.stdout:
         print(line, end="")
     code = proc.wait()

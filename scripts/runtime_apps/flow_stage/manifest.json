@@ -4,6 +4,11 @@
   "id": "flow_stage",
   "name": "Flow Stage",
   "description": "Runtime info flow status stage.",
+  "category": "Bridge",
+  "icon": "radio",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:flow_stage",
+  "requirements": ["Runtime", "BLE or serial bridge", "Flow API"],
   "entry": "main.lua",
   "components": [
     {

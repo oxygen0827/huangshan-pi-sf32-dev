@@ -4,6 +4,11 @@
   "id": "sensor_dash",
   "name": "Sensor Dashboard",
   "description": "Built-in LTR303, MMC56X3, and LSM6DSL sensor snapshot.",
+  "category": "Hardware",
+  "icon": "activity",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:sensor_dash",
+  "requirements": ["Runtime", "Sensor API", "LSM6DSL"],
   "entry": "main.lua",
   "components": [
     {

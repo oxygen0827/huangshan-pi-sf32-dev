@@ -4,6 +4,11 @@
   "id": "weather_pet",
   "name": "Weather Pet",
   "description": "Cute animated weather card generated from Mac weather data.",
+  "category": "Companions",
+  "icon": "cloud-sun",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "assets/weather/cloudy.png",
+  "requirements": ["Runtime", "Weather bridge", "Display"],
   "entry": "main.lua",
   "components": [
     {

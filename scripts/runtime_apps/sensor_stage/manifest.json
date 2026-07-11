@@ -4,6 +4,11 @@
   "id": "sensor_stage",
   "name": "Sensor Stage",
   "description": "A compact stage for light, motion, steps, and clock data.",
+  "category": "Hardware",
+  "icon": "activity",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:sensor_stage",
+  "requirements": ["Runtime", "Sensor API", "Clock"],
   "entry": "main.lua",
   "components": [
     {

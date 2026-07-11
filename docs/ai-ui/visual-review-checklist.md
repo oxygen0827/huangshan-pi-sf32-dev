@@ -11,6 +11,13 @@ Ask for specific fixes rather than a general opinion.
 - The primary action or current status is unclear.
 - Back/navigation controls are missing or too small.
 
+## Rounded-Screen Safe Area
+
+- Important labels and buttons stay inside the project safe area, not in the physical rounded corners.
+- The top title, bottom status, and right-side controls are visible in a real board photo, not only in a rectangular screenshot.
+- Home/back is reachable through K1 and, when implemented, left-edge swipe; it does not depend on a tiny corner button.
+- Lists/cards can scroll when more installed apps exist than fit on the first screen.
+
 ## Embedded Touch
 
 - Main touch targets are at least 44x44 px.

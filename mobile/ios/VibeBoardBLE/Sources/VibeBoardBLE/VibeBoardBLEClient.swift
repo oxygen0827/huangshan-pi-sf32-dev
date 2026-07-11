@@ -18,7 +18,7 @@ public struct VibeBoardBLEUUIDs {
 }
 
 public enum VibeBoardRuntimeDefaults {
-    public static let bleAppPageLimit = 2
+    public static let bleAppPageLimit = 1
     public static let dataChunkBytes: UInt32 = 160
     public static let installChunkBytes = 48
     public static let maxInstallChunkBytes = 240
@@ -226,6 +226,12 @@ public struct VibeBoardRuntimeAppStatus: Codable, Equatable, Sendable {
 public struct VibeBoardRuntimeInstalledApp: Codable, Equatable, Identifiable, Sendable {
     public let id: String
     public let name: String
+    public let description: String?
+    public let category: String?
+    public let icon: String?
+    public let author: String?
+    public let screenshot: String?
+    public let requirements: [String]?
     public let active: Int
     public let compatible: Int
     public let manifest: Int
@@ -233,7 +239,7 @@ public struct VibeBoardRuntimeInstalledApp: Codable, Equatable, Identifiable, Se
     public let mainLua: Int
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, active, compatible, manifest
+        case id, name, description, category, icon, author, screenshot, requirements, active, compatible, manifest
         case appInfo = "app_info"
         case mainLua = "main_lua"
     }

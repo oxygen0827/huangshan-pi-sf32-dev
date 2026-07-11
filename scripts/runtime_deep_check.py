@@ -10,7 +10,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
-PY_CACHE = "/tmp/huangshan-pycache"
+CACHE_ROOT = Path(os.environ.get("TMPDIR") or "/tmp") / "huangshan-runtime-deep-check"
+PY_CACHE = CACHE_ROOT / "pycache"
+CLANG_MODULE_CACHE = CACHE_ROOT / "clang-module-cache"
+SWIFTPM_HOME = CACHE_ROOT / "swiftpm"
+SWIFTPM_CACHE = CACHE_ROOT / "swiftpm-cache"
+SWIFTPM_CONFIG = CACHE_ROOT / "swiftpm-config"
+SWIFTPM_SECURITY = CACHE_ROOT / "swiftpm-security"
+XDG_CACHE_HOME = CACHE_ROOT / "xdg-cache"
 
 
 @dataclass(frozen=True)
@@ -37,8 +44,21 @@ class HardwareGate:
 
 def env() -> dict[str, str]:
     value = os.environ.copy()
+    for cache_dir in (
+        PY_CACHE,
+        CLANG_MODULE_CACHE,
+        SWIFTPM_HOME,
+        SWIFTPM_CACHE,
+        SWIFTPM_CONFIG,
+        SWIFTPM_SECURITY,
+        XDG_CACHE_HOME,
+    ):
+        cache_dir.mkdir(parents=True, exist_ok=True)
     value.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-    value.setdefault("PYTHONPYCACHEPREFIX", PY_CACHE)
+    value.setdefault("PYTHONPYCACHEPREFIX", str(PY_CACHE))
+    value.setdefault("CLANG_MODULE_CACHE_PATH", str(CLANG_MODULE_CACHE))
+    value.setdefault("SWIFTPM_HOME", str(SWIFTPM_HOME))
+    value.setdefault("XDG_CACHE_HOME", str(XDG_CACHE_HOME))
     return value
 
 
@@ -58,7 +78,10 @@ def run_check(check: Check) -> int:
             stderr=subprocess.STDOUT,
             bufsize=1,
         )
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            proc.kill()
+            print(f"[runtime-deep-check] {check.label} -> fail")
+            return 1
         for line in proc.stdout:
             print(line, end="")
         code = proc.wait()
@@ -156,7 +179,19 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
             Check(
                 "pass3-tooling",
                 "iOS Swift package tests",
-                ["swift", "test"],
+                [
+                    "swift",
+                    "test",
+                    "--disable-sandbox",
+                    "--cache-path",
+                    str(SWIFTPM_CACHE),
+                    "--config-path",
+                    str(SWIFTPM_CONFIG),
+                    "--security-path",
+                    str(SWIFTPM_SECURITY),
+                    "--manifest-cache",
+                    "local",
+                ],
                 cwd=ROOT / "mobile" / "ios" / "VibeBoardBLE",
                 escalated_hint="SwiftPM may need user-level cache write access.",
             )

@@ -4,6 +4,11 @@
   "id": "gpio_keys_stage",
   "name": "GPIO Keys Stage",
   "description": "Live KEY1 / KEY2 whitelist GPIO state.",
+  "category": "Hardware",
+  "icon": "keyboard",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:gpio_keys_stage",
+  "requirements": ["Runtime", "KEY1", "KEY2"],
   "entry": "main.lua",
   "components": [
     {

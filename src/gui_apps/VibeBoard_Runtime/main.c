@@ -52,6 +52,7 @@
 #include "lv_ext_resource_manager.h"
 #include "lv_ex_data.h"
 #include "app_mem.h"
+#include "vb_runtime_package.h"
 #if defined(RGB_SK6812MINI_HS_ENABLE)
 #include "bf0_hal.h"
 #include "drv_io.h"
@@ -85,6 +86,7 @@
 #define VB_MAX_APP_ID 16
 #define VB_MAX_PATH 160
 #define VB_MAX_TEXT 96
+#define VB_MAX_META 48
 #define VB_MAX_VALUE 96
 #define VB_MAX_URL 192
 #define VB_MAX_MANIFEST 4096
@@ -92,12 +94,23 @@
 #define VB_MAX_SCRIPT_LINE 256
 #define VB_MAX_COMPONENTS 8
 #define VB_LAUNCHER_MAX_ITEMS 5
-#define VB_MAX_SCRIPT_OBJECTS 24
+#define VB_MAX_SCRIPT_OBJECTS 96
 #define VB_MAX_SCRIPT_NAME 24
 #define VB_MAX_SCRIPT_ARGS 6
 #define VB_MAX_SCRIPT_ARG 96
 #define VB_MAX_HEX_CHARS 512
 #define VB_AUTORUN_DELAY_MS 2200
+#define VB_RUNTIME_AUTORUN_UI 0
+#define VB_SCREEN_SAFE_LEFT 30
+#define VB_SCREEN_SAFE_RIGHT 30
+#define VB_SCREEN_SAFE_TOP 36
+#define VB_SCREEN_SAFE_BOTTOM 36
+#define VB_SCREEN_SAFE_WIDTH (LV_HOR_RES_MAX - VB_SCREEN_SAFE_LEFT - VB_SCREEN_SAFE_RIGHT)
+#define VB_SCREEN_SAFE_HEIGHT (LV_VER_RES_MAX - VB_SCREEN_SAFE_TOP - VB_SCREEN_SAFE_BOTTOM)
+#define VB_SCREEN_EDGE_BACK_X 72
+#define VB_SCREEN_EDGE_BACK_DX 50
+#define VB_SCREEN_EDGE_BACK_MAX_DY 120
+#define VB_KEY_HOME_DEBOUNCE_MS 350
 #define VB_TIMER_PERIOD_MS 200
 #define VB_STATUS_TICK_REFRESH_MS 1000
 #define VB_PAN_TIMER_MS 3000
@@ -122,8 +135,8 @@
 #define VB_RGB_JSON_MAX 256
 #define VB_TOUCH_JSON_MAX 384
 #define VB_GPIO_JSON_MAX 448
-#define VB_APP_JSON_MAX 2048
-#define VB_JSON_READ_MAX 2048
+#define VB_APP_JSON_MAX 4096
+#define VB_JSON_READ_MAX 4096
 #define VB_FLOW_MAX_CHANNEL 24
 #define VB_FLOW_MAX_PAYLOAD 192
 #define VB_FLOW_HISTORY 6
@@ -147,6 +160,11 @@
 #define VB_SNAKE_MAX_ROWS 12
 #define VB_SNAKE_MAX_CELLS (VB_SNAKE_MAX_COLS * VB_SNAKE_MAX_ROWS)
 #define VB_SNAKE_MAX_DRAWN 28
+#define VB_2048_SIZE 4
+#define VB_2048_CELLS (VB_2048_SIZE * VB_2048_SIZE)
+#define VB_2048_BOARD_SIZE 236
+#define VB_2048_GAP 8
+#define VB_2048_SWIPE_MIN_PRIMARY 16
 #define VB_SNAKE_LOG_EVERY 120
 #define VB_WEATHER_DROP_COUNT 8
 #define VB_WEATHER_CLOUD_COUNT 12
@@ -288,6 +306,24 @@ typedef struct
     int snake_x[VB_SNAKE_MAX_CELLS];
     int snake_y[VB_SNAKE_MAX_CELLS];
 } vb_snake_state_t;
+
+typedef struct
+{
+    int active;
+    int board[VB_2048_SIZE][VB_2048_SIZE];
+    int score;
+    int best_score;
+    int moves;
+    int game_over;
+    int drag_consumed;
+    uint32_t rng;
+    lv_obj_t *board_panel;
+    lv_obj_t *tiles[VB_2048_CELLS];
+    lv_obj_t *labels[VB_2048_CELLS];
+    lv_obj_t *score_label;
+    lv_obj_t *status_label;
+} vb_2048_state_t;
+
 
 typedef enum
 {
@@ -499,6 +535,11 @@ typedef struct
     char id[VB_MAX_APP_ID];
     char name[VB_MAX_TEXT];
     char description[VB_MAX_TEXT];
+    char category[VB_MAX_META];
+    char icon[VB_MAX_META];
+    char author[VB_MAX_META];
+    char screenshot[VB_MAX_TEXT];
+    char requirements[VB_MAX_TEXT];
     int manifest;
     int app_info;
     int main_lua;
@@ -522,6 +563,8 @@ typedef struct
     lv_obj_t *status_label;
     lv_obj_t *clock_label;
     lv_obj_t *flow_label;
+    lv_obj_t *overlay_apps_button;
+    lv_obj_t *overlay_nav_zone;
     lv_obj_t *script_flow_label;
     char script_flow_field[24];
     uint32_t script_flow_seen_total;
@@ -541,6 +584,7 @@ typedef struct
     uint32_t script_tick_last_run;
     int script_runtime_active;
     vb_snake_state_t snake;
+    vb_2048_state_t game2048;
     vb_weather_state_t weather;
     volatile int pending_reload;
     volatile int pending_stop;
@@ -576,9 +620,29 @@ typedef struct
     int display_last_ready;
     vb_gpio_state_t gpio;
     vb_touch_state_t touch;
+    int home_key_last_pressed;
+    uint32_t home_key_last_tick;
 } vb_runtime_state_t;
 
 static vb_runtime_state_t g_vb_runtime;
+static int g_vb_runtime_state_initialized;
+
+static void vb_runtime_state_defaults(void)
+{
+    g_vb_runtime.install_fd = -1;
+    g_vb_runtime.quiet_logs = 1;
+    g_vb_runtime.rgb_color = 0x000000u;
+    g_vb_runtime.display_brightness = -1;
+    g_vb_runtime.display_target_brightness = -1;
+}
+
+static void vb_runtime_state_bootstrap(void)
+{
+    if (g_vb_runtime_state_initialized) return;
+    rt_memset(&g_vb_runtime, 0, sizeof(g_vb_runtime));
+    vb_runtime_state_defaults();
+    g_vb_runtime_state_initialized = 1;
+}
 static vb_info_flow_state_t g_vb_flow;
 static vb_voice_state_t g_vb_voice;
 #if VB_RUNTIME_HAS_BT_PAN
@@ -606,9 +670,15 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
                                          const char *offset_text, const char *hex);
 static int vb_runtime_install_end_app(const char *app_id);
 static int vb_runtime_install_abort_app(const char *app_id);
+static int vb_runtime_staging_clear_all(int *removed);
 static void vb_runtime_install_close_file(void);
 static int vb_runtime_select_app(const char *app_id);
 static void vb_runtime_request_reload(void);
+static void vb_runtime_show_navigation_controls(void);
+static void vb_runtime_clear_overlay_controls(void);
+static void vb_runtime_return_home(void);
+static void vb_runtime_touch_event_cb(lv_event_t *event);
+static void vb_weather_release_image(void);
 #if VB_RUNTIME_HAS_HTTP_APP_OTA
 static int vb_runtime_install_url_app(const char *app_id, const char *base_url);
 #endif
@@ -619,7 +689,9 @@ static int vb_runtime_app_launch(const char *app_id);
 static int vb_runtime_app_stop(void);
 static int vb_runtime_app_delete(const char *app_id);
 static void vb_runtime_request_manager_refresh(const char *message);
+#if 0
 static void vb_render_app_manager_ui(const char *reason);
+#endif
 static void vb_runtime_stop_current_app(void);
 static int vb_runtime_app_status_command(void);
 static int vb_runtime_apps_status_command(void);
@@ -650,6 +722,8 @@ static const char *vb_json_find_string(const char *begin, const char *end, const
 static int vb_json_read_int(const char *begin, const char *end, const char *key, int *out);
 static void vb_json_copy_string(const char *begin, const char *end, const char *key,
                                 char *dst, rt_size_t cap, const char *fallback);
+static void vb_json_copy_string_array_csv(const char *begin, const char *end, const char *key,
+                                          char *dst, rt_size_t cap, const char *fallback);
 static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, const char *hex);
 static int vb_runtime_flow_latest_index(void);
 static int vb_runtime_flow_save_latest(void);
@@ -887,7 +961,7 @@ static int vb_read_text_file(const char *path, char *dst, rt_size_t cap)
 
 static int vb_write_text_file(const char *path, const char *text)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     int len;
     int written;
     int result = RT_EOK;
@@ -2468,6 +2542,14 @@ static int vb_ble_execute_line(char *line)
         vb_ble_set_status("%s delete app=%s rc=%d", result == RT_EOK ? "ok" : "err", argv[1], result);
         return result;
     }
+    if (rt_strcmp(argv[0], "staging_clear") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_staging_clear") == 0)
+    {
+        int removed = 0;
+        int result = vb_runtime_staging_clear_all(&removed);
+        vb_ble_set_status("%s staging_clear removed=%d rc=%d", result == RT_EOK ? "ok" : "err", removed, result);
+        return result;
+    }
     if (rt_strcmp(argv[0], "power") == 0 ||
         rt_strcmp(argv[0], "battery") == 0 ||
         rt_strcmp(argv[0], "vb_runtime_power") == 0)
@@ -3008,6 +3090,7 @@ static void vb_ble_worker_entry(void *parameter)
 static int vb_ble_install_init(void)
 {
     rt_thread_t thread;
+    vb_runtime_state_bootstrap();
     if (g_vb_ble.initialized) return RT_EOK;
     rt_memset(&g_vb_ble, 0, sizeof(g_vb_ble));
     g_vb_ble.conn_idx = INVALID_CONN_IDX;
@@ -3893,6 +3976,45 @@ static int vb_runtime_install_abort_app(const char *app_id)
     return result;
 }
 
+static int vb_runtime_staging_clear_all(int *removed)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int staging_prefix_len = rt_strlen(VIBEBOARD_STAGING_PREFIX);
+    int count = 0;
+    int result = RT_EOK;
+
+    if (removed) *removed = 0;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+
+    vb_runtime_install_close_file();
+    vb_runtime_install_clear_session();
+
+    dir = opendir(VIBEBOARD_APP_ROOT);
+    if (!dir) return -RT_ERROR;
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        const char *name = entry->d_name;
+        char path[VB_MAX_PATH];
+        if (!name || rt_strcmp(name, ".") == 0 || rt_strcmp(name, "..") == 0) continue;
+        if (rt_strncmp(name, VIBEBOARD_STAGING_PREFIX, staging_prefix_len) != 0) continue;
+        rt_snprintf(path, sizeof(path), "%s/%s", VIBEBOARD_APP_ROOT, name);
+        path[sizeof(path) - 1] = '\0';
+        if (vb_remove_tree(path) != RT_EOK)
+        {
+            result = -RT_ERROR;
+        }
+        else
+        {
+            count++;
+        }
+    }
+    closedir(dir);
+    if (removed) *removed = count;
+    rt_kprintf("[vb_runtime] staging clear removed=%d rc=%d\n", count, result);
+    return result;
+}
+
 static void vb_read_active_app(char *dst, rt_size_t cap)
 {
     char text[VB_MAX_APP_ID + 4];
@@ -3925,6 +4047,34 @@ static void vb_runtime_set_app_result(int status, const char *message)
     g_vb_runtime.app_last_status = status;
     vb_safe_copy(g_vb_runtime.app_last_error, sizeof(g_vb_runtime.app_last_error), message ? message : "");
 }
+
+static void vb_runtime_return_home(void)
+{
+    g_vb_runtime.pending_stop = 0;
+    g_vb_runtime.pending_reload = 0;
+    g_vb_runtime.pending_manager_refresh = 0;
+    vibeboard_lua_stop_app();
+    vb_runtime_clear_overlay_controls();
+    vb_weather_release_image();
+    g_vb_runtime.app_running = 0;
+    g_vb_runtime.app_failed = 0;
+    g_vb_runtime.status_label = RT_NULL;
+    g_vb_runtime.clock_label = RT_NULL;
+    g_vb_runtime.flow_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
+    g_vb_runtime.component_count = 0;
+    if (g_vb_runtime.root)
+    {
+        lv_obj_del(g_vb_runtime.root);
+        g_vb_runtime.root = RT_NULL;
+    }
+    (void)vb_write_active_app(VIBEBOARD_DEFAULT_APP_ID);
+    vb_safe_copy(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app), VIBEBOARD_DEFAULT_APP_ID);
+    vb_runtime_set_app_result(RT_EOK, "home requested");
+    rt_kprintf("[vb_runtime] return home active=%s\n", g_vb_runtime.active_app);
+    gui_app_run("Main");
+}
+
 
 static const char *vb_runtime_app_state_name(void)
 {
@@ -4037,6 +4187,11 @@ static int vb_runtime_read_app_summary(const char *app_id, vb_app_summary_t *sum
     vb_safe_copy(summary->id, sizeof(summary->id), app_id);
     vb_safe_copy(summary->name, sizeof(summary->name), app_id);
     vb_safe_copy(summary->description, sizeof(summary->description), "Runtime app package");
+    vb_safe_copy(summary->category, sizeof(summary->category), "General");
+    vb_safe_copy(summary->icon, sizeof(summary->icon), "app");
+    vb_safe_copy(summary->author, sizeof(summary->author), "Unknown");
+    vb_safe_copy(summary->screenshot, sizeof(summary->screenshot), "generated:runtime");
+    vb_safe_copy(summary->requirements, sizeof(summary->requirements), "Runtime");
 
     vb_build_app_path(path, sizeof(path), app_id, "main.lua");
     summary->main_lua = vb_file_exists(path);
@@ -4050,6 +4205,11 @@ static int vb_runtime_read_app_summary(const char *app_id, vb_app_summary_t *sum
             summary->manifest = 1;
             vb_json_copy_string(json, RT_NULL, "name", summary->name, sizeof(summary->name), app_id);
             vb_json_copy_string(json, RT_NULL, "description", summary->description, sizeof(summary->description), summary->description);
+            vb_json_copy_string(json, RT_NULL, "category", summary->category, sizeof(summary->category), summary->category);
+            vb_json_copy_string(json, RT_NULL, "icon", summary->icon, sizeof(summary->icon), summary->icon);
+            vb_json_copy_string(json, RT_NULL, "author", summary->author, sizeof(summary->author), summary->author);
+            vb_json_copy_string(json, RT_NULL, "screenshot", summary->screenshot, sizeof(summary->screenshot), summary->screenshot);
+            vb_json_copy_string_array_csv(json, RT_NULL, "requirements", summary->requirements, sizeof(summary->requirements), summary->requirements);
         }
         rt_free(json);
     }
@@ -4062,6 +4222,11 @@ static int vb_runtime_read_app_summary(const char *app_id, vb_app_summary_t *sum
         {
             vb_app_info_copy_value(info, "name", summary->name, sizeof(summary->name), app_id);
             vb_app_info_copy_value(info, "description", summary->description, sizeof(summary->description), summary->description);
+            vb_app_info_copy_value(info, "category", summary->category, sizeof(summary->category), summary->category);
+            vb_app_info_copy_value(info, "icon", summary->icon, sizeof(summary->icon), summary->icon);
+            vb_app_info_copy_value(info, "author", summary->author, sizeof(summary->author), summary->author);
+            vb_app_info_copy_value(info, "screenshot", summary->screenshot, sizeof(summary->screenshot), summary->screenshot);
+            vb_app_info_copy_value(info, "requirements", summary->requirements, sizeof(summary->requirements), summary->requirements);
         }
     }
 
@@ -4242,6 +4407,18 @@ static int vb_runtime_append_app_summary_json(char *dst, rt_size_t cap, int *use
     result |= vb_json_append_string(dst, cap, used, summary->id, 0);
     result |= vb_json_appendf(dst, cap, used, ",\"name\":");
     result |= vb_json_append_string(dst, cap, used, summary->name, 0);
+    result |= vb_json_appendf(dst, cap, used, ",\"description\":");
+    result |= vb_json_append_string(dst, cap, used, summary->description, 80);
+    result |= vb_json_appendf(dst, cap, used, ",\"category\":");
+    result |= vb_json_append_string(dst, cap, used, summary->category, 32);
+    result |= vb_json_appendf(dst, cap, used, ",\"icon\":");
+    result |= vb_json_append_string(dst, cap, used, summary->icon, 32);
+    result |= vb_json_appendf(dst, cap, used, ",\"author\":");
+    result |= vb_json_append_string(dst, cap, used, summary->author, 48);
+    result |= vb_json_appendf(dst, cap, used, ",\"screenshot\":");
+    result |= vb_json_append_string(dst, cap, used, summary->screenshot, 80);
+    result |= vb_json_appendf(dst, cap, used, ",\"requirements\":");
+    result |= vb_json_append_string(dst, cap, used, summary->requirements, 80);
     result |= vb_json_appendf(dst, cap, used,
                               ",\"active\":%d,\"compatible\":%d,\"manifest\":%d,\"app_info\":%d,\"main_lua\":%d}",
                               summary->active,
@@ -4390,7 +4567,13 @@ static int vb_runtime_app_launch(const char *app_id)
 
 static int vb_runtime_app_stop(void)
 {
-    if (!g_vb_runtime.running) return -RT_ERROR;
+    if (!g_vb_runtime.running)
+    {
+        g_vb_runtime.app_running = 0;
+        g_vb_runtime.app_failed = 0;
+        vb_runtime_set_app_result(RT_EOK, "already on home");
+        return RT_EOK;
+    }
     g_vb_runtime.pending_stop = 1;
     vb_runtime_set_app_result(RT_EOK, "stop requested");
     return RT_EOK;
@@ -5381,6 +5564,53 @@ static void vb_json_copy_string(const char *begin, const char *end, const char *
     dst[used] = '\0';
 }
 
+static void vb_json_copy_string_array_csv(const char *begin, const char *end, const char *key,
+                                          char *dst, rt_size_t cap, const char *fallback)
+{
+    const char *value;
+    const char *cursor;
+    const char *array_end;
+    rt_size_t used = 0;
+    int first = 1;
+    if (!dst || cap == 0) return;
+    vb_safe_copy(dst, cap, fallback ? fallback : "");
+    if (!begin || !key) return;
+    value = vb_json_find_value(begin, end, key);
+    if (!value || *value != '[') return;
+    cursor = value + 1;
+    array_end = strchr(cursor, ']');
+    if (!array_end || (end && array_end > end)) return;
+    dst[0] = '\0';
+    while (cursor < array_end && used + 1 < cap)
+    {
+        const char *src;
+        while (cursor < array_end && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n' || *cursor == ',')) cursor++;
+        if (cursor >= array_end) break;
+        if (*cursor != '"') break;
+        cursor++;
+        if (!first)
+        {
+            if (used + 2 >= cap) break;
+            dst[used++] = ',';
+            dst[used++] = ' ';
+        }
+        first = 0;
+        src = cursor;
+        while (src < array_end && *src && *src != '"' && used + 1 < cap)
+        {
+            char c;
+            if (*src == '\\' && src[1]) src++;
+            c = *src++;
+            if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+            dst[used++] = c;
+        }
+        dst[used] = '\0';
+        cursor = src;
+        if (cursor < array_end && *cursor == '"') cursor++;
+    }
+    if (used == 0) vb_safe_copy(dst, cap, fallback ? fallback : "");
+}
+
 static int vb_parse_manifest_components(const char *json)
 {
     const char *components = strstr(json, "\"components\"");
@@ -5412,64 +5642,6 @@ static int vb_parse_manifest_components(const char *json)
         cursor = obj_end + 1;
     }
     return count;
-}
-
-static int vb_runtime_validate_manifest_for_app(const char *app_id, const char *manifest_path)
-{
-    char *json;
-    char kind[48];
-    char manifest_id[VB_MAX_APP_ID];
-    char entry[VB_MAX_PATH];
-    int version = 0;
-    int len;
-    int result = RT_EOK;
-
-    if (!app_id || !manifest_path) return -RT_EINVAL;
-
-    json = (char *)rt_malloc(VB_MAX_MANIFEST);
-    if (!json) return -RT_ENOMEM;
-
-    len = vb_read_text_file(manifest_path, json, VB_MAX_MANIFEST);
-    if (len <= 0)
-    {
-        rt_kprintf("[vb_runtime] manifest invalid: read failed %s\n", manifest_path);
-        rt_free(json);
-        return -RT_ERROR;
-    }
-
-    vb_json_copy_string(json, RT_NULL, "kind", kind, sizeof(kind), "");
-    vb_json_copy_string(json, RT_NULL, "id", manifest_id, sizeof(manifest_id), "");
-    vb_json_copy_string(json, RT_NULL, "entry", entry, sizeof(entry), "");
-    if (!(vb_json_read_int(json, RT_NULL, "schemaVersion", &version) ||
-          vb_json_read_int(json, RT_NULL, "version", &version)))
-    {
-        version = 0;
-    }
-
-    if (rt_strcmp(kind, "huangshan-runtime-app-manifest") != 0)
-    {
-        rt_kprintf("[vb_runtime] manifest invalid: kind=%s\n", kind[0] ? kind : "--");
-        result = -RT_EINVAL;
-    }
-    else if (!vb_is_safe_app_id(manifest_id) || rt_strcmp(manifest_id, app_id) != 0)
-    {
-        rt_kprintf("[vb_runtime] manifest invalid: id=%s app=%s\n",
-                   manifest_id[0] ? manifest_id : "--", app_id);
-        result = -RT_EINVAL;
-    }
-    else if (entry[0] == '\0' || rt_strcmp(entry, "main.lua") != 0)
-    {
-        rt_kprintf("[vb_runtime] manifest invalid: entry=%s\n", entry[0] ? entry : "--");
-        result = -RT_EINVAL;
-    }
-    else if (version != 1)
-    {
-        rt_kprintf("[vb_runtime] manifest invalid: version=%d\n", version);
-        result = -RT_EINVAL;
-    }
-
-    rt_free(json);
-    return result;
 }
 
 static const char *vb_skip_spaces(const char *text)
@@ -5974,6 +6146,346 @@ static int vb_snake_start(const char *title, int cols, int rows, int period_ms)
     vb_snake_reset();
     vb_snake_render();
     rt_kprintf("[vb_runtime][snake] autoplay started cols=%d rows=%d period=%d\n", cols, rows, period_ms);
+    return RT_EOK;
+}
+
+
+static uint32_t vb_2048_next_random(void)
+{
+    uint32_t value = g_vb_runtime.game2048.rng;
+    if (value == 0) value = rt_tick_get() ^ 0x9e3779b9u;
+    value = value * 1664525u + 1013904223u;
+    g_vb_runtime.game2048.rng = value;
+    return value;
+}
+
+static uint32_t vb_2048_tile_color(int value)
+{
+    switch (value)
+    {
+    case 0: return 0x263244;
+    case 2: return 0xeee4da;
+    case 4: return 0xede0c8;
+    case 8: return 0xf2b179;
+    case 16: return 0xf59563;
+    case 32: return 0xf67c5f;
+    case 64: return 0xf65e3b;
+    case 128: return 0xedcf72;
+    case 256: return 0xedcc61;
+    case 512: return 0xedc850;
+    case 1024: return 0xedc53f;
+    case 2048: return 0xedc22e;
+    default: return 0x3b82f6;
+    }
+}
+
+static uint32_t vb_2048_text_color(int value)
+{
+    return value <= 4 ? 0x334155 : 0xf8fafc;
+}
+
+static int vb_2048_can_move(void)
+{
+    int r;
+    int c;
+    for (r = 0; r < VB_2048_SIZE; r++)
+    {
+        for (c = 0; c < VB_2048_SIZE; c++)
+        {
+            int value = g_vb_runtime.game2048.board[r][c];
+            if (value == 0) return 1;
+            if (c + 1 < VB_2048_SIZE && value == g_vb_runtime.game2048.board[r][c + 1]) return 1;
+            if (r + 1 < VB_2048_SIZE && value == g_vb_runtime.game2048.board[r + 1][c]) return 1;
+        }
+    }
+    return 0;
+}
+
+static void vb_2048_add_tile(void)
+{
+    int empty[VB_2048_CELLS];
+    int count = 0;
+    int r;
+    int c;
+    int slot;
+    uint32_t rnd;
+    for (r = 0; r < VB_2048_SIZE; r++)
+    {
+        for (c = 0; c < VB_2048_SIZE; c++)
+        {
+            if (g_vb_runtime.game2048.board[r][c] == 0) empty[count++] = r * VB_2048_SIZE + c;
+        }
+    }
+    if (count <= 0) return;
+    rnd = vb_2048_next_random();
+    slot = empty[rnd % count];
+    g_vb_runtime.game2048.board[slot / VB_2048_SIZE][slot % VB_2048_SIZE] = ((rnd >> 8) % 10 == 0) ? 4 : 2;
+}
+
+static int vb_2048_merge_line(int in[VB_2048_SIZE], int out[VB_2048_SIZE])
+{
+    int temp[VB_2048_SIZE] = {0, 0, 0, 0};
+    int compact[VB_2048_SIZE] = {0, 0, 0, 0};
+    int i;
+    int count = 0;
+    int out_count = 0;
+    int changed = 0;
+    for (i = 0; i < VB_2048_SIZE; i++)
+    {
+        if (in[i] != 0) temp[count++] = in[i];
+    }
+    for (i = 0; i < count; i++)
+    {
+        if (i + 1 < count && temp[i] == temp[i + 1])
+        {
+            compact[out_count] = temp[i] * 2;
+            g_vb_runtime.game2048.score += compact[out_count];
+            if (g_vb_runtime.game2048.score > g_vb_runtime.game2048.best_score)
+            {
+                g_vb_runtime.game2048.best_score = g_vb_runtime.game2048.score;
+            }
+            out_count++;
+            i++;
+        }
+        else
+        {
+            compact[out_count++] = temp[i];
+        }
+    }
+    for (i = 0; i < VB_2048_SIZE; i++)
+    {
+        out[i] = compact[i];
+        if (out[i] != in[i]) changed = 1;
+    }
+    return changed;
+}
+
+static int vb_2048_move(lv_dir_t dir)
+{
+    int changed = 0;
+    int i;
+    int j;
+    int in[VB_2048_SIZE];
+    int out[VB_2048_SIZE];
+    if (!g_vb_runtime.game2048.active || g_vb_runtime.game2048.game_over) return 0;
+    for (i = 0; i < VB_2048_SIZE; i++)
+    {
+        for (j = 0; j < VB_2048_SIZE; j++)
+        {
+            if (dir == LV_DIR_LEFT) in[j] = g_vb_runtime.game2048.board[i][j];
+            else if (dir == LV_DIR_RIGHT) in[j] = g_vb_runtime.game2048.board[i][VB_2048_SIZE - 1 - j];
+            else if (dir == LV_DIR_TOP) in[j] = g_vb_runtime.game2048.board[j][i];
+            else if (dir == LV_DIR_BOTTOM) in[j] = g_vb_runtime.game2048.board[VB_2048_SIZE - 1 - j][i];
+            else return 0;
+        }
+        if (vb_2048_merge_line(in, out)) changed = 1;
+        for (j = 0; j < VB_2048_SIZE; j++)
+        {
+            if (dir == LV_DIR_LEFT) g_vb_runtime.game2048.board[i][j] = out[j];
+            else if (dir == LV_DIR_RIGHT) g_vb_runtime.game2048.board[i][VB_2048_SIZE - 1 - j] = out[j];
+            else if (dir == LV_DIR_TOP) g_vb_runtime.game2048.board[j][i] = out[j];
+            else if (dir == LV_DIR_BOTTOM) g_vb_runtime.game2048.board[VB_2048_SIZE - 1 - j][i] = out[j];
+        }
+    }
+    if (changed)
+    {
+        g_vb_runtime.game2048.moves++;
+        vb_2048_add_tile();
+        if (!vb_2048_can_move()) g_vb_runtime.game2048.game_over = 1;
+    }
+    return changed;
+}
+
+static void vb_2048_render(void)
+{
+    int r;
+    int c;
+    int tile_size = (VB_2048_BOARD_SIZE - (VB_2048_SIZE + 1) * VB_2048_GAP) / VB_2048_SIZE;
+    char text[64];
+    if (!g_vb_runtime.game2048.active) return;
+    for (r = 0; r < VB_2048_SIZE; r++)
+    {
+        for (c = 0; c < VB_2048_SIZE; c++)
+        {
+            int idx = r * VB_2048_SIZE + c;
+            int value = g_vb_runtime.game2048.board[r][c];
+            lv_obj_t *tile = g_vb_runtime.game2048.tiles[idx];
+            lv_obj_t *label = g_vb_runtime.game2048.labels[idx];
+            if (!tile || !label) continue;
+            lv_obj_set_style_bg_color(tile, lv_color_hex(vb_2048_tile_color(value)), LV_PART_MAIN | LV_STATE_DEFAULT);
+            if (value > 0) rt_snprintf(text, sizeof(text), "%d", value);
+            else text[0] = '\0';
+            lv_label_set_text(label, text);
+            lv_obj_set_style_text_color(label, lv_color_hex(vb_2048_text_color(value)), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_size(tile, tile_size, tile_size);
+        }
+    }
+    if (g_vb_runtime.game2048.score_label)
+    {
+        rt_snprintf(text, sizeof(text), "Score %d   Best %d", g_vb_runtime.game2048.score, g_vb_runtime.game2048.best_score);
+        lv_label_set_text(g_vb_runtime.game2048.score_label, text);
+    }
+    if (g_vb_runtime.game2048.status_label)
+    {
+        rt_snprintf(text, sizeof(text), g_vb_runtime.game2048.game_over ? "Game over  press K1 home" : "Swipe board  K1 home");
+        lv_label_set_text(g_vb_runtime.game2048.status_label, text);
+    }
+}
+
+static const char *vb_2048_dir_name(lv_dir_t dir)
+{
+    switch (dir)
+    {
+    case LV_DIR_LEFT: return "left";
+    case LV_DIR_RIGHT: return "right";
+    case LV_DIR_TOP: return "up";
+    case LV_DIR_BOTTOM: return "down";
+    default: return "none";
+    }
+}
+
+static lv_dir_t vb_2048_dir_from_delta(int dx, int dy)
+{
+    int adx = abs(dx);
+    int ady = abs(dy);
+    if (adx < VB_2048_SWIPE_MIN_PRIMARY && ady < VB_2048_SWIPE_MIN_PRIMARY) return LV_DIR_NONE;
+    if (adx >= ady) return dx >= 0 ? LV_DIR_RIGHT : LV_DIR_LEFT;
+    return dy >= 0 ? LV_DIR_BOTTOM : LV_DIR_TOP;
+}
+
+static void vb_2048_handle_swipe(lv_dir_t dir, const char *source)
+{
+    char text[64];
+    if (!g_vb_runtime.game2048.active) return;
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT && dir != LV_DIR_TOP && dir != LV_DIR_BOTTOM) return;
+    if (vb_2048_move(dir))
+    {
+        vb_2048_render();
+        if (g_vb_runtime.game2048.status_label)
+        {
+            rt_snprintf(text, sizeof(text), "Moved %s", vb_2048_dir_name(dir));
+            lv_label_set_text(g_vb_runtime.game2048.status_label, text);
+        }
+        rt_kprintf("[vb_runtime][2048] %s dir=%s move=%d score=%d best=%d dx=%d dy=%d\n",
+                   source ? source : "swipe",
+                   vb_2048_dir_name(dir),
+                   g_vb_runtime.game2048.moves,
+                   g_vb_runtime.game2048.score,
+                   g_vb_runtime.game2048.best_score,
+                   g_vb_runtime.touch.delta.x,
+                   g_vb_runtime.touch.delta.y);
+    }
+    else
+    {
+        if (g_vb_runtime.game2048.status_label)
+        {
+            rt_snprintf(text, sizeof(text), "No move %s", vb_2048_dir_name(dir));
+            lv_label_set_text(g_vb_runtime.game2048.status_label, text);
+        }
+        rt_kprintf("[vb_runtime][2048] %s ignored dir=%s dx=%d dy=%d\n",
+                   source ? source : "swipe",
+                   vb_2048_dir_name(dir),
+                   g_vb_runtime.touch.delta.x,
+                   g_vb_runtime.touch.delta.y);
+    }
+}
+
+static void vb_2048_handle_gesture(lv_dir_t dir)
+{
+    vb_2048_handle_swipe(dir, "gesture");
+}
+
+static void vb_2048_reset(void)
+{
+    rt_memset(g_vb_runtime.game2048.board, 0, sizeof(g_vb_runtime.game2048.board));
+    g_vb_runtime.game2048.score = 0;
+    g_vb_runtime.game2048.moves = 0;
+    g_vb_runtime.game2048.game_over = 0;
+    g_vb_runtime.game2048.rng = rt_tick_get() ^ 0x20482048u;
+    vb_2048_add_tile();
+    vb_2048_add_tile();
+}
+
+static void vb_runtime_bind_touch_events(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_PRESS_LOST, RT_NULL);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(obj, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
+}
+
+static int vb_2048_start(const char *title)
+{
+    int r;
+    int c;
+    int tile_size = (VB_2048_BOARD_SIZE - (VB_2048_SIZE + 1) * VB_2048_GAP) / VB_2048_SIZE;
+    int board_x = (LV_HOR_RES_MAX - VB_2048_BOARD_SIZE) / 2;
+    int board_y = VB_SCREEN_SAFE_TOP + 92;
+    lv_obj_t *label;
+    if (!g_vb_runtime.root) return -RT_ERROR;
+    rt_memset(&g_vb_runtime.game2048, 0, sizeof(g_vb_runtime.game2048));
+    g_vb_runtime.game2048.active = 1;
+
+    label = vb_create_label(g_vb_runtime.root, title && title[0] ? title : "2048", FONT_BIGL, lv_color_hex(0xfbbf24));
+    lv_obj_set_width(label, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, VB_SCREEN_SAFE_TOP - 4);
+
+    g_vb_runtime.game2048.score_label = vb_create_label(g_vb_runtime.root, "Score 0   Best 0", FONT_SMALL, lv_color_hex(0xe2e8f0));
+    lv_obj_set_width(g_vb_runtime.game2048.score_label, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(g_vb_runtime.game2048.score_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.game2048.score_label, LV_ALIGN_TOP_MID, 0, VB_SCREEN_SAFE_TOP + 38);
+
+    g_vb_runtime.game2048.board_panel = lv_obj_create(g_vb_runtime.root);
+    lv_obj_set_size(g_vb_runtime.game2048.board_panel, VB_2048_BOARD_SIZE, VB_2048_BOARD_SIZE);
+    lv_obj_set_pos(g_vb_runtime.game2048.board_panel, board_x, board_y);
+    lv_obj_set_style_bg_color(g_vb_runtime.game2048.board_panel, lv_color_hex(0x111827), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(g_vb_runtime.game2048.board_panel, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(g_vb_runtime.game2048.board_panel, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(g_vb_runtime.game2048.board_panel, lv_color_hex(0x475569), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(g_vb_runtime.game2048.board_panel, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    vb_runtime_bind_touch_events(g_vb_runtime.game2048.board_panel);
+    lv_obj_set_ext_click_area(g_vb_runtime.game2048.board_panel, 12);
+
+    for (r = 0; r < VB_2048_SIZE; r++)
+    {
+        for (c = 0; c < VB_2048_SIZE; c++)
+        {
+            int idx = r * VB_2048_SIZE + c;
+            lv_obj_t *tile = lv_obj_create(g_vb_runtime.game2048.board_panel);
+            lv_obj_set_size(tile, tile_size, tile_size);
+            lv_obj_set_pos(tile,
+                           VB_2048_GAP + c * (tile_size + VB_2048_GAP),
+                           VB_2048_GAP + r * (tile_size + VB_2048_GAP));
+            lv_obj_set_style_radius(tile, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_border_width(tile, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_bg_color(tile, lv_color_hex(0x263244), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_add_flag(tile, LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_PRESS_LOCK);
+            lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);
+            label = vb_create_label(tile, "", FONT_NORMAL, lv_color_hex(0xf8fafc));
+            lv_obj_set_width(label, tile_size);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_add_flag(label, LV_OBJ_FLAG_EVENT_BUBBLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+            lv_obj_center(label);
+            g_vb_runtime.game2048.tiles[idx] = tile;
+            g_vb_runtime.game2048.labels[idx] = label;
+        }
+    }
+
+    g_vb_runtime.game2048.status_label = vb_create_label(g_vb_runtime.root, "Swipe board  K1 home", FONT_SMALL, lv_color_hex(0xbfdbfe));
+    lv_obj_set_width(g_vb_runtime.game2048.status_label, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(g_vb_runtime.game2048.status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_vb_runtime.game2048.status_label, LV_ALIGN_BOTTOM_MID, 0, -VB_SCREEN_SAFE_BOTTOM + 8);
+
+    vb_2048_reset();
+    vb_2048_render();
+    rt_kprintf("[vb_runtime][2048] started\n");
     return RT_EOK;
 }
 
@@ -7185,6 +7697,11 @@ static int vb_script_execute_helper_call(const char *line)
         vb_snake_start(args[0], atoi(args[1]), atoi(args[2]), atoi(args[3]));
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_2048_game", args, &argc))
+    {
+        vb_2048_start(argc >= 1 ? args[0] : "2048");
+        return 1;
+    }
     if (vb_extract_call_args(line, "vibe_weather_pet", args, &argc) && argc >= 5)
     {
         vb_weather_start(args[0], args[1], atoi(args[2]), atoi(args[3]), atoi(args[4]));
@@ -7305,6 +7822,17 @@ static void vb_set_status(const char *text)
     }
 }
 
+static void vb_runtime_request_home_from_navigation(const char *source)
+{
+    if (g_vb_runtime.pending_stop) return;
+    rt_kprintf("[vb_runtime] %s home dx=%d dy=%d\n",
+               source ? source : "navigation",
+               g_vb_runtime.touch.delta.x,
+               g_vb_runtime.touch.delta.y);
+    g_vb_runtime.pending_stop = 1;
+    if (g_vb_runtime.timer) lv_timer_ready(g_vb_runtime.timer);
+}
+
 static void vb_runtime_touch_event_cb(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
@@ -7312,8 +7840,8 @@ static void vb_runtime_touch_event_cb(lv_event_t *event)
     lv_point_t point = {0, 0};
     uint32_t now;
     if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING &&
-        code != LV_EVENT_RELEASED && code != LV_EVENT_CLICKED &&
-        code != LV_EVENT_GESTURE)
+        code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST &&
+        code != LV_EVENT_CLICKED && code != LV_EVENT_GESTURE)
     {
         return;
     }
@@ -7337,6 +7865,7 @@ static void vb_runtime_touch_event_cb(lv_event_t *event)
         g_vb_runtime.touch.delta.y = 0;
         g_vb_runtime.touch.last_duration_ms = 0;
         g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
+        if (g_vb_runtime.game2048.active) g_vb_runtime.game2048.drag_consumed = 0;
     }
     else if (code == LV_EVENT_PRESSING)
     {
@@ -7344,7 +7873,7 @@ static void vb_runtime_touch_event_cb(lv_event_t *event)
         g_vb_runtime.touch.delta.y = point.y - g_vb_runtime.touch.press_point.y;
         g_vb_runtime.touch.last_duration_ms = vb_runtime_touch_tick_elapsed_ms(g_vb_runtime.touch.press_tick, now);
     }
-    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CLICKED)
     {
         g_vb_runtime.touch.release_point = point;
         g_vb_runtime.touch.delta.x = point.x - g_vb_runtime.touch.press_point.x;
@@ -7358,6 +7887,36 @@ static void vb_runtime_touch_event_cb(lv_event_t *event)
         g_vb_runtime.touch.delta.x = point.x - g_vb_runtime.touch.press_point.x;
         g_vb_runtime.touch.delta.y = point.y - g_vb_runtime.touch.press_point.y;
         g_vb_runtime.touch.last_duration_ms = vb_runtime_touch_tick_elapsed_ms(g_vb_runtime.touch.press_tick, now);
+    }
+    if ((code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED ||
+         code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CLICKED ||
+         code == LV_EVENT_GESTURE) &&
+        g_vb_runtime.touch.press_point.x <= VB_SCREEN_EDGE_BACK_X &&
+        g_vb_runtime.touch.delta.x >= VB_SCREEN_EDGE_BACK_DX &&
+        abs(g_vb_runtime.touch.delta.y) <= VB_SCREEN_EDGE_BACK_MAX_DY &&
+        (code != LV_EVENT_GESTURE || g_vb_runtime.touch.gesture_dir == LV_DIR_RIGHT))
+    {
+        vb_runtime_request_home_from_navigation(code == LV_EVENT_GESTURE ? "edge gesture" : "edge drag");
+        return;
+    }
+    if (g_vb_runtime.game2048.active)
+    {
+        if (code == LV_EVENT_GESTURE && !g_vb_runtime.game2048.drag_consumed)
+        {
+            vb_2048_handle_gesture(g_vb_runtime.touch.gesture_dir);
+            g_vb_runtime.game2048.drag_consumed = 1;
+            return;
+        }
+        if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CLICKED) &&
+            !g_vb_runtime.game2048.drag_consumed)
+        {
+            lv_dir_t dir = vb_2048_dir_from_delta(g_vb_runtime.touch.delta.x, g_vb_runtime.touch.delta.y);
+            if (dir != LV_DIR_NONE)
+            {
+                vb_2048_handle_swipe(dir, "release");
+                g_vb_runtime.game2048.drag_consumed = 1;
+            }
+        }
     }
 }
 
@@ -7408,11 +7967,39 @@ static void vb_back_event_cb(lv_event_t *event)
     }
 }
 
-static void vb_launcher_open_event_cb(lv_event_t *event)
+static void vb_runtime_clear_overlay_controls(void)
 {
-    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
-    vb_set_status("opening app manager");
-    (void)vb_runtime_app_stop();
+    if (g_vb_runtime.overlay_apps_button)
+    {
+        lv_obj_del(g_vb_runtime.overlay_apps_button);
+        g_vb_runtime.overlay_apps_button = RT_NULL;
+    }
+    if (g_vb_runtime.overlay_nav_zone)
+    {
+        lv_obj_del(g_vb_runtime.overlay_nav_zone);
+        g_vb_runtime.overlay_nav_zone = RT_NULL;
+    }
+}
+
+static void vb_runtime_show_navigation_controls(void)
+{
+    vb_runtime_clear_overlay_controls();
+    g_vb_runtime.overlay_nav_zone = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(g_vb_runtime.overlay_nav_zone);
+    lv_obj_set_size(g_vb_runtime.overlay_nav_zone, VB_SCREEN_EDGE_BACK_X, LV_VER_RES_MAX);
+    lv_obj_align(g_vb_runtime.overlay_nav_zone, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_flag(g_vb_runtime.overlay_nav_zone, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_clear_flag(g_vb_runtime.overlay_nav_zone,
+                      LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_set_ext_click_area(g_vb_runtime.overlay_nav_zone, 12);
+    lv_obj_set_style_bg_opa(g_vb_runtime.overlay_nav_zone, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(g_vb_runtime.overlay_nav_zone, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(g_vb_runtime.overlay_nav_zone, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(g_vb_runtime.overlay_nav_zone, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.overlay_nav_zone, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.overlay_nav_zone, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.overlay_nav_zone, vb_runtime_touch_event_cb, LV_EVENT_PRESS_LOST, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.overlay_nav_zone, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
 }
 
 static void vb_launcher_refresh_event_cb(lv_event_t *event)
@@ -7442,7 +8029,8 @@ static void vb_launcher_launch_event_cb(lv_event_t *event)
 {
     vb_launcher_item_t *item;
     int result;
-    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    if (LV_EVENT_SHORT_CLICKED != lv_event_get_code(event) &&
+        LV_EVENT_CLICKED != lv_event_get_code(event)) return;
     item = (vb_launcher_item_t *)lv_event_get_user_data(event);
     if (!item || !item->id[0]) return;
     result = vb_runtime_app_launch(item->id);
@@ -7451,6 +8039,7 @@ static void vb_launcher_launch_event_cb(lv_event_t *event)
         char text[VB_MAX_TEXT];
         rt_snprintf(text, sizeof(text), "launching %s", item->id);
         vb_set_status(text);
+        if (g_vb_runtime.timer) lv_timer_ready(g_vb_runtime.timer);
     }
     else
     {
@@ -7525,15 +8114,25 @@ static void vb_runtime_request_manager_refresh(const char *message)
     g_vb_runtime.pending_manager_refresh = 1;
 }
 
+#if 0
 static void vb_render_app_manager_ui(const char *reason)
 {
     vb_app_summary_t apps[VB_LAUNCHER_MAX_ITEMS];
     char active[VB_MAX_APP_ID];
     char line[VB_MAX_TEXT + 48];
+    const lv_coord_t safe_x = VB_SCREEN_SAFE_LEFT;
+    const lv_coord_t safe_y = VB_SCREEN_SAFE_TOP;
+    const lv_coord_t safe_w = VB_SCREEN_SAFE_WIDTH;
+    const lv_coord_t safe_h = VB_SCREEN_SAFE_HEIGHT;
+    const lv_coord_t row_w = safe_w;
+    const lv_coord_t row_h = 44;
+    const lv_coord_t row_gap = 6;
+    const lv_coord_t row_y0 = safe_y + 88;
     int total = 0;
     int count;
     int i;
 
+    vb_runtime_clear_overlay_controls();
     if (g_vb_runtime.root)
     {
         lv_obj_del(g_vb_runtime.root);
@@ -7552,6 +8151,8 @@ static void vb_render_app_manager_ui(const char *reason)
     g_vb_runtime.touch.active = 0;
     g_vb_runtime.touch.last_event = 0;
     g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
+    g_vb_runtime.home_key_last_pressed = 0;
+    g_vb_runtime.home_key_last_tick = rt_tick_get();
 
     vb_read_active_app(active, sizeof(active));
     count = vb_runtime_collect_apps(apps, VB_LAUNCHER_MAX_ITEMS, g_vb_runtime.launcher_page * VB_LAUNCHER_MAX_ITEMS, &total);
@@ -7577,12 +8178,13 @@ static void vb_render_app_manager_ui(const char *reason)
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESS_LOST, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_CLICKED, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
 
     lv_obj_t *back = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(back, 72, 34);
-    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 12, 12);
+    lv_obj_set_size(back, 64, 30);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, safe_x, safe_y);
     lv_obj_set_style_radius(back, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(back, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(back, vb_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
@@ -7590,8 +8192,8 @@ static void vb_render_app_manager_ui(const char *reason)
     lv_obj_center(back_label);
 
     lv_obj_t *refresh = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(refresh, 72, 34);
-    lv_obj_align(refresh, LV_ALIGN_TOP_RIGHT, -12, 12);
+    lv_obj_set_size(refresh, 70, 30);
+    lv_obj_align(refresh, LV_ALIGN_TOP_RIGHT, -safe_x, safe_y);
     lv_obj_set_style_radius(refresh, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(refresh, lv_color_hex(0x0f766e), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(refresh, vb_launcher_refresh_event_cb, LV_EVENT_CLICKED, RT_NULL);
@@ -7599,27 +8201,29 @@ static void vb_render_app_manager_ui(const char *reason)
     lv_obj_center(refresh_label);
 
     lv_obj_t *title = vb_create_label(g_vb_runtime.root, "App Manager", FONT_BIGL, lv_color_hex(0x5eead4));
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, safe_y + 1);
 
     rt_snprintf(line, sizeof(line), "active=%s state=%s apps=%d page=%d/%d", active, vb_runtime_app_state_name(), total, total ? g_vb_runtime.launcher_page + 1 : 0, total ? ((total - 1) / VB_LAUNCHER_MAX_ITEMS) + 1 : 0);
     lv_obj_t *state = vb_create_label(g_vb_runtime.root, line, FONT_SMALL, lv_color_hex(0x93c5fd));
-    lv_obj_set_width(state, 350);
+    lv_obj_set_width(state, safe_w);
+    lv_label_set_long_mode(state, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(state, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(state, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_align(state, LV_ALIGN_TOP_MID, 0, safe_y + 38);
 
     lv_obj_t *hint = vb_create_label(g_vb_runtime.root,
                                      reason && reason[0] ? reason : "Tap Launch to run an installed app",
                                      FONT_SMALL,
                                      g_vb_runtime.app_failed ? lv_color_hex(0xfca5a5) : lv_color_hex(0xcbd5e1));
-    lv_obj_set_width(hint, 350);
+    lv_obj_set_width(hint, safe_w);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 82);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, safe_y + 60);
 
     if (count == 0)
     {
         lv_obj_t *panel = lv_obj_create(g_vb_runtime.root);
-        lv_obj_set_size(panel, 318, 126);
-        lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 146);
+        lv_obj_set_size(panel, safe_w, 118);
+        lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, row_y0 + 16);
         vb_set_obj_bg(panel, 0x172554);
         lv_obj_set_style_radius(panel, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_t *empty = vb_create_label(panel, "No Runtime apps found\nInstall over serial or BLE", FONT_NORMAL, LV_COLOR_WHITE);
@@ -7631,9 +8235,9 @@ static void vb_render_app_manager_ui(const char *reason)
     {
         for (i = 0; i < count; i++)
         {
-            lv_coord_t y = 112 + i * 52;
+            lv_coord_t y = row_y0 + i * (row_h + row_gap);
             lv_obj_t *row = lv_obj_create(g_vb_runtime.root);
-            lv_obj_set_size(row, 358, 48);
+            lv_obj_set_size(row, row_w, row_h);
             lv_obj_align(row, LV_ALIGN_TOP_MID, 0, y);
             vb_set_obj_bg(row, apps[i].active ? 0x1e3a8a : 0x111827);
             lv_obj_set_style_radius(row, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -7642,25 +8246,27 @@ static void vb_render_app_manager_ui(const char *reason)
             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
             lv_obj_t *name = vb_create_label(row, apps[i].name, FONT_SMALL, LV_COLOR_WHITE);
-            lv_obj_set_width(name, 188);
-            lv_obj_align(name, LV_ALIGN_TOP_LEFT, 12, 6);
+            lv_obj_set_width(name, row_w - 126);
+            lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+            lv_obj_align(name, LV_ALIGN_TOP_LEFT, 10, 5);
 
             rt_snprintf(line, sizeof(line), "%s  %s", apps[i].id, apps[i].compatible ? "ready" : "incompatible");
             lv_obj_t *meta = vb_create_label(row, line, FONT_SMALL, apps[i].compatible ? lv_color_hex(0x93c5fd) : lv_color_hex(0xfca5a5));
-            lv_obj_set_width(meta, 190);
-            lv_obj_align(meta, LV_ALIGN_TOP_LEFT, 12, 28);
+            lv_obj_set_width(meta, row_w - 126);
+            lv_label_set_long_mode(meta, LV_LABEL_LONG_CLIP);
+            lv_obj_align(meta, LV_ALIGN_TOP_LEFT, 10, 25);
 
             vb_safe_copy(g_vb_runtime.launcher_items[i].id, sizeof(g_vb_runtime.launcher_items[i].id), apps[i].id);
             g_vb_runtime.launcher_count++;
 
             lv_obj_t *launch = lv_btn_create(row);
-            lv_obj_set_size(launch, 72, 30);
-            lv_obj_align(launch, LV_ALIGN_RIGHT_MID, -62, 0);
+            lv_obj_set_size(launch, 64, 28);
+            lv_obj_align(launch, LV_ALIGN_RIGHT_MID, -50, 0);
             lv_obj_set_style_radius(launch, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_bg_color(launch, lv_color_hex(apps[i].compatible ? 0x2dd4bf : 0x475569), LV_PART_MAIN | LV_STATE_DEFAULT);
             if (apps[i].compatible)
             {
-                lv_obj_add_event_cb(launch, vb_launcher_launch_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_items[i]);
+                lv_obj_add_event_cb(launch, vb_launcher_launch_event_cb, LV_EVENT_SHORT_CLICKED, &g_vb_runtime.launcher_items[i]);
             }
             lv_obj_t *launch_label = vb_create_label(launch, apps[i].active ? "Open" : "Launch", FONT_SMALL,
                                                      apps[i].compatible ? lv_color_hex(0x0f172a) : lv_color_hex(0xcbd5e1));
@@ -7668,8 +8274,8 @@ static void vb_render_app_manager_ui(const char *reason)
 
             lv_obj_t *del = lv_btn_create(row);
             int confirming = rt_strcmp(g_vb_runtime.launcher_pending_delete, apps[i].id) == 0;
-            lv_obj_set_size(del, 48, 30);
-            lv_obj_align(del, LV_ALIGN_RIGHT_MID, -8, 0);
+            lv_obj_set_size(del, 42, 28);
+            lv_obj_align(del, LV_ALIGN_RIGHT_MID, -4, 0);
             lv_obj_set_style_radius(del, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_bg_color(del, lv_color_hex(confirming ? 0xf97316 : 0x7f1d1d), LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_add_event_cb(del, vb_launcher_delete_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_items[i]);
@@ -7688,8 +8294,8 @@ static void vb_render_app_manager_ui(const char *reason)
         g_vb_runtime.launcher_page_actions[0].delta = -1;
         g_vb_runtime.launcher_page_actions[1].delta = 1;
         prev = lv_btn_create(g_vb_runtime.root);
-        lv_obj_set_size(prev, 72, 30);
-        lv_obj_align(prev, LV_ALIGN_BOTTOM_LEFT, 24, -34);
+        lv_obj_set_size(prev, 68, 30);
+        lv_obj_align(prev, LV_ALIGN_TOP_LEFT, safe_x, safe_y + safe_h - 36);
         lv_obj_set_style_radius(prev, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(prev, lv_color_hex(g_vb_runtime.launcher_page > 0 ? 0x334155 : 0x1f2937), LV_PART_MAIN | LV_STATE_DEFAULT);
         if (g_vb_runtime.launcher_page > 0) lv_obj_add_event_cb(prev, vb_launcher_page_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_page_actions[0]);
@@ -7697,8 +8303,8 @@ static void vb_render_app_manager_ui(const char *reason)
         lv_obj_center(prev_label);
 
         next = lv_btn_create(g_vb_runtime.root);
-        lv_obj_set_size(next, 72, 30);
-        lv_obj_align(next, LV_ALIGN_BOTTOM_RIGHT, -24, -34);
+        lv_obj_set_size(next, 68, 30);
+        lv_obj_align(next, LV_ALIGN_TOP_RIGHT, -safe_x, safe_y + safe_h - 36);
         lv_obj_set_style_radius(next, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(next, lv_color_hex(g_vb_runtime.launcher_page < max_page ? 0x334155 : 0x1f2937), LV_PART_MAIN | LV_STATE_DEFAULT);
         if (g_vb_runtime.launcher_page < max_page) lv_obj_add_event_cb(next, vb_launcher_page_event_cb, LV_EVENT_CLICKED, &g_vb_runtime.launcher_page_actions[1]);
@@ -7716,13 +8322,16 @@ static void vb_render_app_manager_ui(const char *reason)
     lv_obj_t *foot = vb_create_label(g_vb_runtime.root, line, FONT_SMALL, lv_color_hex(0x94a3b8));
     lv_obj_set_width(foot, 170);
     lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_align(foot, LV_ALIGN_TOP_MID, 0, safe_y + safe_h - 32);
 
     g_vb_runtime.status_label = vb_create_label(g_vb_runtime.root, "launcher ready", FONT_SMALL, lv_color_hex(0xa7f3d0));
-    lv_obj_set_width(g_vb_runtime.status_label, 350);
+    lv_obj_set_width(g_vb_runtime.status_label, safe_w);
+    lv_label_set_long_mode(g_vb_runtime.status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(g_vb_runtime.status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_TOP_MID, 0, safe_y + safe_h - 12);
 }
+
+#endif
 
 static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
 {
@@ -7734,6 +8343,8 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
     g_vb_runtime.touch.active = 0;
     g_vb_runtime.touch.last_event = 0;
     g_vb_runtime.touch.gesture_dir = LV_DIR_NONE;
+    g_vb_runtime.home_key_last_pressed = 0;
+    g_vb_runtime.home_key_last_tick = rt_tick_get();
 
     g_vb_runtime.root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(g_vb_runtime.root, LV_HOR_RES_MAX, LV_VER_RES_MAX);
@@ -7743,29 +8354,14 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSED, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESSING, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_PRESS_LOST, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_CLICKED, RT_NULL);
     lv_obj_add_event_cb(g_vb_runtime.root, vb_runtime_touch_event_cb, LV_EVENT_GESTURE, RT_NULL);
 
-    lv_obj_t *back = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(back, 72, 36);
-    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 12, 14);
-    lv_obj_set_style_radius(back, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_event_cb(back, vb_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
-    lv_obj_t *back_label = vb_create_label(back, "Back", FONT_SMALL, LV_COLOR_WHITE);
-    lv_obj_center(back_label);
-
-    lv_obj_t *apps = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(apps, 72, 36);
-    lv_obj_align(apps, LV_ALIGN_TOP_RIGHT, -12, 14);
-    lv_obj_set_style_radius(apps, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(apps, lv_color_hex(0x0f766e), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_event_cb(apps, vb_launcher_open_event_cb, LV_EVENT_CLICKED, RT_NULL);
-    lv_obj_t *apps_label = vb_create_label(apps, "Apps", FONT_SMALL, LV_COLOR_WHITE);
-    lv_obj_center(apps_label);
+    vb_runtime_show_navigation_controls();
 
     lv_obj_t *title = vb_create_label(g_vb_runtime.root, "VibeBoard Runtime", FONT_BIGL, lv_color_hex(0x5eead4));
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, VB_SCREEN_SAFE_TOP + 2);
 
     rt_snprintf(line, sizeof(line), "%s", g_vb_runtime.app_name);
     lv_obj_t *name = vb_create_label(g_vb_runtime.root, line, FONT_NORMAL, LV_COLOR_WHITE);
@@ -7830,6 +8426,7 @@ static int vb_load_active_package(void)
     int start_result = RT_EOK;
 
     vibeboard_lua_stop_app();
+    rt_memset(&g_vb_runtime.game2048, 0, sizeof(g_vb_runtime.game2048));
     rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
     g_vb_runtime.component_count = 0;
     g_vb_runtime.app_running = 0;
@@ -7865,13 +8462,13 @@ static int vb_load_active_package(void)
     {
         if (rt_strcmp(g_vb_runtime.active_app, VIBEBOARD_DEFAULT_APP_ID) == 0)
         {
-            vb_runtime_set_app_result(RT_EOK, "app manager idle");
-            vb_render_app_manager_ui("Ready. Install or launch a Runtime app.");
+            vb_runtime_set_app_result(RT_EOK, "home idle");
+            vb_runtime_return_home();
             return RT_EOK;
         }
         g_vb_runtime.app_failed = 1;
         vb_runtime_set_app_result(-RT_ERROR, "active package missing manifest and main.lua");
-        vb_render_app_manager_ui(g_vb_runtime.app_last_error);
+        vb_runtime_return_home();
         return -RT_ERROR;
     }
     vb_render_runtime_ui(manifest_loaded, main_lua_present);
@@ -7890,7 +8487,7 @@ static int vb_load_active_package(void)
         {
             g_vb_runtime.app_failed = 1;
             vb_runtime_set_app_result(start_result, "lua adapter failed, manifest fallback shown");
-            vb_set_status("lua failed; Apps opens manager");
+            vb_set_status("lua failed; returning home");
             rt_kprintf("[vb_runtime] lua adapter failed, using manifest fallback\n");
         }
     }
@@ -7905,7 +8502,7 @@ static int vb_load_active_package(void)
     }
     else if (rt_strcmp(g_vb_runtime.active_app, VIBEBOARD_DEFAULT_APP_ID) == 0)
     {
-        vb_runtime_set_app_result(RT_EOK, "app manager idle");
+        vb_runtime_set_app_result(RT_EOK, "home idle");
     }
     else
     {
@@ -7917,6 +8514,7 @@ static int vb_load_active_package(void)
 
 static void vb_runtime_stop_current_app(void)
 {
+    vb_runtime_clear_overlay_controls();
     if (g_vb_runtime.root)
     {
         lv_obj_del(g_vb_runtime.root);
@@ -7924,6 +8522,7 @@ static void vb_runtime_stop_current_app(void)
     }
     vibeboard_lua_stop_app();
     vb_weather_release_image();
+    rt_memset(&g_vb_runtime.game2048, 0, sizeof(g_vb_runtime.game2048));
     rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
     g_vb_runtime.component_count = 0;
     g_vb_runtime.status_label = RT_NULL;
@@ -7933,11 +8532,10 @@ static void vb_runtime_stop_current_app(void)
     g_vb_runtime.app_running = 0;
     g_vb_runtime.app_failed = 0;
     g_vb_runtime.app_stop_count++;
+    (void)vb_write_active_app(VIBEBOARD_DEFAULT_APP_ID);
+    vb_safe_copy(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app), VIBEBOARD_DEFAULT_APP_ID);
     vb_runtime_set_app_result(RT_EOK, "stopped");
-    vb_read_active_app(g_vb_runtime.active_app, sizeof(g_vb_runtime.active_app));
-    vb_safe_copy(g_vb_runtime.app_name, sizeof(g_vb_runtime.app_name), "Runtime App Manager");
-    vb_safe_copy(g_vb_runtime.description, sizeof(g_vb_runtime.description), "Tap an installed app to launch it.");
-    vb_render_app_manager_ui("App stopped. Choose another app.");
+    vb_runtime_return_home();
     rt_kprintf("[vb_runtime] app stopped active=%s\n", g_vb_runtime.active_app);
 }
 
@@ -7947,6 +8545,7 @@ static int vb_runtime_reload_current(void)
     {
         return gui_app_run(APP_ID);
     }
+    vb_runtime_clear_overlay_controls();
     if (g_vb_runtime.root)
     {
         lv_obj_del(g_vb_runtime.root);
@@ -7964,6 +8563,11 @@ static void vb_runtime_request_reload(void)
     if (g_vb_runtime.running)
     {
         g_vb_runtime.pending_reload = 1;
+        if (g_vb_runtime.timer) lv_timer_ready(g_vb_runtime.timer);
+    }
+    else
+    {
+        (void)gui_app_run(APP_ID);
     }
 }
 
@@ -8139,9 +8743,6 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
 
 static int vb_runtime_install_end_app(const char *app_id)
 {
-    char manifest_path[VB_MAX_PATH];
-    char appinfo_path[VB_MAX_PATH];
-    char lua_path[VB_MAX_PATH];
     char staging_dir[VB_MAX_PATH];
     char app_dir[VB_MAX_PATH];
     char backup_dir[VB_MAX_PATH];
@@ -8164,23 +8765,11 @@ static int vb_runtime_install_end_app(const char *app_id)
     rt_snprintf(app_dir, sizeof(app_dir), "%s/%s", VIBEBOARD_APP_ROOT, app_id);
     app_dir[sizeof(app_dir) - 1] = '\0';
     vb_build_install_dir(backup_dir, sizeof(backup_dir), VIBEBOARD_BACKUP_PREFIX, app_id);
-    rt_snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", staging_dir);
-    rt_snprintf(appinfo_path, sizeof(appinfo_path), "%s/app.info", staging_dir);
-    rt_snprintf(lua_path, sizeof(lua_path), "%s/main.lua", staging_dir);
-    manifest_path[sizeof(manifest_path) - 1] = '\0';
-    appinfo_path[sizeof(appinfo_path) - 1] = '\0';
-    lua_path[sizeof(lua_path) - 1] = '\0';
-    if (!vb_file_exists(lua_path) || (!vb_file_exists(manifest_path) && !vb_file_exists(appinfo_path)))
     {
-        rt_kprintf("[vb_runtime] install end failed: package incomplete %s\n", app_id);
-        return -RT_ERROR;
-    }
-    if (vb_file_exists(manifest_path))
-    {
-        int validate = vb_runtime_validate_manifest_for_app(app_id, manifest_path);
+        int validate = vb_runtime_package_validate_stage(app_id, staging_dir);
         if (validate != RT_EOK)
         {
-            rt_kprintf("[vb_runtime] install end failed: manifest invalid %s rc=%d\n", app_id, validate);
+            rt_kprintf("[vb_runtime] install end failed: package invalid %s rc=%d\n", app_id, validate);
             return validate;
         }
     }
@@ -8333,7 +8922,7 @@ static int vb_http_download_to_file(const char *url, const char *file_path, int 
         }
     }
 
-    fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
     {
         rt_kprintf("[vb_runtime][ota] open failed: %s\n", file_path);
@@ -8887,6 +9476,29 @@ static int vb_runtime_component_sensor_text(const char *capability, char *dst, r
     return 0;
 }
 
+static void vb_runtime_poll_home_key(uint32_t now)
+{
+#if VB_RUNTIME_HAS_GPIO
+    int pressed;
+    if (!g_vb_runtime.root) return;
+    (void)vb_runtime_gpio_refresh();
+    pressed = (g_vb_runtime.gpio.key1_ok && g_vb_runtime.gpio.key1_pressed) ? 1 : 0;
+    if (pressed && !g_vb_runtime.home_key_last_pressed &&
+        now - g_vb_runtime.home_key_last_tick >= rt_tick_from_millisecond(VB_KEY_HOME_DEBOUNCE_MS))
+    {
+        g_vb_runtime.home_key_last_pressed = 1;
+        g_vb_runtime.home_key_last_tick = now;
+        rt_kprintf("[vb_runtime] hardware key home key1=%d\n",
+                   g_vb_runtime.gpio.key1_pressed);
+        vb_runtime_return_home();
+        return;
+    }
+    g_vb_runtime.home_key_last_pressed = pressed;
+#else
+    (void)now;
+#endif
+}
+
 static void vb_timer_cb(lv_timer_t *timer)
 {
     int i;
@@ -8903,7 +9515,7 @@ static void vb_timer_cb(lv_timer_t *timer)
     if (g_vb_runtime.pending_manager_refresh)
     {
         g_vb_runtime.pending_manager_refresh = 0;
-        vb_render_app_manager_ui(g_vb_runtime.manager_message[0] ? g_vb_runtime.manager_message : "App manager");
+        vb_runtime_return_home();
         return;
     }
     if (g_vb_runtime.pending_reload)
@@ -8912,6 +9524,8 @@ static void vb_timer_cb(lv_timer_t *timer)
         vb_runtime_reload_current();
         return;
     }
+    vb_runtime_poll_home_key(now);
+    if (!g_vb_runtime.root) return;
     g_vb_runtime.tick_count++;
     if (g_vb_runtime.clock_label &&
         now - g_vb_runtime.last_clock_update >= rt_tick_from_millisecond(VB_STATUS_TICK_REFRESH_MS))
@@ -9009,12 +9623,9 @@ static void vb_timer_cb(lv_timer_t *timer)
 static void on_start(void)
 {
     rt_memset(&g_vb_runtime, 0, sizeof(g_vb_runtime));
-    g_vb_runtime.install_fd = -1;
+    vb_runtime_state_defaults();
+    g_vb_runtime_state_initialized = 1;
     g_vb_runtime.running = 1;
-    g_vb_runtime.quiet_logs = 1;
-    g_vb_runtime.rgb_color = 0x000000u;
-    g_vb_runtime.display_brightness = -1;
-    g_vb_runtime.display_target_brightness = -1;
     vb_prepare_filesystem();
     (void)vb_runtime_display_load_state();
     (void)vb_runtime_rgb_load_state();
@@ -9034,6 +9645,7 @@ static void on_stop(void)
         g_vb_runtime.timer = RT_NULL;
     }
     vibeboard_lua_stop_app();
+    vb_runtime_clear_overlay_controls();
     if (g_vb_runtime.root)
     {
         lv_obj_del(g_vb_runtime.root);
@@ -9067,6 +9679,7 @@ static int app_main(intent_t i)
     return 0;
 }
 
+#if VB_RUNTIME_AUTORUN_UI
 static void vb_runtime_autorun_entry(void *parameter)
 {
     int attempt;
@@ -9093,6 +9706,7 @@ static int vb_runtime_autorun_init(void)
     return RT_EOK;
 }
 INIT_APP_EXPORT(vb_runtime_autorun_init);
+#endif
 
 #ifdef FINSH_USING_MSH
 static int vb_runtime_reload(int argc, char **argv)
@@ -9129,7 +9743,7 @@ static int vb_runtime_app(int argc, char **argv)
     (void)argv;
     return vb_runtime_app_status_command();
 }
-MSH_CMD_EXPORT(vb_runtime_app, show VibeBoard runtime app manager status as JSON);
+MSH_CMD_EXPORT(vb_runtime_app, show VibeBoard runtime app status as JSON);
 
 static int vb_runtime_apps(int argc, char **argv)
 {
@@ -9188,6 +9802,21 @@ static int vb_runtime_delete(int argc, char **argv)
     return result;
 }
 MSH_CMD_EXPORT(vb_runtime_delete, delete stopped VibeBoard runtime app);
+
+static int vb_runtime_staging_clear(int argc, char **argv)
+{
+    int removed = 0;
+    int result;
+    (void)argc;
+    (void)argv;
+    result = vb_runtime_staging_clear_all(&removed);
+    rt_kprintf("%s staging_clear removed=%d rc=%d\n",
+               result == RT_EOK ? "ok" : "err",
+               removed,
+               result);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_staging_clear, clear all VibeBoard runtime staging installs);
 
 static int vb_runtime_capabilities(int argc, char **argv)
 {

@@ -2,12 +2,12 @@
 
 ## Known Good Inputs
 
-- Official SDK: https://gitee.com/SiFli/sifli-sdk, branch `release/v2.4`
-- SDK local path: `/Users/wq/huangshan-pi-workspace/sifli-sdk`
+- Official SDK: https://gitee.com/SiFli/sifli-sdk, branch `main`, verified SDK 2.5.0 build `cbac8e56`
+- SDK local path: `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk`
 - LCKFB example repository: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
-- LCKFB example local path: `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+- LCKFB example local path: `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 - Board: `sf32lb52-lchspi-ulp`
-- Serial port on this Mac: `/dev/cu.usbserial-110`
+- Serial port on this Mac: `/dev/cu.usbserial-13220`
 - Baud rate for logs: `1000000`
 
 ## What Was Verified
@@ -70,6 +70,38 @@ LCDC STATUS=1,TE=3
 [INITIALIZED] -> [TIMEOUT]
 ```
 
+
+## Jumper And Power-Domain Note
+
+The LCKFB pinout sheet marks pins 5-6, 7-8, and 11-12 as jumper-cap shorts.
+Treat these as required board power-domain jumpers unless the schematic for a
+specific experiment says otherwise. Removing them can leave only part of the
+board powered: the USB-UART or indicator LED may still light, while the SF32
+MCU, display, SD card, or 3V3/VBAT domain is not properly powered. That state
+can look like a dead board even when USB enumeration still works.
+
+For normal Runtime development:
+
+- Keep the required jumper caps installed before plugging in USB.
+- If the green LED lights but the screen stays black and flashing cannot enter
+  download mode, first inspect these jumper caps and the USB data cable.
+- Without a multimeter, the safest recovery path is: unplug USB, restore jumper
+  caps, use a known data cable, list ports with `./scripts/flash.sh --list-ports`,
+  then flash again.
+
+## Current Runtime UI Baseline
+
+The current board UI no longer uses the old honeycomb launcher as the daily
+Runtime entry. The `Main` screen scans `/sdcard/apps` and displays installed
+Runtime apps as safe-area cards. Cards are scrollable when there are more apps
+than fit on one screen, and tapping a card launches that app through
+`VibeBoard_Runtime`. App install/delete/refresh management lives in the local
+Web/iOS/desktop manager, not in a separate board-side App Manager page.
+
+The display has rounded physical edges, so all important text and touch targets
+must stay inside the safe area used by `HUANGSHAN_HOME_SAFE_*` or
+`VB_SCREEN_SAFE_*` constants.
+
 ## Useful Commands
 
 Build:
@@ -81,13 +113,13 @@ Build:
 Flash:
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 Reset and monitor:
 
 ```bash
-./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 ## App Pattern

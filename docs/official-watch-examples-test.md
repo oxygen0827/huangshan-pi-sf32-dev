@@ -50,7 +50,7 @@ Result: exit code 0. The build target was `sf32lb52-lchspi-ulp_hcpu`.
 Flash:
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 Result: exit code 0 after running with serial-device permission.
@@ -200,14 +200,14 @@ from this rule: app-level control of `GPIO26/LED1` was removed.
 
 ## Independent Official Example Projects
 
-These examples live under `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+These examples live under `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 and each has its own `project/` directory. They are separate firmware images;
 testing one replaces the firmware currently running on the board.
 
 Build command used in each `project/` directory:
 
 ```bash
-source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
+source /Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
 
@@ -365,7 +365,7 @@ After testing independent examples, the board was flashed back to this
 repository's firmware:
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 Restore evidence:

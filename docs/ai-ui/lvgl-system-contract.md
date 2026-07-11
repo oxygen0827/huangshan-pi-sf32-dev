@@ -8,7 +8,7 @@ repository.
 - Board: LCKFB Huangshan Pi / `sf32lb52-lchspi-ulp`.
 - Display: CO5300 AMOLED, 390x450 portrait.
 - Touch: FT6146.
-- GUI stack: SiFli SDK `release/v2.4`, RT-Thread, LVGL 8.
+- GUI stack: SiFli SDK `main` / verified SDK 2.5.0, RT-Thread, LVGL 8.
 - Color/resource assumptions: RGB565 target hardware, constrained MCU memory,
   existing SiFli resource system.
 
@@ -32,8 +32,10 @@ repository.
 - Use LVGL flex/grid when it keeps layout simpler.
 - Absolute positioning is acceptable for tightly bounded 390x450 board demos,
   but keep values centralized and readable.
-- Reserve safe margins around edges; avoid text pressed into bezels.
+- Reserve the current rounded-screen safe margins: use the project safe-area constants instead of placing critical text/buttons in the four corners.
 - Keep text short enough for English and Chinese labels.
+- Do not add a tiny top-right Home button as the only navigation path; K1 is the primary return-home affordance, and left-edge swipe can be a secondary gesture.
+- Lists and app grids must scroll when content exceeds one screen; do not hard-code an eight-item limit.
 
 ## Visual Rules
 
@@ -64,8 +66,9 @@ Build and inspect on target whenever possible:
 
 ```bash
 ./scripts/build.sh
-./scripts/flash.sh /dev/cu.usbserial-110
-./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/flash.sh --list-ports
+./scripts/flash.sh /dev/cu.usbserial-13220
+./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 Then review a photo/video of the screen with `visual-review-checklist.md`.

@@ -3,6 +3,11 @@
  *********************/
 #include <rtthread.h>
 #include <rtdevice.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <dfs_posix.h>
 #include "littlevgl2rtt.h"
 #include "lvgl.h"
 #include "lvsf.h"
@@ -52,6 +57,14 @@ LV_IMG_DECLARE(img_world_clock);
 
 
 #define APP_ID "Main"
+
+#define HUANGSHAN_HOME_SAFE_LEFT 28
+#define HUANGSHAN_HOME_SAFE_RIGHT 28
+#define HUANGSHAN_HOME_SAFE_TOP 34
+#define HUANGSHAN_HOME_SAFE_BOTTOM 34
+#define HUANGSHAN_RUNTIME_APP_ROOT "/sdcard/apps"
+#define HUANGSHAN_RUNTIME_ACTIVE_APP_FILE HUANGSHAN_RUNTIME_APP_ROOT "/.active"
+
 
 //#define DEBUG_APP_MAINMENU_DISPLAY_ICON_COORDINATE
 
@@ -1538,11 +1551,31 @@ static void mm_trans_anim_init(void)
 }
 #endif /* MM_CUST_TRAN_ANIMATION */
 
+typedef enum
+{
+    HUANGSHAN_HOME_CARD_RUNTIME_APP,
+    HUANGSHAN_HOME_CARD_BUILTIN_APP,
+} huangshan_home_card_kind_t;
+
+#define HUANGSHAN_HOME_MAX_APPS 40
+#define HUANGSHAN_HOME_TITLE_MAX 48
+#define HUANGSHAN_HOME_SUBTITLE_MAX 56
+#define HUANGSHAN_HOME_META_MAX 48
+#define HUANGSHAN_HOME_REQUIREMENTS_MAX 96
+
+#ifndef DT_DIR
+#define DT_DIR 4
+#endif
+
 typedef struct
 {
-    const char *title;
-    const char *subtitle;
-    const char *cmd;
+    char title[HUANGSHAN_HOME_TITLE_MAX];
+    char subtitle[HUANGSHAN_HOME_SUBTITLE_MAX];
+    char category[HUANGSHAN_HOME_META_MAX];
+    char author[HUANGSHAN_HOME_META_MAX];
+    char requirements[HUANGSHAN_HOME_REQUIREMENTS_MAX];
+    char target[GUI_APP_CMD_MAX_LEN];
+    huangshan_home_card_kind_t kind;
     uint32_t color;
     lv_coord_t x;
     lv_coord_t y;
@@ -1551,6 +1584,25 @@ typedef struct
 } huangshan_home_card_t;
 
 static lv_obj_t *huangshan_home_root;
+static lv_obj_t *huangshan_home_status;
+static lv_obj_t *huangshan_home_list;
+static lv_obj_t *huangshan_home_detail;
+static huangshan_home_card_t huangshan_home_cards[HUANGSHAN_HOME_MAX_APPS];
+static int huangshan_home_card_count;
+static const huangshan_home_card_t *huangshan_home_pending_delete;
+
+static void huangshan_home_ui_init(void);
+
+static void home_safe_copy(char *dst, rt_size_t cap, const char *src, const char *fallback)
+{
+    rt_size_t len;
+    const char *value = (src && src[0]) ? src : (fallback ? fallback : "");
+    if (!dst || cap == 0) return;
+    len = strlen(value);
+    if (len >= cap) len = cap - 1;
+    memcpy(dst, value, len);
+    dst[len] = '\0';
+}
 
 static void home_set_obj_bg(lv_obj_t *obj, uint32_t color)
 {
@@ -1568,15 +1620,497 @@ static lv_obj_t *home_create_label(lv_obj_t *parent, const char *text, uint16_t 
     return label;
 }
 
+static void home_set_status(const char *text, lv_color_t color)
+{
+    if (!huangshan_home_status) return;
+    lv_label_set_text(huangshan_home_status, text ? text : "");
+    lv_obj_set_style_text_color(huangshan_home_status, color, 0);
+}
+
+static int home_write_active_runtime_app(const char *app_id)
+{
+    int fd;
+    int len;
+    int written;
+    if (!app_id || !app_id[0]) return -RT_EINVAL;
+    if (access(HUANGSHAN_RUNTIME_APP_ROOT, 0) != 0) return -RT_ERROR;
+    fd = open(HUANGSHAN_RUNTIME_ACTIVE_APP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -RT_ERROR;
+    len = strlen(app_id);
+    written = write(fd, app_id, len);
+    if (written == len)
+    {
+        const char newline = '\n';
+        (void)write(fd, &newline, 1);
+    }
+    close(fd);
+    return written == len ? RT_EOK : -RT_ERROR;
+}
+
+static int home_is_safe_app_id(const char *id)
+{
+    const char *p = id;
+    int len = 0;
+    if (!id || !id[0]) return 0;
+    if (!(*p >= 'a' && *p <= 'z')) return 0;
+    for (; *p; p++)
+    {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_')) return 0;
+        len++;
+        if (len >= GUI_APP_CMD_MAX_LEN) return 0;
+    }
+    return 1;
+}
+
+static int home_file_exists(const char *path)
+{
+    return path && access(path, 0) == 0;
+}
+
+static int home_path_is_dir(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    closedir(dir);
+    return 1;
+}
+
+static int home_remove_tree(const char *path)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int result = RT_EOK;
+    if (!path || !path[0]) return -RT_EINVAL;
+    dir = opendir(path);
+    if (!dir)
+    {
+        return unlink(path) == 0 ? RT_EOK : -RT_ERROR;
+    }
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        char child[180];
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        rt_snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        child[sizeof(child) - 1] = '\0';
+        if (home_path_is_dir(child))
+        {
+            if (home_remove_tree(child) != RT_EOK) result = -RT_ERROR;
+        }
+        else if (unlink(child) != 0)
+        {
+            result = -RT_ERROR;
+        }
+    }
+    closedir(dir);
+    if (rmdir(path) != 0) result = -RT_ERROR;
+    return result;
+}
+
+static int home_read_text_prefix(const char *path, char *dst, rt_size_t cap)
+{
+    int fd;
+    int n;
+    if (!path || !dst || cap == 0) return -RT_EINVAL;
+    dst[0] = '\0';
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return -RT_ERROR;
+    n = read(fd, dst, cap - 1);
+    close(fd);
+    if (n < 0) return -RT_ERROR;
+    dst[n] = '\0';
+    return n;
+}
+
+static int home_read_active_runtime_app(char *dst, rt_size_t cap)
+{
+    char *p;
+    int result = home_read_text_prefix(HUANGSHAN_RUNTIME_ACTIVE_APP_FILE, dst, cap);
+    if (result < 0) return result;
+    for (p = dst; *p; p++)
+    {
+        if (*p == '\r' || *p == '\n' || *p == ' ' || *p == '\t')
+        {
+            *p = '\0';
+            break;
+        }
+    }
+    return RT_EOK;
+}
+
+static int home_json_copy_string(const char *json, const char *key, char *dst, rt_size_t cap)
+{
+    const char *hit;
+    const char *colon;
+    const char *open;
+    const char *p;
+    char needle[40];
+    rt_size_t len = 0;
+    if (!json || !key || !dst || cap == 0) return 0;
+    rt_snprintf(needle, sizeof(needle), "\"%s\"", key);
+    hit = strstr(json, needle);
+    if (!hit) return 0;
+    colon = strchr(hit + strlen(needle), ':');
+    if (!colon) return 0;
+    open = strchr(colon, '\"');
+    if (!open) return 0;
+    p = open + 1;
+    while (*p && *p != '\"' && len + 1 < cap)
+    {
+        if (*p == '\\' && p[1]) p++;
+        dst[len++] = *p++;
+    }
+    dst[len] = '\0';
+    return len > 0;
+}
+
+static int home_json_copy_string_array(const char *json, const char *key, char *dst, rt_size_t cap)
+{
+    const char *hit;
+    const char *colon;
+    const char *p;
+    char needle[40];
+    rt_size_t len = 0;
+    int first = 1;
+    if (!json || !key || !dst || cap == 0) return 0;
+    rt_snprintf(needle, sizeof(needle), "\"%s\"", key);
+    hit = strstr(json, needle);
+    if (!hit) return 0;
+    colon = strchr(hit + strlen(needle), ':');
+    if (!colon) return 0;
+    p = strchr(colon, '[');
+    if (!p) return 0;
+    p++;
+    while (*p && *p != ']')
+    {
+        const char *open;
+        open = strchr(p, '\"');
+        if (!open) break;
+        p = open + 1;
+        if (!first)
+        {
+            if (len + 2 >= cap) break;
+            dst[len++] = ',';
+            dst[len++] = ' ';
+        }
+        while (*p && *p != '\"' && len + 1 < cap)
+        {
+            if (*p == '\\' && p[1]) p++;
+            dst[len++] = *p++;
+        }
+        first = 0;
+        if (*p == '\"') p++;
+    }
+    dst[len] = '\0';
+    return len > 0;
+}
+
+static int home_info_copy_value(const char *text, const char *key, char *dst, rt_size_t cap)
+{
+    const char *p;
+    rt_size_t key_len;
+    rt_size_t len = 0;
+    if (!text || !key || !dst || cap == 0) return 0;
+    key_len = strlen(key);
+    p = text;
+    while (*p)
+    {
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
+        {
+            p += key_len + 1;
+            while (*p && *p != '\r' && *p != '\n' && len + 1 < cap) dst[len++] = *p++;
+            dst[len] = '\0';
+            return len > 0;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return 0;
+}
+
+static uint32_t home_card_color_for_index(int index)
+{
+    static const uint32_t colors[] =
+    {
+        0x0f766e, 0x1d4ed8, 0xb45309, 0xbe123c,
+        0x047857, 0x7c3aed, 0x0369a1, 0xc2410c,
+        0x475569, 0x15803d, 0x4338ca, 0xa21caf,
+    };
+    return colors[index % (int)(sizeof(colors) / sizeof(colors[0]))];
+}
+
+static void home_build_app_path(char *dst, rt_size_t cap, const char *app_id, const char *leaf)
+{
+    rt_snprintf(dst, cap, "%s/%s/%s", HUANGSHAN_RUNTIME_APP_ROOT, app_id, leaf);
+}
+
+static int home_load_runtime_app_card(const char *app_id, huangshan_home_card_t *card, int index)
+{
+    char path[180];
+    char text[1024];
+    int has_manifest;
+    int has_info;
+    if (!home_is_safe_app_id(app_id) || !card) return 0;
+    home_build_app_path(path, sizeof(path), app_id, "main.lua");
+    if (!home_file_exists(path)) return 0;
+
+    memset(card, 0, sizeof(*card));
+    card->kind = HUANGSHAN_HOME_CARD_RUNTIME_APP;
+    card->color = home_card_color_for_index(index);
+    home_safe_copy(card->target, sizeof(card->target), app_id, app_id);
+    home_safe_copy(card->title, sizeof(card->title), app_id, app_id);
+    home_safe_copy(card->subtitle, sizeof(card->subtitle), "ready", "ready");
+    home_safe_copy(card->category, sizeof(card->category), "General", "General");
+    home_safe_copy(card->author, sizeof(card->author), "Unknown", "Unknown");
+    home_safe_copy(card->requirements, sizeof(card->requirements), "Runtime", "Runtime");
+
+    home_build_app_path(path, sizeof(path), app_id, "manifest.json");
+    has_manifest = home_read_text_prefix(path, text, sizeof(text)) > 0;
+    if (has_manifest)
+    {
+        (void)home_json_copy_string(text, "name", card->title, sizeof(card->title));
+        if (!home_json_copy_string(text, "description", card->subtitle, sizeof(card->subtitle)))
+        {
+            home_safe_copy(card->subtitle, sizeof(card->subtitle), "Runtime app", "Runtime app");
+        }
+        (void)home_json_copy_string(text, "category", card->category, sizeof(card->category));
+        (void)home_json_copy_string(text, "author", card->author, sizeof(card->author));
+        if (!home_json_copy_string_array(text, "requirements", card->requirements, sizeof(card->requirements)))
+        {
+            (void)home_json_copy_string(text, "requirements", card->requirements, sizeof(card->requirements));
+        }
+        return 1;
+    }
+
+    home_build_app_path(path, sizeof(path), app_id, "app.info");
+    has_info = home_read_text_prefix(path, text, sizeof(text)) > 0;
+    if (has_info)
+    {
+        (void)home_info_copy_value(text, "name", card->title, sizeof(card->title));
+        if (!home_info_copy_value(text, "description", card->subtitle, sizeof(card->subtitle)))
+        {
+            home_safe_copy(card->subtitle, sizeof(card->subtitle), "Runtime app", "Runtime app");
+        }
+        (void)home_info_copy_value(text, "category", card->category, sizeof(card->category));
+        (void)home_info_copy_value(text, "author", card->author, sizeof(card->author));
+        (void)home_info_copy_value(text, "requirements", card->requirements, sizeof(card->requirements));
+    }
+    return has_manifest || has_info;
+}
+
+static void home_sort_cards(void)
+{
+    int i;
+    int j;
+    for (i = 0; i < huangshan_home_card_count; i++)
+    {
+        for (j = i + 1; j < huangshan_home_card_count; j++)
+        {
+            if (strcmp(huangshan_home_cards[i].title, huangshan_home_cards[j].title) > 0)
+            {
+                huangshan_home_card_t tmp = huangshan_home_cards[i];
+                huangshan_home_cards[i] = huangshan_home_cards[j];
+                huangshan_home_cards[j] = tmp;
+            }
+        }
+    }
+}
+
+static int home_load_installed_runtime_apps(void)
+{
+    DIR *dir;
+    struct dirent *entry;
+    huangshan_home_card_count = 0;
+    dir = opendir(HUANGSHAN_RUNTIME_APP_ROOT);
+    if (!dir) return -RT_ERROR;
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        if (entry->d_name[0] == '.') continue;
+        if (huangshan_home_card_count >= HUANGSHAN_HOME_MAX_APPS) break;
+        if (home_load_runtime_app_card(entry->d_name,
+                                       &huangshan_home_cards[huangshan_home_card_count],
+                                       huangshan_home_card_count))
+        {
+            huangshan_home_card_count++;
+        }
+    }
+    closedir(dir);
+    home_sort_cards();
+    return RT_EOK;
+}
+
+static void home_close_detail(void)
+{
+    if (huangshan_home_detail)
+    {
+        lv_obj_del(huangshan_home_detail);
+        huangshan_home_detail = RT_NULL;
+    }
+    huangshan_home_pending_delete = RT_NULL;
+}
+
+static void home_rebuild_ui(void)
+{
+    if (huangshan_home_root)
+    {
+        lv_obj_del(huangshan_home_root);
+        huangshan_home_root = NULL;
+        huangshan_home_status = NULL;
+        huangshan_home_list = NULL;
+    }
+    huangshan_home_ui_init();
+}
+
+static void home_start_runtime_card(const huangshan_home_card_t *card)
+{
+    int result;
+    if (!card || !card->target[0]) return;
+    result = home_write_active_runtime_app(card->target);
+    if (result != RT_EOK)
+    {
+        home_set_status("SD card app not ready", lv_color_hex(0xfca5a5));
+        rt_kprintf("[Huangshan_Home] select runtime app failed %s rc=%d\n", card->target, result);
+        return;
+    }
+    home_set_status("starting Runtime app", lv_color_hex(0xa7f3d0));
+    rt_kprintf("[Huangshan_Home] runtime target %s\n", card->target);
+    gui_app_run("vb_runtime");
+}
+
+static void home_detail_back_event_cb(lv_event_t *event)
+{
+    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
+    home_close_detail();
+    home_set_status("details closed", lv_color_hex(0xa8b3bd));
+}
+
+static void home_detail_launch_event_cb(lv_event_t *event)
+{
+    const huangshan_home_card_t *card = (const huangshan_home_card_t *)lv_event_get_user_data(event);
+    if (LV_EVENT_CLICKED != lv_event_get_code(event) || !card) return;
+    home_start_runtime_card(card);
+}
+
+static void home_detail_delete_event_cb(lv_event_t *event)
+{
+    const huangshan_home_card_t *card = (const huangshan_home_card_t *)lv_event_get_user_data(event);
+    char active[GUI_APP_CMD_MAX_LEN];
+    char path[180];
+    int was_active = 0;
+    if (LV_EVENT_CLICKED != lv_event_get_code(event) || !card || !card->target[0]) return;
+    if (huangshan_home_pending_delete != card)
+    {
+        huangshan_home_pending_delete = card;
+        home_set_status("tap Delete again to confirm", lv_color_hex(0xfbbf24));
+        return;
+    }
+    if (home_read_active_runtime_app(active, sizeof(active)) == RT_EOK && strcmp(active, card->target) == 0)
+    {
+        was_active = 1;
+    }
+    home_build_app_path(path, sizeof(path), card->target, "");
+    if (path[0] && path[strlen(path) - 1] == '/') path[strlen(path) - 1] = '\0';
+    if (home_remove_tree(path) != RT_EOK)
+    {
+        home_set_status("delete failed", lv_color_hex(0xfca5a5));
+        rt_kprintf("[Huangshan_Home] delete runtime app failed %s\n", card->target);
+        return;
+    }
+    if (was_active) (void)home_write_active_runtime_app("welcome");
+    home_close_detail();
+    home_set_status("app deleted", lv_color_hex(0xa7f3d0));
+    rt_kprintf("[Huangshan_Home] deleted runtime app %s\n", card->target);
+    home_rebuild_ui();
+}
+
+static void home_show_detail(const huangshan_home_card_t *card)
+{
+    char line[160];
+    const lv_coord_t safe_x = HUANGSHAN_HOME_SAFE_LEFT;
+    const lv_coord_t safe_y = HUANGSHAN_HOME_SAFE_TOP;
+    const lv_coord_t safe_w = LV_HOR_RES_MAX - HUANGSHAN_HOME_SAFE_LEFT - HUANGSHAN_HOME_SAFE_RIGHT;
+    if (!card) return;
+    home_close_detail();
+    huangshan_home_detail = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(huangshan_home_detail, LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_obj_align(huangshan_home_detail, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(huangshan_home_detail, LV_OBJ_FLAG_SCROLLABLE);
+    home_set_obj_bg(huangshan_home_detail, 0x07111f);
+
+    lv_obj_t *back = lv_btn_create(huangshan_home_detail);
+    lv_obj_set_size(back, 72, 32);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, safe_x, safe_y);
+    lv_obj_set_style_radius(back, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(back, home_detail_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_t *back_label = home_create_label(back, "Back", FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_center(back_label);
+
+    lv_obj_t *title = home_create_label(huangshan_home_detail, card->title, FONT_BIGL, LV_COLOR_WHITE);
+    lv_obj_set_width(title, safe_w);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, safe_y + 50);
+
+    rt_snprintf(line, sizeof(line), "%s  by %s", card->category, card->author);
+    lv_obj_t *meta = home_create_label(huangshan_home_detail, line, FONT_SMALL, lv_color_hex(0x93c5fd));
+    lv_obj_set_width(meta, safe_w);
+    lv_label_set_long_mode(meta, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(meta, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, safe_y + 92);
+
+    lv_obj_t *desc = home_create_label(huangshan_home_detail, card->subtitle, FONT_SMALL, lv_color_hex(0xd7e5f5));
+    lv_obj_set_width(desc, safe_w);
+    lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(desc, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(desc, LV_ALIGN_TOP_MID, 0, safe_y + 122);
+
+    rt_snprintf(line, sizeof(line), "Needs: %s", card->requirements);
+    lv_obj_t *req = home_create_label(huangshan_home_detail, line, FONT_SMALL, lv_color_hex(0xa7f3d0));
+    lv_obj_set_width(req, safe_w);
+    lv_label_set_long_mode(req, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(req, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(req, LV_ALIGN_TOP_MID, 0, safe_y + 182);
+
+    lv_obj_t *launch = lv_btn_create(huangshan_home_detail);
+    lv_obj_set_size(launch, 142, 40);
+    lv_obj_align(launch, LV_ALIGN_BOTTOM_LEFT, safe_x, -HUANGSHAN_HOME_SAFE_BOTTOM);
+    lv_obj_set_style_radius(launch, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(launch, lv_color_hex(0x2dd4bf), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(launch, home_detail_launch_event_cb, LV_EVENT_CLICKED, (void *)card);
+    lv_obj_t *launch_label = home_create_label(launch, "Launch", FONT_SMALL, lv_color_hex(0x0f172a));
+    lv_obj_center(launch_label);
+
+    lv_obj_t *del = lv_btn_create(huangshan_home_detail);
+    lv_obj_set_size(del, 96, 40);
+    lv_obj_align(del, LV_ALIGN_BOTTOM_RIGHT, -safe_x, -HUANGSHAN_HOME_SAFE_BOTTOM);
+    lv_obj_set_style_radius(del, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(del, lv_color_hex(0x7f1d1d), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_event_cb(del, home_detail_delete_event_cb, LV_EVENT_CLICKED, (void *)card);
+    lv_obj_t *del_label = home_create_label(del, "Delete", FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_center(del_label);
+
+    home_set_status("details", lv_color_hex(0xa8b3bd));
+}
+
 static void home_card_event_cb(lv_event_t *event)
 {
     const huangshan_home_card_t *card = (const huangshan_home_card_t *)lv_event_get_user_data(event);
 
-    if ((LV_EVENT_CLICKED == lv_event_get_code(event)) && card && card->cmd)
+    if ((LV_EVENT_CLICKED != lv_event_get_code(event) &&
+         LV_EVENT_SHORT_CLICKED != lv_event_get_code(event)) || !card || !card->target[0])
     {
-        rt_kprintf("[Huangshan_Home] run %s\n", card->cmd);
-        gui_app_run(card->cmd);
+        return;
     }
+
+    if (card->kind == HUANGSHAN_HOME_CARD_RUNTIME_APP)
+    {
+        home_show_detail(card);
+        return;
+    }
+
+    home_set_status("opening app", lv_color_hex(0xa7f3d0));
+    rt_kprintf("[Huangshan_Home] run %s\n", card->target);
+    gui_app_run(card->target);
 }
 
 static lv_obj_t *home_create_card(lv_obj_t *parent, const huangshan_home_card_t *card)
@@ -1591,27 +2125,53 @@ static lv_obj_t *home_create_card(lv_obj_t *parent, const huangshan_home_card_t 
     lv_obj_set_style_border_color(obj, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(obj, home_card_event_cb, LV_EVENT_CLICKED, (void *)card);
 
-    lv_obj_t *title = home_create_label(obj, card->title, FONT_NORMAL, LV_COLOR_WHITE);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 8);
+    lv_obj_t *title = home_create_label(obj, card->title, FONT_SMALL, LV_COLOR_WHITE);
+    lv_obj_set_width(title, card->w - 18);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_CLIP);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 9, 7);
 
     lv_obj_t *subtitle = home_create_label(obj, card->subtitle, FONT_SMALL, lv_color_hex(0xd7e5f5));
-    lv_obj_align(subtitle, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+    lv_obj_set_width(subtitle, card->w - 18);
+    lv_label_set_long_mode(subtitle, LV_LABEL_LONG_CLIP);
+    lv_obj_align(subtitle, LV_ALIGN_BOTTOM_LEFT, 9, -7);
 
     return obj;
 }
 
+static void home_create_empty_state(lv_obj_t *parent, lv_coord_t width)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, width, 118);
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 0);
+    home_set_obj_bg(box, 0x162235);
+    lv_obj_set_style_radius(box, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(box, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = home_create_label(box, "No installed apps", FONT_NORMAL, LV_COLOR_WHITE);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+    lv_obj_t *hint = home_create_label(box, "Install from the computer App Store", FONT_SMALL, lv_color_hex(0xbfdbfe));
+    lv_obj_set_width(hint, width - 24);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 62);
+}
+
 static void huangshan_home_ui_init(void)
 {
-    static const huangshan_home_card_t cards[] =
-    {
-        {"Runtime", "serial app OTA", "vb_runtime", 0x0f766e, 20, 118, 170, 78},
-        {"Diagnostics", "touch / keys / LED", "board_diag", 0x1d4ed8, 200, 118, 170, 78},
-        {"Codex Test", "display baseline", "codex_test", 0x047857, 20, 208, 170, 78},
-        {"Hello World", "simple LVGL app", "hello_world", 0x7c3aed, 200, 208, 170, 78},
-        {"Rotation 3D", "GPU animation", "rotation3d", 0xb45309, 20, 298, 170, 78},
-        {"Clock", "watch demo", "clock", 0xbe123c, 200, 298, 170, 78},
-    };
+    const lv_coord_t safe_x = HUANGSHAN_HOME_SAFE_LEFT;
+    const lv_coord_t safe_y = HUANGSHAN_HOME_SAFE_TOP;
+    const lv_coord_t safe_w = LV_HOR_RES_MAX - HUANGSHAN_HOME_SAFE_LEFT - HUANGSHAN_HOME_SAFE_RIGHT;
+    const lv_coord_t safe_h = LV_VER_RES_MAX - HUANGSHAN_HOME_SAFE_TOP - HUANGSHAN_HOME_SAFE_BOTTOM;
+    const lv_coord_t card_gap = 10;
+    const lv_coord_t card_w = (safe_w - card_gap) / 2;
+    const lv_coord_t card_h = 62;
+    const lv_coord_t list_y = safe_y + 88;
+    const lv_coord_t status_h = 24;
+    const lv_coord_t list_h = safe_h - 88 - status_h;
     uint32_t i;
+    int load_result;
 
     huangshan_home_root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(huangshan_home_root, LV_HOR_RES_MAX, LV_VER_RES_MAX);
@@ -1620,31 +2180,68 @@ static void huangshan_home_ui_init(void)
     home_set_obj_bg(huangshan_home_root, 0x07111f);
 
     lv_obj_t *title = home_create_label(huangshan_home_root, "Huangshan Pi", FONT_BIGL, LV_COLOR_WHITE);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 20, 20);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, safe_x, safe_y);
 
-    lv_obj_t *subtitle = home_create_label(huangshan_home_root, "SF32LB52 dev home",
+    lv_obj_t *subtitle = home_create_label(huangshan_home_root, "Installed Runtime Apps",
                                            FONT_SMALL, lv_color_hex(0x93c5fd));
-    lv_obj_align(subtitle, LV_ALIGN_TOP_LEFT, 20, 60);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_LEFT, safe_x, safe_y + 38);
 
     lv_obj_t *panel = lv_obj_create(huangshan_home_root);
-    lv_obj_set_size(panel, 110, 52);
-    lv_obj_align(panel, LV_ALIGN_TOP_RIGHT, -20, 22);
+    lv_obj_set_size(panel, 92, 42);
+    lv_obj_align(panel, LV_ALIGN_TOP_RIGHT, -safe_x, safe_y + 2);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     home_set_obj_bg(panel, 0x162235);
     lv_obj_set_style_radius(panel, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_t *panel_text = home_create_label(panel, "390x450\nCO5300", FONT_SMALL, lv_color_hex(0xe0f2fe));
+    lv_obj_t *panel_text = home_create_label(panel, "BLE / SD", FONT_SMALL, lv_color_hex(0xe0f2fe));
     lv_obj_center(panel_text);
 
-    for (i = 0; i < sizeof(cards) / sizeof(cards[0]); i++)
+    huangshan_home_list = lv_obj_create(huangshan_home_root);
+    lv_obj_set_size(huangshan_home_list, safe_w, list_h > 120 ? list_h : 120);
+    lv_obj_align(huangshan_home_list, LV_ALIGN_TOP_LEFT, safe_x, list_y);
+    lv_obj_set_style_bg_opa(huangshan_home_list, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(huangshan_home_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(huangshan_home_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(huangshan_home_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_scroll_dir(huangshan_home_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(huangshan_home_list, LV_SCROLLBAR_MODE_AUTO);
+
+    load_result = home_load_installed_runtime_apps();
+    if (load_result == RT_EOK && huangshan_home_card_count > 0)
     {
-        home_create_card(huangshan_home_root, &cards[i]);
+        for (i = 0; i < (uint32_t)huangshan_home_card_count; i++)
+        {
+            lv_coord_t col = i % 2;
+            lv_coord_t row = i / 2;
+            huangshan_home_cards[i].x = col * (card_w + card_gap);
+            huangshan_home_cards[i].y = row * (card_h + card_gap);
+            huangshan_home_cards[i].w = card_w;
+            huangshan_home_cards[i].h = card_h;
+            home_create_card(huangshan_home_list, &huangshan_home_cards[i]);
+        }
+    }
+    else
+    {
+        home_create_empty_state(huangshan_home_list, safe_w);
     }
 
-    lv_obj_t *hint = home_create_label(huangshan_home_root, "Runtime supports serial app install.",
-                                       FONT_SMALL, lv_color_hex(0xa8b3bd));
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -12);
+    huangshan_home_status = home_create_label(huangshan_home_root, "",
+                                              FONT_SMALL, lv_color_hex(0xa8b3bd));
+    lv_obj_set_width(huangshan_home_status, safe_w);
+    lv_obj_set_style_text_align(huangshan_home_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(huangshan_home_status, LV_ALIGN_TOP_MID, 0, safe_y + safe_h - 22);
+    if (load_result == RT_EOK)
+    {
+        char status[64];
+        rt_snprintf(status, sizeof(status), "%d installed apps", huangshan_home_card_count);
+        home_set_status(status, lv_color_hex(0xa8b3bd));
+    }
+    else
+    {
+        home_set_status("Insert SD card to show apps", lv_color_hex(0xfca5a5));
+    }
 
-    rt_kprintf("[Huangshan_Home] start\n");
+    rt_kprintf("[Huangshan_Home] apps=%d safe=%d,%d,%d,%d\n",
+               huangshan_home_card_count, (int)safe_x, (int)safe_y, (int)safe_w, (int)safe_h);
 }
 
 static void on_start(void)
@@ -1677,10 +2274,13 @@ static void on_pause(void)
 }
 static void on_stop(void)
 {
+    home_close_detail();
     if (huangshan_home_root)
     {
         lv_obj_del(huangshan_home_root);
         huangshan_home_root = NULL;
+        huangshan_home_status = NULL;
+        huangshan_home_list = NULL;
     }
 
     if (app_mainmenu_ctx.list)

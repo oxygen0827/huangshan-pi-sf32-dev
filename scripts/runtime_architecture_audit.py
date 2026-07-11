@@ -136,13 +136,27 @@ def audit_default_networking() -> None:
 def audit_capability_model() -> None:
     py = read("scripts/runtime_package.py")
     swift = read("mobile/ios/VibeBoardBLE/Sources/VibeBoardBLE/RuntimePackage.swift")
-    for capability in ("wifi", "http", "network", "ntp", "board_ip", "native", "camera", "gamepad", "i2s"):
+    for capability in ("wifi", "http", "network", "ntp", "board_ip", "native", "nes", "camera", "gamepad", "i2s"):
         if capability not in py:
             fail("capability_model", f"Python package validator missing forbidden capability {capability}")
         if capability not in swift:
             fail("capability_model", f"Swift package validator missing forbidden capability {capability}")
     if not any(item[0] == "fail" and item[1].startswith("capability_model") for item in CHECKS):
         ok("capability_model", "Python and Swift validators include forbidden ESP32/network capability names")
+
+
+def audit_high_risk_capability_evaluation() -> None:
+    rel = "docs/runtime-high-risk-capabilities-evaluation.md"
+    text = read(rel)
+    for phrase in ("完整 Lua VM", "Native module ABI", "NES", "Camera", "Gamepad", "I2S", "暂缓"):
+        if phrase not in text:
+            fail("high_risk_capability_evaluation", f"{rel} missing {phrase!r}")
+    for rel2 in ("docs/runtime-boundary.md", "docs/runtime-capabilities.md", "docs/runtime-app-plan-writer.md"):
+        doc = read(rel2)
+        if "runtime-high-risk-capabilities-evaluation.md" not in doc:
+            fail("high_risk_capability_evaluation", f"{rel2} does not link high-risk evaluation")
+    if not any(item[0] == "fail" and item[1].startswith("high_risk_capability_evaluation") for item in CHECKS):
+        ok("high_risk_capability_evaluation", "high-risk Runtime capability evaluation and links are present")
 
 
 def audit_direct_transport_usage() -> None:
@@ -186,6 +200,7 @@ def run_audit() -> int:
     audit_ios_transport()
     audit_default_networking()
     audit_capability_model()
+    audit_high_risk_capability_evaluation()
     audit_direct_transport_usage()
     failures = [message for status, message in CHECKS if status == "fail"]
     for status, message in CHECKS:

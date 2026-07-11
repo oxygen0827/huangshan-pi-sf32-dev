@@ -336,7 +336,7 @@ git commit -m "feat: add board diagnostics app"
 Run:
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 Expected: download script completes without UART errors.
@@ -346,7 +346,7 @@ Expected: download script completes without UART errors.
 Run:
 
 ```bash
-SECONDS_TO_CAPTURE=20 ./scripts/monitor.sh /dev/cu.usbserial-110
+SECONDS_TO_CAPTURE=20 ./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 Expected after opening the app from the launcher:

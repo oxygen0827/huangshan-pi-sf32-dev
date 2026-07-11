@@ -4,6 +4,11 @@
   "id": "clock_test",
   "name": "Clock Test",
   "description": "Runtime app package installed over serial.",
+  "category": "Tools",
+  "icon": "clock",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:clock_test",
+  "requirements": ["Runtime", "Clock", "Serial or BLE install"],
   "entry": "main.lua",
   "components": [
     {

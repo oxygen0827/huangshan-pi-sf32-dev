@@ -4,6 +4,11 @@
   "id": "touch_stage",
   "name": "Touch Stage",
   "description": "A compact stage for live Runtime touch state.",
+  "category": "Hardware",
+  "icon": "hand",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:touch_stage",
+  "requirements": ["Runtime", "FT6146 touch", "Gesture API"],
   "entry": "main.lua",
   "components": [
     {

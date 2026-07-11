@@ -31,16 +31,16 @@
 
 ```text
 当前应用仓库：
-/Users/wq/huangshan-pi-workspace/huangshan-pi-sf32-dev
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev
 
 SiFli SDK：
-/Users/wq/huangshan-pi-workspace/sifli-sdk
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk
 
 立创官方例程：
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example
 
 VibeBoard：
-/Users/wq/VibeBoard
+/Users/hushaohong/vibe-coding/vibeboard-runtime-gpl
 ```
 
 本轮实测使用的硬件和目标：
@@ -51,7 +51,7 @@ VibeBoard：
 构建目标：sf32lb52-lchspi-ulp
 屏幕驱动 IC：CO5300
 触摸芯片：FT6146
-调试串口：/dev/cu.usbserial-110
+调试串口：/dev/cu.usbserial-13220
 monitor.py 串口波特率：1000000
 VibeBoard 串口监视默认波特率：921600
 ```
@@ -80,11 +80,11 @@ display on
 当前应用仓库的基础闭环：
 
 ```bash
-cd /Users/wq/huangshan-pi-workspace/huangshan-pi-sf32-dev
+cd /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev
 
 ./scripts/build.sh
-./scripts/flash.sh /dev/cu.usbserial-110
-SECONDS_TO_CAPTURE=10 ./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
+SECONDS_TO_CAPTURE=10 ./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 对应关系：
@@ -117,7 +117,7 @@ LCDC STATUS=1,TE=3
 当前本地 SDK 中与屏幕相关的重要适配在：
 
 ```text
-/Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c
 ```
 
 当前接受的 CO5300 ID：
@@ -291,7 +291,7 @@ page[hello_world][root] do ONSTOP
 官方独立例程来自：
 
 ```text
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example
 ```
 
 它们和当前 `Huangshan Home` 不是同一个固件。刷入任意官方独立例程，都会替换当前板子上的应用。
@@ -299,15 +299,15 @@ page[hello_world][root] do ONSTOP
 官方独立例程构建命令：
 
 ```bash
-source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
+source /Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
 
 官方独立例程刷机命令：
 
 ```bash
-source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
-./uart_download.sh /dev/cu.usbserial-110
+source /Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/export.sh
+./uart_download.sh /dev/cu.usbserial-13220
 ```
 
 本轮矩阵：
@@ -487,7 +487,7 @@ UART2 RX：PA18
 恢复命令：
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 恢复后串口证据：
@@ -548,7 +548,7 @@ vibeboard-huangshan.service
 服务器不能直接做：
 
 - 烧录插在用户 Mac 上的黄山派。
-- 读取用户 Mac 上的 `/dev/cu.usbserial-110`。
+- 读取用户 Mac 上的 `/dev/cu.usbserial-13220`。
 
 原因很简单：USB 串口是本机设备，不在服务器上。
 
@@ -566,13 +566,13 @@ http://127.0.0.1:8771
 本机串口识别证据：
 
 ```text
-{"ports":[{"path":"/dev/cu.usbserial-110","recommended":true}]}
+{"ports":[{"path":"/dev/cu.usbserial-13220","recommended":true}]}
 ```
 
 本机烧录命令等价于：
 
 ```bash
-sftool -p /dev/cu.usbserial-110 -c SF32LB52 -m nor write_flash \
+sftool -p /dev/cu.usbserial-13220 -c SF32LB52 -m nor write_flash \
   bootloader/bootloader.bin@0x12010000 \
   main.bin@0x12020000 \
   ftab/ftab.bin@0x12000000
@@ -581,7 +581,7 @@ sftool -p /dev/cu.usbserial-110 -c SF32LB52 -m nor write_flash \
 本机串口监视使用：
 
 ```bash
-stty -f /dev/cu.usbserial-110 921600 raw -echo
+stty -f /dev/cu.usbserial-13220 921600 raw -echo
 ```
 
 ## 11. 后续深度学习路线
@@ -617,7 +617,7 @@ src/resource/strings/en_us.json
 优先参考：
 
 ```text
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example/RT-Device/sensor
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example/RT-Device/sensor
 ```
 
 要掌握：
@@ -637,7 +637,7 @@ src/resource/strings/en_us.json
 
 ```text
 src/gui_apps/Board_Diagnostics/main.c
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example/gpio
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example/gpio
 ```
 
 要掌握：
@@ -656,8 +656,8 @@ src/gui_apps/Board_Diagnostics/main.c
 
 ```text
 docs/board-bringup.md
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example/lvgl/lvgl_v8_demos
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example/lvgl/lvgl_v9_demos
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example/lvgl/lvgl_v8_demos
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example/lvgl/lvgl_v9_demos
 ```
 
 要掌握：

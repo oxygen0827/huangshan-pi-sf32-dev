@@ -33,11 +33,12 @@ APP_MANAGER_API = "vibeboard-huangshan-app-manager/v1"
 
 SERIAL_APP_PAGE_LIMIT = 5
 # Keep BLE app pages below the status characteristic buffer/MTU comfort zone.
-BLE_APP_PAGE_LIMIT = 2
+BLE_APP_PAGE_LIMIT = 1
 RUNTIME_DATA_CHUNK_BYTES = 160
 VOICE_CHUNK_BYTES = RUNTIME_DATA_CHUNK_BYTES
 SERIAL_MSH_VOICE_CHUNK_BYTES = 30
 INSTALL_CHUNK_BYTES = 48
+SERIAL_JSON_CHUNK_BYTES = SERIAL_MSH_VOICE_CHUNK_BYTES
 MAX_INSTALL_CHUNK_BYTES = 240
 
 
@@ -115,6 +116,7 @@ class SyncRuntimeTransport(Protocol):
     def launch_app(self, app_id: str) -> str: ...
     def stop_app(self) -> str: ...
     def delete_app(self, app_id: str) -> str: ...
+    def staging_clear(self) -> str: ...
     def abort_install(self, app_id: str) -> str: ...
     def install_package(
         self,
@@ -167,6 +169,7 @@ class AsyncRuntimeTransport(Protocol):
     async def launch_app(self, app_id: str) -> str: ...
     async def stop_app(self) -> str: ...
     async def delete_app(self, app_id: str) -> str: ...
+    async def staging_clear(self) -> str: ...
     async def abort_install(self, app_id: str) -> str: ...
     async def install_package(
         self,
@@ -245,8 +248,11 @@ def extract_json_line(text: str, expected_api: str | None = None, *, allow_trunc
 def extract_json_chunk(text: str, kind: str) -> tuple[int, int, bytes] | None:
     for line in reversed(text.splitlines()):
         value = line.strip()
-        if not value.startswith("ok json_read "):
+        marker = "ok json_read "
+        marker_index = value.find(marker)
+        if marker_index < 0:
             continue
+        value = value[marker_index:]
         parts = value.split()
         values: dict[str, str] = {}
         for token in parts[2:]:
@@ -259,7 +265,12 @@ def extract_json_chunk(text: str, kind: str) -> tuple[int, int, bytes] | None:
         try:
             offset = int(values.get("offset", "0"))
             total = int(values.get("total", "0"))
-            payload = bytes.fromhex(values.get("hex", ""))
+            hex_text = ""
+            for ch in values.get("hex", ""):
+                if ch not in "0123456789abcdefABCDEF":
+                    break
+                hex_text += ch
+            payload = bytes.fromhex(hex_text)
         except ValueError:
             continue
         return offset, total, payload
@@ -372,6 +383,10 @@ def app_stop_matches(status: str) -> bool:
 
 def app_delete_matches(status: str, app_id: str) -> bool:
     return (status.startswith(("ok delete ", "err delete ")) or " delete app=" in status) and f"app={app_id}" in status
+
+
+def staging_clear_matches(status: str) -> bool:
+    return status.startswith(("ok staging_clear ", "err staging_clear ")) or " staging_clear removed=" in status
 
 
 def flow_status_matches(status: str) -> bool:
@@ -685,8 +700,6 @@ class SerialTransportOptions:
 
 
 class SerialTransport:
-    READY_PATTERNS = ("[vb_runtime] running=1",)
-
     def __init__(self, options: SerialTransportOptions) -> None:
         if serial is None:
             transport_fail(
@@ -695,6 +708,16 @@ class SerialTransport:
             )
         self.options = options
         self._serial = None
+
+    @staticmethod
+    def status_has_runtime_ready(text: str) -> bool:
+        if "[vb_runtime] running=1" in text:
+            return True
+        return (
+            "[vb_runtime] api=vibeboard-huangshan-runtime/v1" in text
+            and "[vb_runtime] fs=ready" in text
+            and "[vb_runtime] app_manager=" in text
+        )
 
     def __enter__(self) -> "SerialTransport":
         self.connect()
@@ -763,13 +786,13 @@ class SerialTransport:
             self._serial.flush()
             status = self.read_text(0.5)
             seen += status
-            if "[vb_runtime] running=1" in status:
+            if self.status_has_runtime_ready(status):
                 return seen
         return seen
 
     def wait_until_ready(self) -> None:
         ready = self.wait_for_runtime(self.options.ready_timeout)
-        if not any(pattern in ready for pattern in self.READY_PATTERNS):
+        if not self.status_has_runtime_ready(ready):
             transport_fail("Runtime did not become ready on serial. Last output:\n" + ready[-2000:])
         self.read_text(0.35)
 
@@ -834,7 +857,7 @@ class SerialTransport:
         total = None
         fallback_deadline = time.time() + max(timeout, 4.0)
         while True:
-            chunk_output = self.command(f"json_read {kind} {offset} {RUNTIME_DATA_CHUNK_BYTES}", wait=command_wait)
+            chunk_output = self.command(f"json_read {kind} {offset} {SERIAL_JSON_CHUNK_BYTES}", wait=command_wait)
             chunk = extract_json_chunk(chunk_output, kind)
             if chunk is None:
                 if time.time() >= fallback_deadline:
@@ -862,7 +885,7 @@ class SerialTransport:
     def status(self) -> str:
         return self.read_matching(
             "vb_runtime_status",
-            lambda text: "[vb_runtime] running=1" in text and ("[vb_runtime] active=" in text or "[vb_runtime] active app:" in text),
+            lambda text: self.status_has_runtime_ready(text) and ("[vb_runtime] active=" in text or "[vb_runtime] active app:" in text),
             timeout=max(6.0, self.options.final_wait + 4.0),
             wait=max(self.options.final_wait, 0.4),
         )
@@ -1070,6 +1093,14 @@ class SerialTransport:
         return self.read_matching(
             f"vb_runtime_delete {app_id}",
             lambda text: app_delete_matches(text, app_id),
+            timeout=max(6.0, self.options.final_wait + 4.0),
+            wait=max(self.options.final_wait, 0.4),
+        )
+
+    def staging_clear(self) -> str:
+        return self.read_matching(
+            "vb_runtime_staging_clear",
+            staging_clear_matches,
             timeout=max(6.0, self.options.final_wait + 4.0),
             wait=max(self.options.final_wait, 0.4),
         )
@@ -1630,6 +1661,13 @@ class BLETransport:
             timeout=max(4.0, self.options.final_wait + 3.0),
         )
 
+    async def staging_clear(self) -> str:
+        return await self.read_matching(
+            "staging_clear",
+            staging_clear_matches,
+            timeout=max(4.0, self.options.final_wait + 3.0),
+        )
+
     async def abort_install(self, app_id: str) -> str:
         abort_command = f"vb_runtime_install_abort {app_id}"
         status = await self.read_matching(
@@ -1694,6 +1732,7 @@ def run_self_test() -> None:
     assert VOICE_CHUNK_BYTES == RUNTIME_DATA_CHUNK_BYTES
     assert 0 < SERIAL_MSH_VOICE_CHUNK_BYTES <= VOICE_CHUNK_BYTES
     assert INSTALL_CHUNK_BYTES == 48
+    assert SERIAL_JSON_CHUNK_BYTES == SERIAL_MSH_VOICE_CHUNK_BYTES
     assert MAX_INSTALL_CHUNK_BYTES == 240
     assert SERIAL_APP_PAGE_LIMIT >= BLE_APP_PAGE_LIMIT > 0
     assert hasattr(BLETransport, "verify_connection")
@@ -1722,6 +1761,7 @@ def run_self_test() -> None:
         "launch": "vb_runtime_launch",
         "stop": "vb_runtime_stop",
         "delete": "vb_runtime_delete",
+        "staging_clear": "vb_runtime_staging_clear",
     }
     ble_commands = {
         "status": "status",
@@ -1746,6 +1786,7 @@ def run_self_test() -> None:
         "launch": "launch",
         "stop": "stop",
         "delete": "delete",
+        "staging_clear": "staging_clear",
     }
     install_commands = (
         "vb_runtime_install_begin",
@@ -1801,7 +1842,7 @@ def run_self_test() -> None:
         ],
     )
 
-    chunk_line = "ok json_read kind=apps offset=0 total=5 hex=68656c6c6f"
+    chunk_line = "msh />ok json_read kind=apps offset=0 total=5 hex=68656c6c6f\x00msh />"
     assert extract_json_chunk(chunk_line, "apps") == (0, 5, b"hello")
     assert extract_json_chunk(chunk_line, "app") is None
 
@@ -1817,6 +1858,7 @@ def run_self_test() -> None:
     assert app_launch_matches("ok launch app=demo rc=0", "demo")
     assert app_stop_matches("ok stop rc=0")
     assert app_delete_matches("ok delete app=demo rc=0", "demo")
+    assert staging_clear_matches("ok staging_clear removed=1 rc=0")
     assert flow_send_matches("ok flow_send channel=pc.voice seq=7 rc=0", "pc.voice", 7)
     assert flow_send_matches("[vb_runtime][flow] recv total=1 seq=7 channel=pc.voice bytes=2 text=ok", "pc.voice", 7)
     assert flow_clear_matches("msh />ok flow_clear total=0")
@@ -2022,7 +2064,7 @@ def run_self_test() -> None:
         await fake_ble.flow_send("pc.voice", 7, "ok")
         await fake_ble.voice_status(4)
         await fake_ble.voice_read(4, 0, 3)
-        await fake_ble.app_page(0, 2)
+        await fake_ble.app_page(0, 1)
         await fake_ble.launch_app("demo")
         await fake_ble.stop_app()
         await fake_ble.delete_app("demo")
@@ -2031,7 +2073,7 @@ def run_self_test() -> None:
             "flow_send pc.voice 7 6f6b",
             "voice_status",
             "voice_read 0 3",
-            "apps_page 0 2",
+            "apps_page 0 1",
             "launch demo",
             "stop",
             "delete demo",

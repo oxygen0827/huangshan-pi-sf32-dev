@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import re
@@ -209,6 +210,14 @@ HUANGSHAN_PROFILE_ALIASES = {
 }
 MANIFEST_PROFILE_FIELDS = ("runtimeProfile", "runtime_profile", "targetProfile", "target")
 MANIFEST_CAPABILITY_LIST_FIELDS = ("capabilities", "requires", "permissions")
+MANIFEST_METADATA_STRING_FIELDS = {
+    "category": 32,
+    "icon": 32,
+    "author": 64,
+    "screenshot": 96,
+}
+MANIFEST_REQUIREMENTS_MAX = 8
+MANIFEST_REQUIREMENT_MAX_LEN = 48
 ESP32_NATIVE_CAPABILITY_NAMES = {
     "audio",
     "board_ip",
@@ -218,6 +227,7 @@ ESP32_NATIVE_CAPABILITY_NAMES = {
     "http",
     "i2s",
     "native",
+    "nes",
     "network",
     "ntp",
     "pan",
@@ -268,6 +278,7 @@ LUA_SUPPORTED_CALLS = {
     "vibe_flow_label",
     "vibe_rgb",
     "vibe_snake_autoplay",
+    "vibe_2048_game",
     "vibe_weather_pet",
 }
 
@@ -335,6 +346,50 @@ def validate_manifest_capability_lists(data: dict[str, object]) -> None:
             validate_huangshan_capability(item, f"manifest.json {key}[{index}]", MANIFEST_DECLARED_CAPABILITIES)
 
 
+def validate_manifest_metadata_string(data: dict[str, object], key: str, max_len: int) -> None:
+    value = data.get(key)
+    if value is None:
+        return
+    if not isinstance(value, str):
+        fail(f"manifest.json {key} must be a string when present")
+    if len(value) > max_len:
+        fail(f"manifest.json {key} must be at most {max_len} characters")
+    if any(ord(ch) < 32 for ch in value):
+        fail(f"manifest.json {key} must not contain control characters")
+    if key == "screenshot":
+        if value.startswith("generated:"):
+            return
+        if not re.match(r"^(?:assets|images)/[A-Za-z0-9_./-]+\.(?:png|jpg|jpeg)$", value):
+            fail("manifest.json screenshot must be generated:<name> or an assets/images PNG/JPEG path")
+
+
+def validate_manifest_metadata(data: dict[str, object]) -> None:
+    for key, max_len in MANIFEST_METADATA_STRING_FIELDS.items():
+        validate_manifest_metadata_string(data, key, max_len)
+
+    requirements = data.get("requirements")
+    if requirements is None:
+        return
+    if not isinstance(requirements, list):
+        fail("manifest.json requirements must be a list of strings when present")
+    if len(requirements) > MANIFEST_REQUIREMENTS_MAX:
+        fail(f"manifest.json requirements supports at most {MANIFEST_REQUIREMENTS_MAX} entries")
+    for index, item in enumerate(requirements, start=1):
+        if not isinstance(item, str):
+            fail(f"manifest.json requirements[{index}] must be a string")
+        if not item.strip():
+            fail(f"manifest.json requirements[{index}] must not be empty")
+        if len(item) > MANIFEST_REQUIREMENT_MAX_LEN:
+            fail(f"manifest.json requirements[{index}] must be at most {MANIFEST_REQUIREMENT_MAX_LEN} characters")
+        if any(ord(ch) < 32 for ch in item):
+            fail(f"manifest.json requirements[{index}] must not contain control characters")
+        if is_esp32_native_capability(item):
+            fail(
+                f"manifest.json requirements[{index}] {item!r} is not supported by Huangshan Runtime profile; "
+                "use BLE/serial plus a phone or desktop bridge instead"
+            )
+
+
 def validate_manifest_component(component: dict[str, object], index: int) -> None:
     type_value = component.get("type", "status")
     if not isinstance(type_value, str):
@@ -394,6 +449,7 @@ def validate_manifest(package_id: str, manifest_bytes: bytes) -> None:
         fail(f"manifest.json entry must be 'main.lua', got {data.get('entry')!r}")
     validate_manifest_profile(data)
     validate_manifest_capability_lists(data)
+    validate_manifest_metadata(data)
 
     components = data.get("components")
     if components is not None:
@@ -405,6 +461,48 @@ def validate_manifest(package_id: str, manifest_bytes: bytes) -> None:
             if not isinstance(component, dict):
                 fail(f"manifest.json component #{index} must be an object")
             validate_manifest_component(component, index)
+
+
+def manifest_file_entries(files: dict[str, bytes]) -> list[dict[str, object]]:
+    return [
+        {
+            "path": path,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for path, data in sorted(files.items())
+        if path != "manifest.json"
+    ]
+
+
+def digest_manifest_files(file_entries: list[dict[str, object]]) -> str:
+    canonical = [
+        {
+            "path": entry["path"],
+            "size": entry["size"],
+            "sha256": entry["sha256"],
+        }
+        for entry in file_entries
+    ]
+    payload = json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    return hashlib.sha256(payload).hexdigest()
+
+
+def with_package_integrity(package_id: str, files: dict[str, bytes]) -> dict[str, bytes]:
+    if "manifest.json" not in files:
+        return dict(sorted(files.items()))
+    data = json.loads(files["manifest.json"].decode("utf-8"))
+    entries = manifest_file_entries(files)
+    data["files"] = entries
+    data["integrity"] = {
+        "algorithm": "sha256",
+        "filesDigest": digest_manifest_files(entries),
+    }
+    manifest_data = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    validate_manifest(package_id, manifest_data)
+    updated = dict(files)
+    updated["manifest.json"] = manifest_data
+    return dict(sorted(updated.items()))
 
 
 def strip_lua_comment(line: str) -> str:
@@ -476,7 +574,7 @@ def validate_package(package_id: str, files: dict[str, bytes]) -> tuple[str, dic
     validate_lua_subset(safe_files["main.lua"])
     if "manifest.json" in safe_files:
         validate_manifest(package_id, safe_files["manifest.json"])
-    return package_id, dict(sorted(safe_files.items()))
+    return package_id, with_package_integrity(package_id, safe_files)
 
 
 def load_package_from_dir(package_dir: Path, app_id: str | None) -> tuple[str, dict[str, bytes]]:
@@ -586,6 +684,29 @@ def run_self_test() -> int:
         fail(f"self-test {label} unexpectedly passed")
 
     expect_ok("valid manifest package", lambda: validate_package("test_app", package_files()))
+
+    def generated_manifest_integrity() -> None:
+        package_id, files = validate_package(
+            "test_app",
+            {
+                "main.lua": b"print('ok')\n",
+                "manifest.json": manifest_bytes("test_app"),
+                "assets/note.txt": b"hello",
+            },
+        )
+        manifest = json.loads(files["manifest.json"].decode("utf-8"))
+        entries = manifest.get("files")
+        if package_id != "test_app" or not isinstance(entries, list):
+            fail("self-test generated integrity manifest missing files[]")
+        by_path = {entry["path"]: entry for entry in entries}
+        if "manifest.json" in by_path or "main.lua" not in by_path or "assets/note.txt" not in by_path:
+            fail(f"self-test generated integrity manifest paths wrong: {by_path!r}")
+        if by_path["main.lua"]["sha256"] != hashlib.sha256(b"print('ok')\n").hexdigest():
+            fail("self-test generated integrity manifest main.lua hash mismatch")
+        if manifest.get("integrity", {}).get("filesDigest") != digest_manifest_files(entries):
+            fail("self-test generated integrity manifest filesDigest mismatch")
+
+    expect_ok("generated manifest integrity", generated_manifest_integrity)
     expect_ok(
         "valid power package",
         lambda: validate_package(
@@ -638,6 +759,19 @@ def run_self_test() -> int:
             },
         ),
     )
+    expect_ok(
+        "valid app metadata package",
+        lambda: validate_package(
+            "test_app",
+            package_files(
+                category="Games",
+                icon="gamepad-2",
+                author="Huangshan Runtime Team",
+                screenshot="assets/preview.png",
+                requirements=["Runtime", "Touch gestures"],
+            ),
+        ),
+    )
     expect_ok("legacy app.info package", lambda: validate_package("legacy_app", {"main.lua": b"", "app.info": b"legacy_app"}))
 
     expect_fail("bad app id", lambda: validate_package("BadApp", package_files("bad_app")), "Unsafe runtime app id")
@@ -667,7 +801,16 @@ def run_self_test() -> int:
     expect_fail("native wifi capability", lambda: validate_package("test_app", package_files(capabilities=["wifi"])), "BLE/serial plus a phone or desktop bridge")
     expect_fail("native http capability", lambda: validate_package("test_app", package_files(requires=["http.client"])), "BLE/serial plus a phone or desktop bridge")
     expect_fail("native camera permission", lambda: validate_package("test_app", package_files(permissions=["camera"])), "BLE/serial plus a phone or desktop bridge")
+    expect_fail("native module capability", lambda: validate_package("test_app", package_files(capabilities=["native"])), "BLE/serial plus a phone or desktop bridge")
+    expect_fail("gamepad permission", lambda: validate_package("test_app", package_files(permissions=["gamepad"])), "BLE/serial plus a phone or desktop bridge")
+    expect_fail("nes capability", lambda: validate_package("test_app", package_files(requires=["nes"])), "BLE/serial plus a phone or desktop bridge")
+    expect_fail("i2s capability", lambda: validate_package("test_app", package_files(capabilities=["i2s.audio"])), "BLE/serial plus a phone or desktop bridge")
     expect_fail("unknown declared capability", lambda: validate_package("test_app", package_files(capabilities=["esp32.psram"])), "not supported by Huangshan Runtime profile")
+    expect_fail("metadata category type", lambda: validate_package("test_app", package_files(category=7)), "category must be a string")
+    expect_fail("metadata screenshot path", lambda: validate_package("test_app", package_files(screenshot="../preview.png")), "screenshot")
+    expect_fail("requirements type", lambda: validate_package("test_app", package_files(requirements="Runtime")), "requirements must be a list")
+    expect_fail("requirements item type", lambda: validate_package("test_app", package_files(requirements=[7])), "requirements[1] must be a string")
+    expect_fail("requirements native wifi", lambda: validate_package("test_app", package_files(requirements=["wifi"])), "BLE/serial plus a phone or desktop bridge")
     expect_fail("components list", lambda: validate_package("test_app", package_files(components={})), "components must be a list")
     expect_fail("components count", lambda: validate_package("test_app", package_files(components=[{}] * 9)), "at most 8")
     expect_fail("component object", lambda: validate_package("test_app", package_files(components=["bad"])), "must be an object")

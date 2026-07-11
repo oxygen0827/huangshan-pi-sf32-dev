@@ -110,20 +110,29 @@ screen also has manual actions:
 - Connect / Auto Reconnect
 - Read Runtime Status / Capabilities / Sensors / Power / Display / Touch / GPIO / RGB
 - Send or clear retained info flow text
-- Read, launch, stop, and delete Runtime Apps through App Manager commands
+- Read, launch, stop, and delete Runtime Apps through Runtime management commands
 - Read voice status, capture a short BLE microphone clip, clear it, and send a text reply back to the board
 - Install Demo App Over BLE
 - Import App Folder Over BLE
+- Show the validated Runtime package summary, including manifest integrity coverage, before install
 
 This app only uses Bluetooth. It does not connect to the phone hotspot and does
-not need a Wi-Fi password. Imported Runtime App folders must include
+not need a Wi-Fi password.
+
+Board-side UI note: the watch display now uses the `Main` home screen as a
+card-based launcher for installed `/sdcard/apps` packages. The iOS app
+management commands operate on the same installed app list, but they do not
+correspond to a separate board-side App Manager page.
+
+Imported Runtime App folders must include
 `main.lua` plus `manifest.json` or `app.info`; optional files must stay under
 the same whitelist used by the board Runtime, such as `assets/`, `images/`,
 `fonts/`, or `lib/`. If a manifest declares `runtimeProfile`, `targetProfile`,
 `target`, `capabilities`, `requires`, or `permissions`, the iOS importer uses
 the same Huangshan profile boundary as the Python packager and rejects ESP32 or
 board-native network capabilities such as `wifi`, `http`, `network`, `camera`,
-`gamepad`, and `i2s`.
+`gamepad`, and `i2s`. Before upload, iOS rewrites `manifest.json` with the same
+`files[]` SHA-256 integrity list used by the Python packager.
 
 ## Validation
 
@@ -191,7 +200,7 @@ The Mac client has verified the same BLE central flow against the real board:
 - failed install sessions use `abortInstall(_:)` to clear board staging before reporting the original error
 - directory import builds the same install command stream from a local
   Runtime App folder
-- `swift test` covers capability, display, touch, GPIO, App Manager JSON/action, voice JSON/status/action, Huangshan profile package validation, and package-decoding paths on the iOS side
+- `swift test` covers capability, display, touch, GPIO, Runtime app-list/action JSON, voice JSON/status/action, Huangshan profile package validation, and package-decoding paths on the iOS side
 
 The demo iPhone app target now exists and includes Bluetooth permission strings.
 Final hardware validation requires running it on the iPhone and pressing

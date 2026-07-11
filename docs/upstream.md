@@ -7,13 +7,13 @@ bring-up, but it does not vendor every upstream repository.
 ## Official SiFli SDK
 
 - Repository: https://gitee.com/SiFli/sifli-sdk
-- Branch used: `release/v2.4`
-- Local path on this Mac: `/Users/wq/huangshan-pi-workspace/sifli-sdk`
+- Branch used: `main`; verified local SDK version: 2.5.0 build `cbac8e56`
+- Local path on this Mac: `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk`
 
 Clone command:
 
 ```bash
-git clone --recursive -b release/v2.4 https://gitee.com/SiFli/sifli-sdk.git
+git clone --recursive -b main https://gitee.com/SiFli/sifli-sdk.git
 ```
 
 Role in this project:
@@ -25,14 +25,14 @@ Role in this project:
 
 Important local patch:
 
-- `/Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c`
+- `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c`
 - Accepts CO5300 IDs `0x331100`, `0x1fff`, and `0x3fff`
 - Uses `HAL_LCDC_SYNC_DISABLE` for the verified panel path
 
 ## LCKFB Huangshan Pi Examples
 
 - Repository: https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
-- Local path on this Mac: `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+- Local path on this Mac: `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 
 Clone command:
 

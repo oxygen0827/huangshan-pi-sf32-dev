@@ -4,6 +4,11 @@
   "id": "status_test",
   "name": "Status Test",
   "description": "Second package for no-reflash app switching.",
+  "category": "Tools",
+  "icon": "sparkles",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:status_test",
+  "requirements": ["Runtime", "Launcher reload"],
   "entry": "main.lua",
   "components": [
     {

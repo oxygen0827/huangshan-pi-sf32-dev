@@ -4,6 +4,11 @@
   "id": "power_stage",
   "name": "Power Stage",
   "description": "Read-only VBAT and charger Runtime API stage.",
+  "category": "Hardware",
+  "icon": "battery",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:power_stage",
+  "requirements": ["Runtime", "VBAT ADC", "AW32001 charger"],
   "entry": "main.lua",
   "components": [
     {

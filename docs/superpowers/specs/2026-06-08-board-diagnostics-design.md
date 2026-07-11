@@ -129,8 +129,8 @@ Required local verification:
 Required board verification when the device is attached:
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
-./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
+./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 Expected serial signals:

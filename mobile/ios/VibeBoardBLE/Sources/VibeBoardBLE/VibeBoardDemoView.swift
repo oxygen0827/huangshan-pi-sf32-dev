@@ -361,6 +361,11 @@ public struct VibeBoardDemoView: View {
                 .buttonStyle(.bordered)
                 .disabled(model.isBusy)
 
+                Text(model.latestPackageSummary)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
                 Spacer()
             }
             .padding(20)

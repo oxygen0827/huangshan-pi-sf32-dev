@@ -4,6 +4,11 @@
   "id": "rgb_test",
   "name": "RGB Test",
   "description": "Runtime RGB API smoke test",
+  "category": "Hardware",
+  "icon": "circle",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:rgb_test",
+  "requirements": ["Runtime", "RGB LED"],
   "entry": "main.lua",
   "components": [
     {"type":"label","id":"title","text":"RGB Runtime","x":42,"y":70,"w":300,"color":"#f8fafc","font":24},

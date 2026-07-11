@@ -10,3 +10,4 @@ compile_commands.json
 .superpowers/
 .voice_terminal.env
 captures/
+assets/lvgl-official/upstream-master/

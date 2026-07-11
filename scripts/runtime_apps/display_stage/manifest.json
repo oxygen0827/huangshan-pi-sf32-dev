@@ -4,6 +4,11 @@
   "id": "display_stage",
   "name": "Display Stage",
   "description": "Runtime display brightness and panel snapshot stage.",
+  "category": "Hardware",
+  "icon": "monitor",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:display_stage",
+  "requirements": ["Runtime", "CO5300 display", "Brightness API"],
   "entry": "main.lua",
   "components": [
     {

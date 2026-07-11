@@ -21,27 +21,28 @@
 - 芯片系列：SF32LB52x
 - 已验证 LCD：CO5300
 - 已验证触摸芯片：FT6146
-- 本机串口：`/dev/cu.usbserial-110`
+- 本机串口：`/dev/cu.usbserial-13220`
 - 串口日志波特率：`1000000`
 
 本地仓库：
 
 - 当前工作应用仓库：
-  `/Users/wq/huangshan-pi-workspace/huangshan-pi-sf32-dev`
+  `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev`
 - SiFli SDK：
-  `/Users/wq/huangshan-pi-workspace/sifli-sdk`
+  `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk`
 - 立创官方例程仓库：
-  `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+  `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 
 SDK 来源：
 
 - 官方 SDK 仓库：`https://gitee.com/SiFli/sifli-sdk`
-- 本地使用分支：`release/v2.4`
+- 本轮历史测试使用分支：`release/v2.4`
+- 当前 Runtime 开发以主 README 记录的 SDK 2.5.0 / `main` 环境为准
 
 本地 SDK 中与屏幕相关的重要补丁：
 
 - 文件：
-  `/Users/wq/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c`
+  `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/customer/peripherals/co5300/co5300.c`
 - 当前本地 SDK 接受 CO5300 ID：`0x331100`、`0x1fff`、`0x3fff`
 - 当前本地 SDK 对已验证屏幕路径使用 `HAL_LCDC_SYNC_DISABLE`
 
@@ -96,27 +97,27 @@ SDK 来源：
 当前应用仓库刷机：
 
 ```bash
-./scripts/flash.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
 ```
 
 当前应用仓库串口监视：
 
 ```bash
-SECONDS_TO_CAPTURE=10 ./scripts/monitor.sh /dev/cu.usbserial-110
+SECONDS_TO_CAPTURE=10 ./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 官方独立例程构建：
 
 ```bash
-source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
+source /Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/export.sh
 scons --board=sf32lb52-lchspi-ulp -j8
 ```
 
 官方独立例程刷机：
 
 ```bash
-source /Users/wq/huangshan-pi-workspace/sifli-sdk/export.sh
-./uart_download.sh /dev/cu.usbserial-110
+source /Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk/export.sh
+./uart_download.sh /dev/cu.usbserial-13220
 ```
 
 当前 watch app 内置官方应用启动测试命令：

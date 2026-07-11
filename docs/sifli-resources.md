@@ -45,8 +45,8 @@ LCD/Touch/BLE/低功耗资料仍然适用；板级跳线、屏幕、传感器和
 
 ```bash
 ./scripts/build.sh
-./scripts/flash.sh /dev/cu.usbserial-110
-./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
+./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 ## 应用开发
@@ -103,7 +103,7 @@ LVGL -> littlevgl2rtt -> RT-Thread LCD device -> CO5300 driver -> LCDC/QADSPI
 - 立创黄山派例程仓库：
   https://github.com/OpenSiFli/lckfb-hspi-ulp_example.git
 - 本地路径：
-  `/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example`
+  `/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example`
 
 当前仓库从立创例程的 `lvgl/watch` 路径开始，是因为这条路径已经验证了
 CO5300 AMOLED、FT6146 触摸、LVGL、资源系统、启动器和烧录流程。

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "game_2048",
+  "name": "2048",
+  "description": "A playable 2048 puzzle with swipe controls on Huangshan Runtime.",
+  "category": "Games",
+  "icon": "gamepad-2",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:game_2048",
+  "requirements": ["Runtime", "Display", "Touch gestures"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "game"],
+  "components": [
+    {
+      "type": "status",
+      "capability": "game",
+      "label": "Mode",
+      "value": "playable 2048"
+    },
+    {
+      "type": "status",
+      "capability": "touch.gesture",
+      "label": "Gesture",
+      "value": "swipe"
+    }
+  ]
+}

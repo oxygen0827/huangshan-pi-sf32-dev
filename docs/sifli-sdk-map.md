@@ -3,7 +3,7 @@
 本机 SiFli SDK 路径：
 
 ```text
-/Users/wq/huangshan-pi-workspace/sifli-sdk
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/sifli-sdk
 ```
 
 本仓库默认从兄弟目录 `../sifli-sdk` 使用 SDK。脚本仍支持通过
@@ -146,7 +146,7 @@ example/multicore/       多核和核间通信例程
 立创例程路径：
 
 ```text
-/Users/wq/huangshan-pi-workspace/lckfb-hspi-ulp_example
+/Users/hushaohong/vibe-coding/huangshan-pi-workspace/lckfb-hspi-ulp_example
 ```
 
 本仓库当前复制了其中的 `lvgl/watch` 应用结构。它提供了一个已经验证可用的
@@ -170,8 +170,8 @@ BUILTIN_APP_EXPORT(LV_EXT_STR_ID(codex_test), LV_EXT_IMG_GET(img_LiChuang), APP_
 
 ```bash
 ./scripts/build.sh
-./scripts/flash.sh /dev/cu.usbserial-110
-./scripts/monitor.sh /dev/cu.usbserial-110
+./scripts/flash.sh /dev/cu.usbserial-13220
+./scripts/monitor.sh /dev/cu.usbserial-13220
 ```
 
 常看日志：

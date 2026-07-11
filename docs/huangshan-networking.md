@@ -149,7 +149,7 @@ The localhost App Store bridge now uses `scripts/runtime_transport.py` for the
 same protocol surface. It exposes local HTTP endpoints for transport status,
 Runtime capabilities handshake, Runtime App listing, launch, stop, delete, and
 install; every board-facing operation is serialized through one transport lock so
-browser polling cannot race with install, capabilities, or App Manager commands. The desktop serial/BLE install scripts also
+browser polling cannot race with install, capabilities, or App Manager commands. The bridge intentionally avoids periodic status/app-list polling after initial page load; launch/stop/install actions update the browser from cache first, because extra serial reads during LVGL screen transitions can make the watch UI flicker or bounce back to Home. The desktop serial/BLE install scripts also
 route their standard query, App Manager, `install_abort`, flow, voice
 capture/reply, flow persistence, normal install paths, and staged install fault
 injection through that adapter. Script-local direct serial/BLE code is intentionally
@@ -186,6 +186,26 @@ tries the cached peripheral first, then scans for `VibeBoard` only if needed. It
 can install the built-in `ios_demo` package or import a Runtime App folder from
 the iOS Files picker and send it over BLE. It is intentionally Bluetooth-only:
 it does not ask for hotspot, Wi-Fi, or PAN.
+
+
+## Board Home And Web Manager
+
+The board-side UI is intentionally simple: the `Main` home screen scans
+`/sdcard/apps`, creates safe-area cards for installed compatible Runtime apps,
+and launches an app by writing `/sdcard/apps/.active` before entering
+`VibeBoard_Runtime`. The old engineering-style board App Manager page is no
+longer the daily entry point.
+
+The localhost Web App Store still contains a section named board App Manager,
+but that is a host-side management surface. It can refresh the app list, launch,
+stop, and delete installed apps through serial/BLE Runtime commands. It should
+not be interpreted as a separate page on the watch display.
+
+When using the serial transport, avoid background polling while an app is
+launching. The bridge keeps a cached app list and only refreshes on initial load
+or manual refresh. This prevents the browser from sending status/app-list reads
+while LVGL is switching screens, which previously caused visible flicker and
+sometimes returned the board to Home shortly after launching an app.
 
 ## Current Build Configuration
 
@@ -234,7 +254,8 @@ Verified on the Huangshan board connected as `/dev/cu.usbserial-13220`:
   `vb_runtime_ble_restart` can force a diagnostic advertising stop/start.
 - Mac CoreBluetooth/Bleak scan finds `VibeBoard`.
 - BLE App Manager listing succeeds through 2-app `apps_page` reads and combines
-  the complete installed App list on the host.
+  the complete installed App list on the host. The same list backs the local
+  Web App Manager and the board home-screen cards.
 - Mac CoreBluetooth/Bleak status connects by cached peripheral identifier and
   reads `ok status api=vibeboard-huangshan-ble-install/v1 active=clock_test`.
 - BLE package install succeeds for `scripts/runtime_apps/status_test`:

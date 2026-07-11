@@ -4,6 +4,11 @@
   "id": "voice_stage",
   "name": "Voice Stage",
   "description": "Runtime voice status and controlled capture stage.",
+  "category": "Bridge",
+  "icon": "mic",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:voice_stage",
+  "requirements": ["Runtime", "Microphone", "Voice bridge"],
   "entry": "main.lua",
   "components": [
     {"type":"status","capability":"voice.ready","label":"Ready","value":"--"},

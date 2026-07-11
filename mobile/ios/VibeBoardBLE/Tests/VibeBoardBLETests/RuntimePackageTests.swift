@@ -3,7 +3,7 @@ import Testing
 @testable import VibeBoardBLE
 
 @Test func exposesRuntimeTransportDefaults() {
-    #expect(VibeBoardRuntimeDefaults.bleAppPageLimit == 2)
+    #expect(VibeBoardRuntimeDefaults.bleAppPageLimit == 1)
     #expect(VibeBoardRuntimeDefaults.dataChunkBytes == 160)
     #expect(VibeBoardRuntimeDefaults.installChunkBytes == 48)
     #expect(VibeBoardRuntimeDefaults.maxInstallChunkBytes == 240)
@@ -31,6 +31,39 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(commands.contains("vb_runtime_install_file clock_test main.lua 0 7072696e74282768656c6c6f2729"))
     #expect(commands.contains { $0.hasPrefix("vb_runtime_install_file clock_test manifest.json 0 ") })
     #expect(commands.contains { $0.hasPrefix("vb_runtime_install_file clock_test manifest.json 16 ") })
+}
+
+@Test func injectsManifestIntegrityBeforeInstall() throws {
+    let mainLua = Data("print('ok')\n".utf8)
+    let asset = Data("asset".utf8)
+    let package = try RuntimePackage(
+        appId: "hash_test",
+        files: [
+            "main.lua": mainLua,
+            "manifest.json": runtimeManifest("hash_test"),
+            "assets/note.txt": asset
+        ]
+    )
+
+    guard let manifestData = package.files["manifest.json"],
+          let object = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+          let entries = object["files"] as? [[String: Any]],
+          let integrity = object["integrity"] as? [String: Any] else {
+        #expect(Bool(false), "Expected generated manifest integrity fields")
+        return
+    }
+
+    let byPath = Dictionary(uniqueKeysWithValues: entries.compactMap { entry -> (String, [String: Any])? in
+        guard let path = entry["path"] as? String else { return nil }
+        return (path, entry)
+    })
+
+    #expect(byPath["manifest.json"] == nil)
+    #expect(byPath["main.lua"]?["size"] as? Int == mainLua.count)
+    #expect(byPath["assets/note.txt"]?["size"] as? Int == asset.count)
+    #expect((byPath["main.lua"]?["sha256"] as? String)?.count == 64)
+    #expect(integrity["algorithm"] as? String == "sha256")
+    #expect((integrity["filesDigest"] as? String)?.count == 64)
 }
 
 @Test func validatesAppIdAndPaths() throws {
@@ -111,6 +144,41 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(package.appId == "phone_app")
 }
 
+@Test func acceptsRuntimeAppLibraryMetadataBeforeInstall() throws {
+    let manifest = Data(#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"gallery_app","entry":"main.lua","category":"Games","icon":"gamepad-2","author":"Huangshan Runtime Team","screenshot":"assets/preview.png","requirements":["Runtime","Touch gestures"],"components":[]}"#.utf8)
+    let package = try RuntimePackage(appId: "gallery_app", files: [
+        "main.lua": Data("print('ok')".utf8),
+        "manifest.json": manifest,
+        "assets/preview.png": Data([0x89, 0x50, 0x4e, 0x47])
+    ])
+
+    #expect(package.appId == "gallery_app")
+    #expect(package.files.keys.contains("assets/preview.png"))
+}
+
+@Test func rejectsMalformedRuntimeAppLibraryMetadataBeforeInstall() throws {
+    let manifests = [
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","category":7,"components":[]}"#, "category"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","screenshot":"../preview.png","components":[]}"#, "screenshot"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","requirements":"Runtime","components":[]}"#, "requirements"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","requirements":["wifi"],"components":[]}"#, "BLE/serial"),
+    ]
+
+    for (manifest, expected) in manifests {
+        do {
+            _ = try RuntimePackage(appId: "bad", files: [
+                "main.lua": Data("print('bad')".utf8),
+                "manifest.json": Data(manifest.utf8)
+            ])
+            #expect(Bool(false), "Expected metadata manifest to throw")
+        } catch RuntimePackageError.invalidManifest(let message) {
+            #expect(message.contains(expected))
+        } catch {
+            #expect(Bool(false), "Expected invalidManifest, got \(error)")
+        }
+    }
+}
+
 @Test func rejectsNonIntegerManifestVersionBeforeInstall() throws {
     do {
         _ = try RuntimePackage(appId: "bad", files: [
@@ -131,6 +199,10 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
         (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","capabilities":["wifi"],"components":[]}"#, "BLE/serial"),
         (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","requires":["http.client"],"components":[]}"#, "BLE/serial"),
         (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","permissions":["camera"],"components":[]}"#, "BLE/serial"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","capabilities":["native"],"components":[]}"#, "BLE/serial"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","requires":["nes"],"components":[]}"#, "BLE/serial"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","permissions":["gamepad"],"components":[]}"#, "BLE/serial"),
+        (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","capabilities":["i2s.audio"],"components":[]}"#, "BLE/serial"),
         (#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"bad","entry":"main.lua","capabilities":["esp32.psram"],"components":[]}"#, "not supported by Huangshan Runtime profile"),
     ]
 
@@ -505,12 +577,17 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(status.launcherTotal == 17)
     #expect(status.summary.contains("active=flow_stage"))
 
-    let listJSON = #"{"api":"vibeboard-huangshan-app-manager/v1","active":"flow_stage","state":"idle","apps":[{"id":"flow_stage","name":"Flow Stage","active":1,"compatible":1,"manifest":1,"app_info":0,"main_lua":1},{"id":"bad_app","name":"Bad","active":0,"compatible":0,"manifest":0,"app_info":1,"main_lua":0}],"count":2,"included":2,"truncated":0}"#
+    let listJSON = #"{"api":"vibeboard-huangshan-app-manager/v1","active":"flow_stage","state":"idle","apps":[{"id":"flow_stage","name":"Flow Stage","description":"Runtime info flow status stage.","category":"Bridge","icon":"radio","author":"Huangshan Runtime Team","screenshot":"generated:flow_stage","requirements":["Runtime","Flow API"],"active":1,"compatible":1,"manifest":1,"app_info":0,"main_lua":1},{"id":"bad_app","name":"Bad","active":0,"compatible":0,"manifest":0,"app_info":1,"main_lua":0}],"count":2,"included":2,"truncated":0}"#
     let list = try JSONDecoder().decode(VibeBoardRuntimeAppList.self, from: Data(listJSON.utf8))
 
     #expect(list.api == "vibeboard-huangshan-app-manager/v1")
     #expect(list.apps.count == 2)
     #expect(list.apps[0].id == "flow_stage")
+    #expect(list.apps[0].category == "Bridge")
+    #expect(list.apps[0].icon == "radio")
+    #expect(list.apps[0].author == "Huangshan Runtime Team")
+    #expect(list.apps[0].screenshot == "generated:flow_stage")
+    #expect(list.apps[0].requirements == ["Runtime", "Flow API"])
     #expect(list.apps[0].appInfo == 0)
     #expect(list.apps[1].compatible == 0)
     #expect(list.summary.contains("*flow_stage(ok)"))
