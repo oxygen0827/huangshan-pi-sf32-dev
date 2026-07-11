@@ -34,7 +34,7 @@ SAFE_APP_ID = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
 SAFE_PATH = re.compile(
     r"^(manifest\.json|app\.info|main\.lua|files\.txt|README\.md|"
     r"(?:assets|images|fonts|lib)/[A-Za-z0-9_./-]+\."
-    r"(?:json|txt|png|jpg|jpeg|bin|ttf|otf|lua))$"
+    r"(?:json|txt|png|jpg|jpeg|bin|ttf|otf|lua|wav))$"
 )
 
 LUA_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -175,9 +175,26 @@ MANIFEST_CAPABILITIES = {
     "vibeboard.gpio.key1.level",
     "vibeboard.gpio.key2",
     "vibeboard.gpio.key2.level",
+    "audio.state",
+    "audio.playback",
+    "audio.stop",
+    "audio.progress",
+    "audio.format",
+    "audio.volume",
+    "audio.available",
+    "audio.playing",
+    "vibeboard.audio.state",
+    "vibeboard.audio.playback",
+    "vibeboard.audio.stop",
+    "vibeboard.audio.progress",
+    "vibeboard.audio.format",
+    "vibeboard.audio.volume",
+    "vibeboard.audio.available",
+    "vibeboard.audio.playing",
 }
 MANIFEST_DECLARED_CAPABILITIES = MANIFEST_CAPABILITIES | {
     "assets",
+    "audio",
     "ble",
     "bridge",
     "display",
@@ -187,6 +204,8 @@ MANIFEST_DECLARED_CAPABILITIES = MANIFEST_CAPABILITIES | {
     "huangshan",
     "launcher",
     "lua-subset",
+    "lua",
+    "lua.full",
     "manifest",
     "power",
     "rgb",
@@ -219,7 +238,6 @@ MANIFEST_METADATA_STRING_FIELDS = {
 MANIFEST_REQUIREMENTS_MAX = 8
 MANIFEST_REQUIREMENT_MAX_LEN = 48
 ESP32_NATIVE_CAPABILITY_NAMES = {
-    "audio",
     "board_ip",
     "bluetooth.pan",
     "camera",
@@ -280,7 +298,20 @@ LUA_SUPPORTED_CALLS = {
     "vibe_snake_autoplay",
     "vibe_2048_game",
     "vibe_weather_pet",
+    "vibe_audio_play",
+    "vibe_audio_stop",
+    "vibe_audio_volume",
+    "vibe_audio_label",
 }
+
+LUA_FORBIDDEN_CALLS = {
+    "wifi_start",
+    "http_get",
+    "http_post",
+    "i2s_start",
+    "native_load",
+}
+LUA_FORBIDDEN_GLOBAL_ACCESS = re.compile(r"\b(?:os|io|debug|package)\s*[\.:]")
 
 
 def fail(message: str, code: int = 1) -> None:
@@ -542,19 +573,13 @@ def validate_lua_subset(script_bytes: bytes) -> None:
         fail(f"main.lua must be UTF-8: {exc}")
     if "\x00" in script:
         fail("main.lua must not contain NUL bytes")
-
-    for line_no, raw_line in enumerate(script.splitlines(), start=1):
-        line = strip_lua_comment(raw_line)
-        if not line:
-            continue
-        first = line.split(None, 1)[0]
-        if first in LUA_UNSUPPORTED_PREFIXES:
-            fail(f"main.lua line {line_no} uses unsupported Lua statement {first!r}; Runtime only supports simple calls")
-        if not LUA_CALL.match(line):
-            fail(f"main.lua line {line_no} is outside Runtime script subset: {line!r}")
-        name = lua_call_name(line)
-        if name not in LUA_SUPPORTED_CALLS:
-            fail(f"main.lua line {line_no} calls unsupported Runtime Lua helper {name!r}")
+    if len(script_bytes) > 64 * 1024:
+        fail("main.lua must be at most 65536 bytes")
+    if LUA_FORBIDDEN_GLOBAL_ACCESS.search(script):
+        fail("main.lua accesses a standard library disabled by Huangshan Runtime")
+    for name in LUA_FORBIDDEN_CALLS:
+        if re.search(rf"\b{re.escape(name)}\s*\(", script):
+            fail(f"main.lua calls forbidden Runtime Lua function {name!r}")
 
 
 def validate_package(package_id: str, files: dict[str, bytes]) -> tuple[str, dict[str, bytes]]:
@@ -825,10 +850,11 @@ def run_self_test() -> int:
     expect_fail("label font", lambda: validate_package("test_app", package_files(components=[{"type": "label", "text": "x", "font": 0}])), "font must be a positive integer")
     expect_fail("component value", lambda: validate_package("test_app", package_files(components=[{"type": "status", "capability": "status", "label": "Status", "value": 1}])), "value must be a string")
     expect_fail("lua utf8", lambda: validate_package("test_app", {"main.lua": b"\xff", "app.info": b"test_app"}), "main.lua must be UTF-8")
-    expect_fail("lua unsupported statement", lambda: validate_package("test_app", {"main.lua": b"for i=1,3 do\n", "app.info": b"test_app"}), "unsupported Lua statement")
-    expect_fail("lua unsupported assignment", lambda: validate_package("test_app", {"main.lua": b"root = lv_scr_act()\n", "app.info": b"test_app"}), "outside Runtime script subset")
-    expect_fail("lua unsupported helper", lambda: validate_package("test_app", {"main.lua": b"require('net')\n", "app.info": b"test_app"}), "unsupported Runtime Lua helper")
-    expect_fail("lua unsupported call", lambda: validate_package("test_app", {"main.lua": b"wifi_start()\n", "app.info": b"test_app"}), "unsupported Runtime Lua helper")
+    expect_ok("full lua control flow", lambda: validate_package("test_app", {"main.lua": b"local total=0\nfor i=1,3 do total=total+i end\nprint(total)\n", "app.info": b"test_app"}))
+    expect_ok("full lua assignment", lambda: validate_package("test_app", {"main.lua": b"root = lv_scr_act()\n", "app.info": b"test_app"}))
+    expect_ok("full lua app-local require", lambda: validate_package("test_app", {"main.lua": b"local m=require('lib.demo')\nprint(m.value)\n", "lib/demo.lua": b"return {value=42}\n", "app.info": b"test_app"}))
+    expect_fail("lua forbidden call", lambda: validate_package("test_app", {"main.lua": b"wifi_start()\n", "app.info": b"test_app"}), "forbidden Runtime Lua function")
+    expect_fail("lua disabled standard library", lambda: validate_package("test_app", {"main.lua": b"os.execute('bad')\n", "app.info": b"test_app"}), "standard library disabled")
 
     def duplicate_json_package() -> None:
         payload = {

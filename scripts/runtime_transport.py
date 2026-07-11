@@ -29,6 +29,7 @@ GPIO_API = "vibeboard-huangshan-gpio/v1"
 TOUCH_API = "vibeboard-huangshan-touch/v1"
 RGB_API = "vibeboard-huangshan-rgb/v1"
 VOICE_API = "vibeboard-huangshan-voice-bridge/v1"
+AUDIO_API = "vibeboard-huangshan-audio-playback/v1"
 APP_MANAGER_API = "vibeboard-huangshan-app-manager/v1"
 
 SERIAL_APP_PAGE_LIMIT = 5
@@ -56,6 +57,26 @@ class RuntimeTransportError(RuntimeError):
 
 def transport_fail(message: str, exit_code: int | None = None) -> None:
     raise RuntimeTransportError(message)
+
+
+def _validate_audio_target(app_id: str, path: str) -> None:
+    if not app_id or not app_id[0].islower() or len(app_id) > 15 or any(
+        not (char.islower() or char.isdigit() or char == "_") for char in app_id
+    ):
+        transport_fail(f"Unsafe Runtime audio app id: {app_id!r}")
+    if (
+        not path.startswith(("assets/", "lib/"))
+        or not path.lower().endswith(".wav")
+        or ".." in path
+        or "//" in path
+        or any(not (char.isalnum() or char in "_./-") for char in path)
+    ):
+        transport_fail(f"Unsafe Runtime audio path: {path!r}")
+
+
+def _validate_audio_volume(volume: int) -> None:
+    if not isinstance(volume, int) or isinstance(volume, bool) or not 0 <= volume <= 15:
+        transport_fail(f"Runtime audio volume must be 0..15, got {volume!r}")
 
 
 def _assert_raises(expected: type[BaseException], func, *args, **kwargs) -> None:
@@ -88,6 +109,10 @@ class SyncRuntimeTransport(Protocol):
     def touch(self) -> str: ...
     def rgb(self, color: str | None = None) -> str: ...
     def voice(self) -> str: ...
+    def audio(self) -> str: ...
+    def audio_play(self, app_id: str, path: str) -> str: ...
+    def audio_stop(self) -> str: ...
+    def audio_volume(self, volume: int) -> str: ...
     def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     def voice_start(self, duration_ms: int, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     def voice_read(self, sequence: int, offset: int, max_bytes: int) -> "VoiceReadChunk": ...
@@ -141,6 +166,10 @@ class AsyncRuntimeTransport(Protocol):
     async def touch(self) -> str: ...
     async def rgb(self, color: str | None = None) -> str: ...
     async def voice(self) -> str: ...
+    async def audio(self) -> str: ...
+    async def audio_play(self, app_id: str, path: str) -> str: ...
+    async def audio_stop(self) -> str: ...
+    async def audio_volume(self, volume: int) -> str: ...
     async def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     async def voice_start(self, duration_ms: int, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     async def voice_read(self, sequence: int, offset: int, max_bytes: int) -> "VoiceReadChunk": ...
@@ -916,6 +945,20 @@ class SerialTransport:
     def voice(self) -> str:
         return self.read_json("vb_runtime_voice", "voice", VOICE_API)
 
+    def audio(self) -> str:
+        return self.read_json("vb_runtime_audio status", "audio", AUDIO_API)
+
+    def audio_play(self, app_id: str, path: str) -> str:
+        _validate_audio_target(app_id, path)
+        return self.read_json(f"vb_runtime_audio play /sdcard/apps/{app_id}/{path}", "audio", AUDIO_API)
+
+    def audio_stop(self) -> str:
+        return self.read_json("vb_runtime_audio stop", "audio", AUDIO_API)
+
+    def audio_volume(self, volume: int) -> str:
+        _validate_audio_volume(volume)
+        return self.read_json(f"vb_runtime_audio volume {volume}", "audio", AUDIO_API)
+
     def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]:
         text = self.read_matching(
             "vb_runtime_voice_status",
@@ -1492,6 +1535,20 @@ class BLETransport:
     async def voice(self) -> str:
         return await self.read_json("voice", "voice", VOICE_API)
 
+    async def audio(self) -> str:
+        return await self.read_json("playback", "audio", AUDIO_API)
+
+    async def audio_play(self, app_id: str, path: str) -> str:
+        _validate_audio_target(app_id, path)
+        return await self.read_json(f"playback_play {app_id} {path}", "audio", AUDIO_API)
+
+    async def audio_stop(self) -> str:
+        return await self.read_json("playback_stop", "audio", AUDIO_API)
+
+    async def audio_volume(self, volume: int) -> str:
+        _validate_audio_volume(volume)
+        return await self.read_json(f"playback_volume {volume}", "audio", AUDIO_API)
+
     async def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]:
         status = await self.read_matching(
             "voice_status",
@@ -1748,6 +1805,7 @@ def run_self_test() -> None:
         "touch": "vb_runtime_touch",
         "rgb": "vb_runtime_rgb",
         "voice": "vb_runtime_voice",
+        "audio": "vb_runtime_audio",
         "voice_status": "vb_runtime_voice_status",
         "voice_start": "vb_runtime_voice_start",
         "voice_read": "vb_runtime_voice_read",
@@ -1773,6 +1831,7 @@ def run_self_test() -> None:
         "touch": "touch",
         "rgb": "rgb",
         "voice": "voice",
+        "audio": "playback",
         "voice_status": "voice_status",
         "voice_start": "voice_start",
         "voice_read": "voice_read",
@@ -1800,6 +1859,11 @@ def run_self_test() -> None:
     assert ble_commands["app_page"] == "apps_page"
     assert all(command.startswith("vb_runtime_install_") for command in install_commands)
     assert set(serial_commands) == set(ble_commands)
+    _validate_audio_target("audio_stage", "assets/chime.wav")
+    _validate_audio_volume(15)
+    _assert_raises(RuntimeTransportError, _validate_audio_target, "Bad", "assets/chime.wav")
+    _assert_raises(RuntimeTransportError, _validate_audio_target, "audio_stage", "../chime.wav")
+    _assert_raises(RuntimeTransportError, _validate_audio_volume, 16)
     capabilities = '{"api":"noise"}\n{"api":"vibeboard-huangshan-capabilities/v1","ok":true}'
     assert extract_json_line(capabilities, CAPABILITIES_API) == '{"api":"vibeboard-huangshan-capabilities/v1","ok":true}'
     truncated_apps = '{"api":"vibeboard-huangshan-app-manager/v1","error":"truncated","count":17}'

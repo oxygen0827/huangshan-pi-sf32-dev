@@ -58,6 +58,7 @@ def has_standard_transport_command(args: argparse.Namespace) -> bool:
         args.rgb_only,
         args.rgb_color is not None,
         args.voice_only,
+        args.audio_only,
         args.app_only,
         args.apps_only,
         args.launch_app is not None,
@@ -90,6 +91,7 @@ def run_self_test() -> None:
         rgb_only=False,
         rgb_color=None,
         voice_only=False,
+        audio_only=False,
         app_only=False,
         apps_only=False,
         launch_app=None,
@@ -157,6 +159,8 @@ def run_standard_transport_command(args: argparse.Namespace) -> int | None:
                 print(transport.rgb(args.rgb_color))
             elif args.voice_only:
                 print(transport.voice())
+            elif args.audio_only:
+                print(transport.audio())
             elif args.app_only:
                 print(transport.app_status())
             elif args.apps_only:
@@ -209,6 +213,7 @@ def main() -> int:
     source.add_argument("--rgb-color", help="Set Runtime RGB LED color, e.g. red, off, or 3366ff")
     source.add_argument("--display-brightness", type=int, help="Set Runtime display brightness, 0-100")
     source.add_argument("--voice-only", action="store_true", help="Read Runtime voice bridge JSON and exit")
+    source.add_argument("--audio-only", action="store_true", help="Read Runtime audio playback JSON and exit")
     source.add_argument("--app-only", action="store_true", help="Read Runtime app manager status JSON and exit")
     source.add_argument("--apps-only", action="store_true", help="Read Runtime installed app list JSON and exit")
     source.add_argument("--launch-app", help="Launch an installed Runtime app by app id")
@@ -251,6 +256,7 @@ def main() -> int:
         args.rgb_color is not None,
         args.display_brightness is not None,
         args.voice_only,
+        args.audio_only,
         args.app_only,
         args.apps_only,
         args.launch_app is not None,

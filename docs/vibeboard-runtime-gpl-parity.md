@@ -1,6 +1,6 @@
 # 对标 vibeboard-runtime-gpl 的黄山派 Runtime 进度
 
-更新时间：2026-07-08
+更新时间：2026-07-11
 
 本文对标本机目录 `/Users/hushaohong/vibe-coding/vibeboard-runtime-gpl`，整理黄山派 Runtime 目前已经实现的功能、待开发/待优化能力，以及相对 ESP32-S3 GPL Runtime 的取舍。
 
@@ -33,7 +33,7 @@
 | 板级 bring-up | CO5300 AMOLED、FT6146 触摸、LVGL/watch 基座、ADC/VBAT、GPIO/KEY、UART2、AW32001 charger、WS2812/RGB 已验证 | GPL 版对应 ESP32-S3 boot、ST7789 LCD、touch、PSRAM、SD 等 bring-up |
 | 传感器容错 | LSM6DSL 可读；LTR303/MMC56X3 未 ACK 时按缺席降级，不再断言崩溃 | GPL 版有 IMU/传感器能力，但硬件组合不同 |
 | Runtime/App 分离 | Runtime 固件一次烧录，App 包放 `/sdcard/apps/<app_id>`，支持免重刷安装/启动 | 与 GPL 版核心架构一致 |
-| App 包格式 | 支持 `manifest.json` / `app.info` / `main.lua` / assets；打包器校验 ID、路径、manifest、Lua subset 和能力白名单 | GPL 版已有更成熟的 app.info/Lua/assets 生态和 app-validator |
+| App 包格式 | 支持 manifest/main.lua/assets/lib/WAV；Python/Swift 校验 ID、路径、完整 Lua 安全边界、能力和 integrity | GPL 版已有更成熟的 app.info/Lua/assets 生态和 app-validator |
 | App Manager / Launcher | 支持状态、列表、启动、停止、删除已停止 App、分页读取；板端已改为首页卡片桌面，直接展示 `/sdcard/apps` 中可用 App 并支持滚动启动；Web/iOS 端承担管理器职责 | GPL 版 Launcher 体验和生命周期控制更成熟 |
 | 串口安装 | `vb_runtime_install_begin/file/end/abort` staging 链路稳定，支持冷启动恢复和失败清理 | GPL 版主要通过 HTTP staged upload/commit |
 | BLE 安装 | BLE GATT 分块安装已跑通；Mac 与 iOS 共用同一命令族 | GPL 版没有把 BLE 作为主安装路径 |
@@ -48,6 +48,8 @@
 | GPIO API | 当前开放 KEY1/KEY2 只读白名单，`gpio_keys_stage` 示例已接入 | GPL 版 key/gamepad/input 注入更成熟 |
 | Flow 信息流 | `flow_clear/send/status` 已稳定，最近一条可持久化，App 可只读展示手机/电脑注入的文本 | GPL 版更多依赖板载 HTTP/网络和桌面 bridge |
 | Voice 桥 | 串口/BLE 可录 16 kHz PCM、WAV 落盘、文本回复回写，App 可受控触发录音/清空 | GPL 版有 Voice AI bridge、I2S/audio 生态更完整 |
+| Lua 5.5 VM | 已迁移完整语言 VM；开放安全标准库和 App 本地模块，限制 384 KiB 内存、50 万指令、64 KiB 脚本 | GPL 版 Lua/LVGL binding 面更广，但黄山派增加了明确资源和文件边界 |
+| Audio playback | 已接 SiFli `audio_server`，支持包内 PCM WAV、停止、音量、状态 JSON，以及 serial/BLE/iOS API | GPL 版音频格式和 I2S 生态更广 |
 | 示例 App | 已有 `clock_test`、`status_test`、`sensor_stage`、`power_stage`、`display_stage`、`touch_stage`、`gpio_keys_stage`、`rgb_test`、`flow_stage`、`voice_stage`、`weather_pet`、`game_2048`、`auto_snake` 等 | GPL 版已有大量用户向 App：2048、weather、voice_ai、NES、photos、plane、matrix 等 |
 | iOS | `VibeBoardBLE` Swift package、DemoModel、RuntimePackage 校验、BLE 安装/状态读取、长 JSON fallback 已接入并测试通过 | GPL 版主要是桌面/HTTP 工具，黄山派 iOS 方向更靠前 |
 | 本地 Web/桌面工具 | App Store server 通过 RuntimeTransport 管理 status/apps/capabilities/install/launch/stop/delete；语音桥串口/BLE 共用 common helper | GPL 版 Device Web UI 更完整，但依赖板载 HTTP |
@@ -59,13 +61,13 @@
 | --- | --- | --- |
 | App Manager 产品化 | 板端已取消工程态 App Manager，桌面卡片可滚动启动；Web/iOS 管理器已能启动/停止/删除，但错误解释、日志和安装态仍需打磨 | 增强桌面卡片图标/空状态，完善 Web/iOS 的加载中、缓存、失败详情和日志下载 |
 | App 生态 | 当前多为 stage/regression app，用户向应用不足 | 先打磨天气、语音助手、传感器仪表、电源面板、RGB/触摸工具、小游戏 |
-| Lua/LVGL 能力 | 目前是受控 manifest + Lua subset，不是完整 Lua VM/LVGL binding | 按真实 App 需求逐步增加高价值 binding，保留能力白名单和崩溃隔离 |
+| Lua/LVGL 能力 | 完整 Lua 语言已具备，LVGL/硬件 binding 仍受控 | 增加高价值 binding、事件模型、对象配额和长稳测试 |
 | UI 组件体系 | `Huangshan_UI_Lab` 已起步，但尚未成为 Runtime App 标准组件库 | 固化列表、卡片、状态条、按钮、图标、错误态、加载态等组件规范 |
 | 资源/图片能力 | `weather_pet` 已带资源，但图片/字体/动画能力还没形成完整 App API | 明确图片格式、尺寸、缓存策略、字体策略和打包约束 |
 | 手机 App 闭环 | iOS package 与 Demo 已通，仍偏验证工具 | 做成可给开发者/用户用的安装、管理、日志、升级、故障提示界面 |
 | 桌面管理工具 | 本地 Web bridge 已可用，但体验还不如 GPL 版 Device Web UI | 做传输选择、设备连接状态、App 市场、安装进度、日志下载、错误解释 |
-| 语音产品化 | 已有录音/回写/证据链，App 不能直接读 PCM，播放链路不足 | 增加播放/回放状态、长录音稳定性、权限提示、端侧唤醒或按钮流程 |
-| 音频输出 / I2S | 录音链路已通，播放和扬声器/codec 产品路径未完整验证 | 做 audio out API、loopback/播放 smoke、音量和设备状态 JSON |
+| 语音产品化 | 已有录音/回写和 WAV 播放；App 仍不能直接读 PCM | 补长录音、权限提示、端侧唤醒或按钮流程 |
+| 音频输出 | 高层 WAV API 已完成，真实扬声器听感和长稳尚未完成 | 做真机 loopback/播放 smoke、坏文件、多轮停止/切换和功耗测试 |
 | Native module / NES | 尚未迁移 GPL 版 NES/native ABI/gamepad host | 等 Runtime API 稳定后评估 NES/native ABI、内存和显示接管风险 |
 | Gamepad | 当前只有触摸/GPIO/按键状态，没有 BLE/Xbox/手柄输入层 | 先定义受控 gamepad JSON + App helper，再考虑真实手柄发现/配对 |
 | Camera | 黄山派当前没有接入摄像头 Runtime | 仅在硬件确实需要时新增，避免照搬 ESP32 GC2145 路线 |
@@ -81,7 +83,7 @@
 | --- | --- | --- |
 | 主传输 | 板子 WiFi 入网，板载 HTTP 8080 | BLE GATT / USB 串口，手机或电脑作为管理端 |
 | 网络策略 | 板子直接 WiFi/HTTP，App 可用网络能力 | 默认拒绝 `wifi/http/network/ntp/board_ip`，云端数据由 bridge 注入 |
-| App API | 更完整 Lua/LVGL binding，native/gamepad/camera/I2S 等高阶能力多 | 受控 manifest + Lua subset，优先稳定、安全和可验证 |
+| App API | 更完整 LVGL binding，native/gamepad/camera/I2S 等高阶能力多 | 完整 Lua 语言 + 受控 host binding，优先稳定、安全和可验证 |
 | 设备 UI | Launcher 和 Device Web UI 更成熟 | 板端首页卡片已可日常启动 App；Web App Manager 可管理安装包，但仍需产品化打磨 |
 | 硬件适配 | ESP32-S3 + ST7789/PSRAM/SD/WiFi | SF32LB52 + CO5300/FT6146/AW32001/LSM6DSL/RGB/电源状态 |
 | 手机方向 | 主要不是手机 BLE 优先 | iOS BLE package 和 Demo 已对齐核心协议 |
@@ -92,7 +94,7 @@
 - 不要求用户给板子配 WiFi；手机/电脑联网后通过 BLE/串口注入数据，更接近 C 端配网体验。
 - 对黄山派真实硬件做了探测与降级，I2C 未 ACK 不会直接变成 Runtime 崩溃。
 - Web、桌面、iOS 上层已经统一到 `RuntimeTransport`，后续新增能力可以优先加在协议和 adapter 层。
-- 受控 manifest 和 Lua subset 更容易做权限、签名、AI 生成 App 校验和崩溃隔离。
+- 完整 Lua 语言与受控 host binding 分层，兼顾 App 表达力和权限、AI 生成校验、崩溃隔离。
 - 自动回归覆盖了串口/BLE真实硬件 core gate，不只是“能传文件”。
 - Web bridge 已避免周期性串口轮询，启动 App 后优先用缓存更新页面，减少 LVGL 切屏闪烁和误回桌面的风险。
 
@@ -102,4 +104,4 @@
 2. 打磨 3-5 个 C 端可展示 App：天气宠物、语音助手、传感器仪表、电源面板、小游戏。
 3. 完善手机/桌面 bridge：设备连接、App 安装、日志、故障解释、云数据注入。
 4. 增加包签名、权限模型、BLE 配对安全和版本兼容策略。
-5. 做长时稳定性和掉电恢复矩阵，再评估 NES/native/gamepad/audio out 等高阶能力。
+5. 做 Lua/audio 长时稳定性和掉电恢复矩阵，再评估 NES/native/gamepad 等高阶能力。

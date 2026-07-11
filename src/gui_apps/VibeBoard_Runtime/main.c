@@ -53,6 +53,8 @@
 #include "lv_ex_data.h"
 #include "app_mem.h"
 #include "vb_runtime_package.h"
+#include "vb_runtime_audio.h"
+#include "vb_runtime_lua_host.h"
 #if defined(RGB_SK6812MINI_HS_ENABLE)
 #include "bf0_hal.h"
 #include "drv_io.h"
@@ -568,6 +570,8 @@ typedef struct
     lv_obj_t *script_flow_label;
     char script_flow_field[24];
     uint32_t script_flow_seen_total;
+    lv_obj_t *script_audio_label;
+    char script_audio_field[24];
     lv_timer_t *timer;
     char active_app[VB_MAX_APP_ID];
     char app_name[VB_MAX_TEXT];
@@ -853,7 +857,8 @@ static int vb_is_resource_package_path(const char *path)
         rt_strcmp(dot, ".bin") != 0 &&
         rt_strcmp(dot, ".ttf") != 0 &&
         rt_strcmp(dot, ".otf") != 0 &&
-        rt_strcmp(dot, ".lua") != 0)
+        rt_strcmp(dot, ".lua") != 0 &&
+        rt_strcmp(dot, ".wav") != 0)
     {
         return 0;
     }
@@ -2266,10 +2271,10 @@ static int vb_runtime_capabilities_json(char *dst, rt_size_t cap)
 #endif
     used = rt_snprintf(dst, cap,
                        "{\"api\":\"%s\",\"rt\":\"%s\",\"ble\":\"%s\",\"sens\":\"%s\",\"touch\":\"%s\","
-                       "\"flow\":\"%s\",\"voice\":\"%s\",\"pwr\":\"%s\",\"disp\":\"%s\",\"gpio\":\"%s\",\"rgb\":\"%s\",\"fs\":%d,"
+                       "\"flow\":\"%s\",\"voice\":\"%s\",\"audio\":\"%s\",\"pwr\":\"%s\",\"disp\":\"%s\",\"gpio\":\"%s\",\"rgb\":\"%s\",\"fs\":%d,"
                        "\"ins\":{\"ser\":1,\"ble\":%d,\"max\":%d},"
                        "\"app\":{\"lua\":\"%s\",\"comp\":%d},"
-                       "\"hw\":{\"disp\":%d,\"touch\":1,\"sens\":%d,\"voice\":%d,\"flow\":1,"
+                       "\"hw\":{\"disp\":%d,\"touch\":1,\"sens\":%d,\"voice\":%d,\"audio\":%d,\"flow\":1,"
                        "\"batt\":%d,\"chg\":%d,\"gpio\":%d,\"rgb\":%d}}",
                        VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION,
                        VIBEBOARD_RUNTIME_API_VERSION,
@@ -2278,6 +2283,7 @@ static int vb_runtime_capabilities_json(char *dst, rt_size_t cap)
                        VIBEBOARD_RUNTIME_TOUCH_API_VERSION,
                        VIBEBOARD_RUNTIME_FLOW_API_VERSION,
                        VIBEBOARD_RUNTIME_VOICE_API_VERSION,
+                       VB_RUNTIME_AUDIO_API_VERSION,
                        VIBEBOARD_RUNTIME_POWER_API_VERSION,
                        VIBEBOARD_RUNTIME_DISPLAY_API_VERSION,
                        VIBEBOARD_RUNTIME_GPIO_API_VERSION,
@@ -2290,6 +2296,7 @@ static int vb_runtime_capabilities_json(char *dst, rt_size_t cap)
                        VB_RUNTIME_HAS_DISPLAY,
                        sensor_api,
                        VB_RUNTIME_HAS_VOICE_CAPTURE,
+                       vb_runtime_audio_available(),
                        VB_RUNTIME_HAS_POWER_BATTERY,
                        VB_RUNTIME_HAS_POWER_CHARGER,
                        VB_RUNTIME_HAS_GPIO,
@@ -2654,8 +2661,51 @@ static int vb_ble_execute_line(char *line)
         vb_ble_set_status("ok flow_clear total=0");
         return RT_EOK;
     }
-    if (rt_strcmp(argv[0], "voice") == 0 ||
+    if (rt_strcmp(argv[0], "playback") == 0 ||
         rt_strcmp(argv[0], "audio") == 0 ||
+        rt_strcmp(argv[0], "audio_playback") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_audio") == 0)
+    {
+        int result = vb_runtime_audio_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "playback_play") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_audio_play") == 0) && argc >= 3)
+    {
+        char path[VB_MAX_PATH];
+        int result;
+        if (!vb_is_safe_app_id(argv[1]) || !vb_is_resource_package_path(argv[2]))
+        {
+            result = -RT_EINVAL;
+        }
+        else
+        {
+            rt_snprintf(path, sizeof(path), "%s/%s/%s", VIBEBOARD_APP_ROOT, argv[1], argv[2]);
+            path[sizeof(path) - 1] = '\0';
+            result = vb_runtime_audio_play_wav(path);
+        }
+        vb_runtime_audio_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        return result;
+    }
+    if (rt_strcmp(argv[0], "playback_stop") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_audio_stop") == 0)
+    {
+        int result = vb_runtime_audio_stop();
+        vb_runtime_audio_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        return result;
+    }
+    if ((rt_strcmp(argv[0], "playback_volume") == 0 ||
+         rt_strcmp(argv[0], "vb_runtime_audio_volume") == 0) && argc >= 2)
+    {
+        char *end = RT_NULL;
+        long volume = strtol(argv[1], &end, 10);
+        int result = end != argv[1] && *end == '\0' ?
+                     vb_runtime_audio_set_volume((int)volume) : -RT_EINVAL;
+        vb_runtime_audio_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        return result;
+    }
+    if (rt_strcmp(argv[0], "voice") == 0 ||
         rt_strcmp(argv[0], "vb_runtime_voice") == 0)
     {
         int result = vb_runtime_voice_read_json(g_vb_ble.status, sizeof(g_vb_ble.status));
@@ -7198,19 +7248,9 @@ static void vb_weather_step(void)
 
 static void vb_script_resolve_asset_path(const char *src, char *dst, rt_size_t cap)
 {
-    if (!src || !src[0])
+    if (!src || !src[0] || !vb_is_resource_package_path(src))
     {
         dst[0] = '\0';
-        return;
-    }
-    if (strstr(src, "..") || strstr(src, "//"))
-    {
-        dst[0] = '\0';
-        return;
-    }
-    if (src[0] == '/')
-    {
-        vb_safe_copy(dst, cap, src);
         return;
     }
     rt_snprintf(dst, cap, "%s/%s/%s", VIBEBOARD_APP_ROOT, g_vb_runtime.active_app, src);
@@ -7355,6 +7395,12 @@ static int vb_script_execute_lvgl_call(const char *line)
     {
         obj = vb_script_resolve_parent(args[0]);
         if (obj) lv_obj_align(obj, vb_script_align_from_arg(args[1]), atoi(args[2]), atoi(args[3]));
+        return 1;
+    }
+    if (vb_extract_call_args(line, "lv_obj_center", args, &argc) && argc >= 1)
+    {
+        obj = vb_script_resolve_parent(args[0]);
+        if (obj) lv_obj_center(obj);
         return 1;
     }
     if (vb_extract_call_args(line, "lv_obj_set_style_bg_color", args, &argc) && argc >= 2)
@@ -7635,6 +7681,47 @@ static int vb_script_execute_helper_call(const char *line)
         rt_kprintf("[vb_runtime][lua] display.brightness %s rc=%d %s\n", args[0], result, json);
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_audio_play", args, &argc) && argc >= 1)
+    {
+        char path[VB_MAX_PATH];
+        int result;
+        vb_script_resolve_asset_path(args[0], path, sizeof(path));
+        result = path[0] ? vb_runtime_audio_play_wav(path) : -RT_EINVAL;
+        rt_kprintf("[vb_runtime][lua] audio.play %s rc=%d\n", args[0], result);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_audio_stop", args, &argc))
+    {
+        int result = vb_runtime_audio_stop();
+        rt_kprintf("[vb_runtime][lua] audio.stop rc=%d\n", result);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_audio_volume", args, &argc) && argc >= 1)
+    {
+        char *end = RT_NULL;
+        long volume = strtol(args[0], &end, 10);
+        int result = end != args[0] && *end == '\0' && volume >= 0 && volume <= 15 ?
+                     vb_runtime_audio_set_volume((int)volume) : -RT_EINVAL;
+        rt_kprintf("[vb_runtime][lua] audio.volume %s rc=%d\n", args[0], result);
+        return 1;
+    }
+    if (vb_extract_call_args(line, "vibe_audio_label", args, &argc) && argc >= 2)
+    {
+        vb_script_object_t *target = vb_script_find_object(args[0]);
+        char text[96];
+        if (!vb_runtime_audio_format_text(args[1], text, sizeof(text)))
+        {
+            rt_snprintf(text, sizeof(text), "Audio --");
+        }
+        if (target && target->obj)
+        {
+            lv_label_set_text(target->obj, text);
+            g_vb_runtime.script_audio_label = target->obj;
+            vb_safe_copy(g_vb_runtime.script_audio_field,
+                         sizeof(g_vb_runtime.script_audio_field), args[1]);
+        }
+        return 1;
+    }
     if (vb_extract_call_args(line, "vibe_voice_start", args, &argc))
     {
         char json[VB_VOICE_JSON_MAX];
@@ -7721,6 +7808,46 @@ static int vb_script_execute_line(const char *line)
     return 0;
 }
 
+int vibeboard_lua_host_reset(void)
+{
+    if (!g_vb_runtime.root) return -RT_ERROR;
+    rt_memset(g_vb_runtime.script_objects, 0, sizeof(g_vb_runtime.script_objects));
+    g_vb_runtime.script_object_count = 1;
+    vb_safe_copy(g_vb_runtime.script_objects[0].name,
+                 sizeof(g_vb_runtime.script_objects[0].name), "root");
+    g_vb_runtime.script_objects[0].obj = g_vb_runtime.root;
+    g_vb_runtime.script_objects[0].type = VB_SCRIPT_OBJ_ROOT;
+    g_vb_runtime.script_last_label = RT_NULL;
+    g_vb_runtime.script_tick_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
+    g_vb_runtime.script_runtime_active = 0;
+    g_vb_runtime.script_tick_prefix[0] = '\0';
+    g_vb_runtime.script_flow_field[0] = '\0';
+    g_vb_runtime.script_flow_seen_total = g_vb_flow.total_count;
+    g_vb_runtime.script_audio_label = RT_NULL;
+    g_vb_runtime.script_audio_field[0] = '\0';
+    rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
+    rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
+    return RT_EOK;
+}
+
+int vibeboard_lua_host_execute(const char *line)
+{
+    if (!line || !line[0]) return -RT_EINVAL;
+    return vb_script_execute_line(line) ? RT_EOK : -RT_ENOSYS;
+}
+
+void vibeboard_lua_host_set_active(int active)
+{
+    g_vb_runtime.script_runtime_active = active ? 1 : 0;
+}
+
+void vibeboard_lua_host_stop(void)
+{
+    vb_runtime_audio_shutdown();
+    vb_builtin_script_stop();
+}
+
 static int vb_builtin_script_start(const char *script_path, const char *manifest_path)
 {
     char *script;
@@ -7741,20 +7868,11 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
         return -RT_ERROR;
     }
 
-    rt_memset(g_vb_runtime.script_objects, 0, sizeof(g_vb_runtime.script_objects));
-    g_vb_runtime.script_object_count = 1;
-    vb_safe_copy(g_vb_runtime.script_objects[0].name, sizeof(g_vb_runtime.script_objects[0].name), "root");
-    g_vb_runtime.script_objects[0].obj = g_vb_runtime.root;
-    g_vb_runtime.script_objects[0].type = VB_SCRIPT_OBJ_ROOT;
-    g_vb_runtime.script_last_label = RT_NULL;
-    g_vb_runtime.script_tick_label = RT_NULL;
-    g_vb_runtime.script_flow_label = RT_NULL;
-    g_vb_runtime.script_runtime_active = 0;
-    g_vb_runtime.script_tick_prefix[0] = '\0';
-    g_vb_runtime.script_flow_field[0] = '\0';
-    g_vb_runtime.script_flow_seen_total = g_vb_flow.total_count;
-    rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
-    rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
+    if (vibeboard_lua_host_reset() != RT_EOK)
+    {
+        rt_free(script);
+        return -RT_ERROR;
+    }
 
     cursor = script;
     line_start = script;
@@ -7793,6 +7911,8 @@ static void vb_builtin_script_stop(void)
     g_vb_runtime.script_object_count = 0;
     g_vb_runtime.script_tick_prefix[0] = '\0';
     g_vb_runtime.script_flow_field[0] = '\0';
+    g_vb_runtime.script_audio_label = RT_NULL;
+    g_vb_runtime.script_audio_field[0] = '\0';
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
 }
@@ -9357,6 +9477,13 @@ static int vb_runtime_component_sensor_text(const char *capability, char *dst, r
     {
         return vb_runtime_flow_format_text(capability, dst, cap);
     }
+    if (rt_strncmp(capability, "audio.", 6) == 0 ||
+        rt_strncmp(capability, "vibeboard.audio.", 16) == 0)
+    {
+        const char *selector = rt_strncmp(capability, "audio.", 6) == 0 ?
+                               capability + 6 : capability + 16;
+        return vb_runtime_audio_format_text(selector, dst, cap);
+    }
     if (rt_strcmp(capability, "voice.ready") == 0 ||
         rt_strcmp(capability, "voice.recording") == 0 ||
         rt_strcmp(capability, "voice.state") == 0 ||
@@ -9574,6 +9701,8 @@ static void vb_timer_cb(lv_timer_t *timer)
                  rt_strncmp(component->capability, "vibeboard.voice.", 16) == 0 ||
                  rt_strncmp(component->capability, "flow.", 5) == 0 ||
                  rt_strncmp(component->capability, "vibeboard.flow.", 15) == 0 ||
+                 rt_strncmp(component->capability, "audio.", 6) == 0 ||
+                 rt_strncmp(component->capability, "vibeboard.audio.", 16) == 0 ||
                  rt_strncmp(component->capability, "touch.", 6) == 0 ||
                  rt_strncmp(component->capability, "vibeboard.touch.", 17) == 0 ||
                  rt_strncmp(component->capability, "gpio.", 5) == 0 ||
@@ -9606,6 +9735,13 @@ static void vb_timer_cb(lv_timer_t *timer)
             {
                 rt_kprintf("[vb_runtime][lua] timer %s\n", text);
             }
+        }
+    }
+    if (g_vb_runtime.script_runtime_active && g_vb_runtime.script_audio_label)
+    {
+        if (vb_runtime_audio_format_text(g_vb_runtime.script_audio_field, text, sizeof(text)))
+        {
+            lv_label_set_text(g_vb_runtime.script_audio_label, text);
         }
     }
     if (g_vb_runtime.snake.active && now - g_vb_runtime.snake.last_run >= g_vb_runtime.snake.period_ticks)

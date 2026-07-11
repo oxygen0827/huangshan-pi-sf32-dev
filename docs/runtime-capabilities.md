@@ -1,6 +1,6 @@
 # 黄山派 Runtime 能力表
 
-更新时间：2026-07-10
+更新时间：2026-07-11
 
 黄山派 Runtime 能力以 `vb_runtime_capabilities` 的 JSON 为机器握手入口，以
 manifest/Lua helper 白名单为 App 侧边界。能力命名描述的是黄山派 profile，不是
@@ -21,6 +21,8 @@ ESP32-S3 GPL Runtime 的完整能力集合。
 | RGB | `vb_runtime_rgb`、`vibe_rgb` | 板载 RGB 设色、读回、恢复 |
 | Flow | `flow_send/status/clear`、`vibe_flow_label` | 手机/桌面注入文本，App 只读展示 |
 | Voice | `vb_runtime_voice*`、`vibe_voice_label`、`vibe_voice_start`、`vibe_voice_clear` | 受控短录音、状态读取、bridge 导出 |
+| Audio playback | `vb_runtime_audio`、BLE `playback*`、`vibe_audio_*` | App 包内 PCM WAV 异步播放、停止、音量和状态；底层 I2S 不开放 |
+| Lua VM | capability `lua.full` | Lua 5.5 完整语言；安全标准库、App 本地模块、384 KiB 内存和 50 万指令预算 |
 | Game helper | `vibe_2048_game`、`vibe_snake_autoplay` | 复杂交互放 Runtime 原生 helper |
 
 ## manifest 能力原则
@@ -28,7 +30,7 @@ ESP32-S3 GPL Runtime 的完整能力集合。
 - `capabilities` / `requires` / `permissions` 只能声明 Huangshan profile 能力。
 - `weather.current` 表示 bridge 注入的数据，不表示板子自己联网。
 - `flow.*`、`voice.*`、`display.*`、`power.*` 等细分能力用于 App UI 和工具校验。
-- App 需要复杂逻辑时，先新增 Runtime helper，再把 helper 加入 Python/Swift 白名单。
+- App 可以使用完整 Lua 语言组织复杂逻辑；访问 LVGL/硬件时仍需白名单 helper。
 
 ## 明确拒绝的能力
 
@@ -44,7 +46,6 @@ ESP32-S3 GPL Runtime 的完整能力集合。
 - `camera`
 - `gamepad`
 - `i2s`
-- `audio`
 - `bluetooth.pan`
 
 拒绝原因不是永远不能做，而是当前产品边界要求联网和复杂外设先由手机/桌面 bridge

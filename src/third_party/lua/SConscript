@@ -1,0 +1,22 @@
+from building import *
+
+cwd = GetCurrentDir()
+
+sources = [
+    'lapi.c', 'lauxlib.c', 'lbaselib.c', 'lcode.c', 'lctype.c',
+    'lcorolib.c', 'ldblib.c', 'ldebug.c', 'ldo.c', 'ldump.c', 'lfunc.c',
+    'lgc.c', 'linit.c', 'liolib.c', 'llex.c', 'lmathlib.c', 'lmem.c',
+    'lobject.c', 'lopcodes.c', 'loslib.c', 'lparser.c', 'lstate.c',
+    'lstring.c', 'lstrlib.c', 'ltable.c', 'ltablib.c', 'ltm.c',
+    'lundump.c', 'lutf8lib.c', 'lvm.c', 'lzio.c',
+]
+
+objs = DefineGroup(
+    'VibeBoard_Lua55',
+    [File(source) for source in sources],
+    depend=[],
+    CPPPATH=[cwd],
+    LOCAL_CCFLAGS=' -DLUA_USE_C89 -DCONFIG_LUA_MAXSTACK=8192',
+)
+
+Return('objs')

@@ -14,6 +14,7 @@ import runtime_reliability_checks
 from runtime_reliability_checks import (
     format_section_outputs,
     normalize_rgb_color,
+    validate_audio_json,
     validate_capabilities_json,
     validate_display_json,
     validate_gpio_json,
@@ -452,6 +453,11 @@ def main() -> int:
         help="After each install, read voice bridge status JSON without starting capture.",
     )
     parser.add_argument(
+        "--verify-audio-status",
+        action="store_true",
+        help="After each install, read audio playback status JSON without starting playback.",
+    )
+    parser.add_argument(
         "--verify-voice",
         action="store_true",
         help="After each install, run one serial voice capture + reply round and verify the generated evidence log.",
@@ -507,6 +513,8 @@ def main() -> int:
     rgb_successes = 0
     voice_status_checks = 0
     voice_status_successes = 0
+    audio_status_checks = 0
+    audio_status_successes = 0
     voice_checks = 0
     voice_successes = 0
     abort_checks = 0
@@ -548,7 +556,11 @@ def main() -> int:
                 script,
                 args.port,
                 "--capabilities-only",
-                lambda data: validate_capabilities_json(data, require_gpio=args.verify_gpio),
+                lambda data: validate_capabilities_json(
+                    data,
+                    require_gpio=args.verify_gpio,
+                    require_audio=args.verify_audio_status,
+                ),
             )
             print_text_output(
                 f"[runtime-reliability] capabilities after install {index + 1}/{args.runs}",
@@ -694,6 +706,23 @@ def main() -> int:
                 break
             voice_status_successes += 1
 
+        if args.verify_audio_status:
+            audio_status_checks += 1
+            audio_status_code, audio_status_output = run_json_validation(
+                script,
+                args.port,
+                "--audio-only",
+                validate_audio_json,
+            )
+            print_text_output(
+                f"[runtime-reliability] audio status after install {index + 1}/{args.runs}",
+                audio_status_output,
+            )
+            results.append((index + 1, app_id, "audio-status", audio_status_code))
+            if audio_status_code != 0:
+                break
+            audio_status_successes += 1
+
         if args.verify_voice:
             voice_checks += 1
             voice_proc = run_voice_bridge_serial(
@@ -834,6 +863,9 @@ def main() -> int:
     if args.verify_voice_status:
         voice_status_rate = (voice_status_successes / voice_status_checks * 100.0) if voice_status_checks else 0.0
         print(f"runtime voice status checks: {voice_status_successes}/{voice_status_checks} ({voice_status_rate:.1f}%)")
+    if args.verify_audio_status:
+        audio_status_rate = (audio_status_successes / audio_status_checks * 100.0) if audio_status_checks else 0.0
+        print(f"runtime audio status checks: {audio_status_successes}/{audio_status_checks} ({audio_status_rate:.1f}%)")
     if args.verify_voice:
         voice_rate = (voice_successes / voice_checks * 100.0) if voice_checks else 0.0
         print(f"runtime voice checks: {voice_successes}/{voice_checks} ({voice_rate:.1f}%)")
@@ -871,6 +903,8 @@ def main() -> int:
     if args.verify_rgb and rgb_successes != rgb_checks:
         return 1
     if args.verify_voice_status and voice_status_successes != voice_status_checks:
+        return 1
+    if args.verify_audio_status and audio_status_successes != audio_status_checks:
         return 1
     if args.verify_voice and voice_successes != voice_checks:
         return 1

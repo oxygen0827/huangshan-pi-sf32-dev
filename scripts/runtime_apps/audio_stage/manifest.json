@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "audio_stage",
+  "name": "Audio Stage",
+  "description": "Full Lua VM and WAV speaker playback verification.",
+  "category": "Media",
+  "icon": "volume-2",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:audio_stage",
+  "requirements": ["Runtime", "Speaker", "Full Lua VM"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "audio", "audio.playback", "lua.full"],
+  "components": [
+    {
+      "type": "status",
+      "capability": "audio.state",
+      "label": "Playback",
+      "value": "idle"
+    },
+    {
+      "type": "status",
+      "capability": "audio.format",
+      "label": "Format",
+      "value": "16 kHz mono"
+    }
+  ]
+}

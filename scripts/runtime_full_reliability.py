@@ -56,6 +56,8 @@ def add_common_checks(cmd: list[str], args: argparse.Namespace) -> None:
         cmd.extend(["--flow-text", args.flow_text, "--flow-channel", args.flow_channel])
     if args.verify_voice_status:
         cmd.append("--verify-voice-status")
+    if args.verify_audio_status:
+        cmd.append("--verify-audio-status")
     if args.verify_voice:
         cmd.append("--verify-voice")
         cmd.extend(["--voice-duration-ms", str(args.voice_duration_ms)])
@@ -143,7 +145,7 @@ def main() -> int:
     parser.add_argument(
         "--core",
         action="store_true",
-        help="Enable the current core Runtime API checks: capabilities, sensors, power, display, touch, gpio, rgb, flow, and voice status.",
+        help="Enable the core Runtime API checks, including voice and audio status.",
     )
     parser.add_argument("--verify-capabilities", action="store_true")
     parser.add_argument("--verify-sensors", action="store_true")
@@ -158,6 +160,7 @@ def main() -> int:
     parser.add_argument("--flow-text", default="flow-regression-ok")
     parser.add_argument("--flow-channel", default="pc.flow")
     parser.add_argument("--verify-voice-status", action="store_true", help="Also read voice bridge status JSON without starting capture.")
+    parser.add_argument("--verify-audio-status", action="store_true", help="Also read audio playback status JSON without starting playback.")
     parser.add_argument("--verify-voice", action="store_true", help="Also run voice bridge checks; slower and records audio.")
     parser.add_argument("--voice-duration-ms", type=int, default=600)
     parser.add_argument("--self-test", action="store_true", help="Run offline argument validation checks and exit.")
@@ -187,6 +190,7 @@ def main() -> int:
         args.verify_rgb = True
         args.verify_flow = True
         args.verify_voice_status = True
+        args.verify_audio_status = True
 
     root = Path(__file__).resolve().parent
     serial_script = root / "runtime_reliability.sh"

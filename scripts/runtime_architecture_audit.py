@@ -37,6 +37,13 @@ def require_contains(name: str, rel: str, needle: str) -> None:
         ok(name, f"{rel} contains {needle!r}")
 
 
+def require_file(name: str, rel: str) -> None:
+    if not (ROOT / rel).is_file():
+        fail(name, f"{rel} is missing")
+    else:
+        ok(name, f"{rel} exists")
+
+
 def require_absent(name: str, rel: str, pattern: str, *, flags: int = 0) -> None:
     text = read(rel)
     if re.search(pattern, text, flags):
@@ -145,6 +152,32 @@ def audit_capability_model() -> None:
         ok("capability_model", "Python and Swift validators include forbidden ESP32/network capability names")
 
 
+def audit_lua_audio_runtime() -> None:
+    require_contains("lua_audio_runtime", "src/SConscript", "third_party/lua/SConscript")
+    require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/SConscript", "Glob('*.c')")
+    require_file("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c")
+    require_file("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c")
+    for needle in (
+        'VB_LUA_ENGINE_NAME "lua-5.5-full"',
+        "VB_LUA_MEMORY_LIMIT",
+        "VB_LUA_INSTRUCTION_LIMIT",
+        "lua_sethook",
+        "luaopen_utf8",
+    ):
+        require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c", needle)
+    for needle in (
+        "AUDIO_TYPE_LOCAL_MUSIC",
+        "vb_runtime_audio_play_wav",
+        "vb_runtime_audio_read_json",
+        "vb_runtime_audio_set_volume",
+    ):
+        require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c", needle)
+    require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/main.c", "vibe_audio_play")
+    require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/main.c", "!vb_is_resource_package_path(src)")
+    require_contains("lua_audio_runtime", "scripts/runtime_package.py", '"lua.full"')
+    require_contains("lua_audio_runtime", "scripts/runtime_package.py", '"audio.playback"')
+
+
 def audit_high_risk_capability_evaluation() -> None:
     rel = "docs/runtime-high-risk-capabilities-evaluation.md"
     text = read(rel)
@@ -200,6 +233,7 @@ def run_audit() -> int:
     audit_ios_transport()
     audit_default_networking()
     audit_capability_model()
+    audit_lua_audio_runtime()
     audit_high_risk_capability_evaluation()
     audit_direct_transport_usage()
     failures = [message for status, message in CHECKS if status == "fail"]

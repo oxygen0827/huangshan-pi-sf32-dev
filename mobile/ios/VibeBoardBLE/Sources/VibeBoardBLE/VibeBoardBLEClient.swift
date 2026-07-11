@@ -93,6 +93,7 @@ public struct VibeBoardRuntimeHardwareCapabilities: Codable, Equatable, Sendable
     public let touch: Int
     public let sens: Int
     public let voice: Int
+    public let audio: Int?
     public let flow: Int
     public let batt: Int
     public let chg: Int
@@ -108,6 +109,7 @@ public struct VibeBoardRuntimeCapabilities: Codable, Equatable, Sendable {
     public let touch: String?
     public let flow: String
     public let voice: String
+    public let audio: String?
     public let pwr: String?
     public let disp: String?
     public let gpio: String?
@@ -122,7 +124,7 @@ public struct VibeBoardRuntimeCapabilities: Codable, Equatable, Sendable {
             "rt=\(rt)",
             "lua=\(app.lua)",
             "install=\(ins.ser != 0 ? "serial" : "--")/\(ins.ble != 0 ? "ble" : "--")",
-            "hw=disp:\(hw.disp) touch:\(hw.touch) sensors:\(hw.sens) voice:\(hw.voice) flow:\(hw.flow) batt:\(hw.batt) chg:\(hw.chg) gpio:\(hw.gpio) rgb:\(hw.rgb)",
+            "hw=disp:\(hw.disp) touch:\(hw.touch) sensors:\(hw.sens) voice:\(hw.voice) audio:\(hw.audio ?? 0) flow:\(hw.flow) batt:\(hw.batt) chg:\(hw.chg) gpio:\(hw.gpio) rgb:\(hw.rgb)",
             "display_api=\(disp ?? "--")",
             "touch_api=\(touch ?? "--")",
             "gpio_api=\(gpio ?? "--")"
@@ -462,6 +464,27 @@ public struct VibeBoardVoiceSnapshot: Codable, Equatable, Sendable {
 
     public var summary: String {
         "voice ready=\(ready) recording=\(recording) seq=\(seq) bytes=\(bytes) err=\(err)"
+    }
+}
+
+public struct VibeBoardAudioSnapshot: Codable, Equatable, Sendable {
+    public let api: String
+    public let available: Int
+    public let playing: Int
+    public let ready: Int
+    public let suspended: Int
+    public let seq: UInt32
+    public let rate: UInt32
+    public let channels: UInt32
+    public let bits: UInt32
+    public let bytes: UInt32
+    public let total: UInt32
+    public let volume: Int
+    public let err: Int
+    public let path: String
+
+    public var summary: String {
+        "audio playing=\(playing) ready=\(ready) \(rate)Hz/\(channels)ch/\(bits)b bytes=\(bytes)/\(total) volume=\(volume) err=\(err)"
     }
 }
 
@@ -1003,6 +1026,10 @@ public protocol VibeBoardRuntimeTransport: AnyObject {
     func gpio() async throws -> VibeBoardGPIOSnapshot
     func rgb(color: String?) async throws -> VibeBoardRGBSnapshot
     func voice() async throws -> VibeBoardVoiceSnapshot
+    func audio() async throws -> VibeBoardAudioSnapshot
+    func audioPlay(appId: String, path: String) async throws -> VibeBoardAudioSnapshot
+    func audioStop() async throws -> VibeBoardAudioSnapshot
+    func audioVolume(_ volume: Int) async throws -> VibeBoardAudioSnapshot
 
     func appStatus() async throws -> VibeBoardRuntimeAppStatus
     func apps() async throws -> VibeBoardRuntimeAppList
@@ -1272,6 +1299,42 @@ public final class VibeBoardBLEClient: NSObject {
         }
         let snapshot = try JSONDecoder().decode(VibeBoardVoiceSnapshot.self, from: data)
         trace("runtime voice \(snapshot.summary)")
+        return snapshot
+    }
+
+    public func audio() async throws -> VibeBoardAudioSnapshot {
+        try await audioCommand("playback")
+    }
+
+    public func audioPlay(appId: String, path: String) async throws -> VibeBoardAudioSnapshot {
+        guard RuntimePackage.isSafeAppId(appId), RuntimePackage.isSafePath(path),
+              path.hasPrefix("assets/"), path.lowercased().hasSuffix(".wav") else {
+            throw VibeBoardBLEError.commandFailed("unsafe Runtime audio target: \(appId)/\(path)")
+        }
+        return try await audioCommand("playback_play \(appId) \(path)")
+    }
+
+    public func audioStop() async throws -> VibeBoardAudioSnapshot {
+        try await audioCommand("playback_stop")
+    }
+
+    public func audioVolume(_ volume: Int) async throws -> VibeBoardAudioSnapshot {
+        guard (0...15).contains(volume) else {
+            throw VibeBoardBLEError.commandFailed("Runtime audio volume must be 0...15")
+        }
+        return try await audioCommand("playback_volume \(volume)")
+    }
+
+    private func audioCommand(_ command: String) async throws -> VibeBoardAudioSnapshot {
+        let status = try await fetchRuntimeJSON(
+            command: command,
+            expectedAPI: "vibeboard-huangshan-audio-playback/v1"
+        )
+        guard let data = status.data(using: .utf8) else {
+            throw VibeBoardBLEError.commandFailed(status)
+        }
+        let snapshot = try JSONDecoder().decode(VibeBoardAudioSnapshot.self, from: data)
+        trace("runtime \(snapshot.summary)")
         return snapshot
     }
 

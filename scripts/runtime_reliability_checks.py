@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from runtime_transport import (
+    AUDIO_API,
     CAPABILITIES_API,
     DISPLAY_API,
     GPIO_API,
@@ -27,6 +28,7 @@ def validate_capabilities_json(
     data: dict[str, object] | None,
     require_gpio: bool,
     require_ble: bool = False,
+    require_audio: bool = False,
 ) -> str | None:
     if not data:
         return "missing capabilities JSON"
@@ -69,6 +71,36 @@ def validate_capabilities_json(
         if hw.get("gpio") != 1:
             return f"capabilities.hw.gpio expected 1, got {hw.get('gpio')!r}"
 
+    if require_audio:
+        if data.get("audio") != AUDIO_API:
+            return f"capabilities audio api mismatch: {data.get('audio')!r}"
+        if hw.get("audio") != 1:
+            return f"capabilities.hw.audio expected 1, got {hw.get('audio')!r}"
+
+    return None
+
+
+def validate_audio_json(data: dict[str, object] | None) -> str | None:
+    if not data:
+        return "missing audio JSON"
+    if data.get("api") != AUDIO_API:
+        return f"audio api mismatch: {data.get('api')!r}"
+    if data.get("available") != 1:
+        return f"audio.available expected 1, got {data.get('available')!r}"
+    for key in ("playing", "ready", "suspended"):
+        if data.get(key) not in (0, 1):
+            return f"audio.{key} expected 0/1, got {data.get(key)!r}"
+    for key in ("seq", "rate", "channels", "bits", "bytes", "total"):
+        value = data.get(key)
+        if not isinstance(value, int) or value < 0:
+            return f"audio.{key} invalid: {value!r}"
+    volume = data.get("volume")
+    if not isinstance(volume, int) or not 0 <= volume <= 15:
+        return f"audio.volume invalid: {volume!r}"
+    if not isinstance(data.get("err"), int):
+        return f"audio.err invalid: {data.get('err')!r}"
+    if not isinstance(data.get("path"), str):
+        return f"audio.path invalid: {data.get('path')!r}"
     return None
 
 
@@ -318,14 +350,15 @@ def _base_capabilities() -> dict[str, object]:
         "touch": TOUCH_API,
         "flow": "vibeboard-huangshan-info-flow/v1",
         "voice": VOICE_API,
+        "audio": AUDIO_API,
         "pwr": POWER_API,
         "disp": DISPLAY_API,
         "gpio": GPIO_API,
         "rgb": RGB_API,
         "fs": 1,
         "ins": {"ser": 1, "ble": 1, "max": 240},
-        "app": {"lua": "script-subset", "comp": 8},
-        "hw": {"disp": 1, "touch": 1, "sens": 1, "voice": 1, "flow": 1, "batt": 1, "chg": 1, "gpio": 1, "rgb": 1},
+        "app": {"lua": "lua-5.5-full", "comp": 8},
+        "hw": {"disp": 1, "touch": 1, "sens": 1, "voice": 1, "audio": 1, "flow": 1, "batt": 1, "chg": 1, "gpio": 1, "rgb": 1},
     }
 
 
@@ -432,8 +465,29 @@ def _base_voice() -> dict[str, object]:
     }
 
 
+def _base_audio() -> dict[str, object]:
+    return {
+        "api": AUDIO_API,
+        "available": 1,
+        "playing": 0,
+        "ready": 0,
+        "suspended": 0,
+        "seq": 0,
+        "rate": 0,
+        "channels": 0,
+        "bits": 0,
+        "bytes": 0,
+        "total": 0,
+        "volume": 8,
+        "err": 0,
+        "path": "",
+    }
+
+
 def run_self_test() -> None:
-    assert validate_capabilities_json(_base_capabilities(), require_gpio=True, require_ble=True) is None
+    assert validate_capabilities_json(
+        _base_capabilities(), require_gpio=True, require_ble=True, require_audio=True
+    ) is None
     no_ble = _base_capabilities()
     assert isinstance(no_ble["ins"], dict)
     no_ble["ins"] = dict(no_ble["ins"])
@@ -448,6 +502,7 @@ def run_self_test() -> None:
     assert validate_sensors_json(_base_sensors()) is None
     assert validate_rgb_json(_base_rgb(), expected_color="3366ff") is None
     assert validate_voice_json(_base_voice()) is None
+    assert validate_audio_json(_base_audio()) is None
 
     bad_rgb = _base_rgb()
     bad_rgb["color"] = "blue"
@@ -455,6 +510,9 @@ def run_self_test() -> None:
     bad_voice = _base_voice()
     bad_voice["rate"] = 8000
     assert "voice.rate" in (validate_voice_json(bad_voice) or "")
+    bad_audio = _base_audio()
+    bad_audio["volume"] = 16
+    assert "audio.volume" in (validate_audio_json(bad_audio) or "")
     assert normalize_rgb_color("A1b2C3") == "a1b2c3"
     assert normalize_rgb_color("not-rgb") is None
     assert format_section_outputs([("one", "a\n"), ("two", "")]) == "[one]\na\n[two]"

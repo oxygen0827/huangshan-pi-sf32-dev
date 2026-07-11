@@ -1,6 +1,6 @@
 # 黄山派 Runtime App 包格式
 
-更新时间：2026-07-10
+更新时间：2026-07-11
 
 黄山派 Runtime App 是普通文件目录，安装到：
 
@@ -62,7 +62,7 @@ legacy_app/
 - `main.lua`
 - `files.txt`
 - `README.md`
-- `assets/`、`images/`、`fonts/`、`lib/` 下的 `json/txt/png/jpg/jpeg/bin/ttf/otf/lua`
+- `assets/`、`images/`、`fonts/`、`lib/` 下的 `json/txt/png/jpg/jpeg/bin/ttf/otf/lua/wav`
 
 禁止：
 
@@ -70,6 +70,15 @@ legacy_app/
 - `..`
 - 连续斜杠。
 - 非白名单目录或扩展名。
+
+## Lua 与音频边界
+
+- `main.lua` 和 App 本地 `lib/*.lua` 使用 Lua 5.5 完整语言语法。
+- Runtime 只开放 base/coroutine/table/string/math/utf8，以及受控的 App 本地
+  `require`/`dofile`/`loadfile`；不开放 `os`、`io`、`debug`、`package` 和动态 C 模块。
+- 单个脚本最大 64 KiB；VM 默认限制 384 KiB 内存和 50 万条指令。
+- `audio` / `audio.playback` 包可播放自身 `assets/*.wav`：PCM、16-bit、8-48 kHz、
+  mono/stereo。App 不获得任意文件或直接 I2S 访问权。
 
 ## 完整性字段
 

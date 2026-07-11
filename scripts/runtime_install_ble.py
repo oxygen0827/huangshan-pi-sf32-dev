@@ -90,6 +90,7 @@ def selected_standard_command_names(args: argparse.Namespace) -> list[str]:
         ("--rgb-only", getattr(args, "rgb_only", False)),
         ("--rgb-color", getattr(args, "rgb_color", None) is not None),
         ("--voice-only", getattr(args, "voice_only", False)),
+        ("--audio-only", getattr(args, "audio_only", False)),
         ("--app-only", getattr(args, "app_only", False)),
         ("--apps-only", getattr(args, "apps_only", False)),
         ("--launch-app", getattr(args, "launch_app", None) is not None),
@@ -144,6 +145,7 @@ def is_read_only_standard_command(args: argparse.Namespace) -> bool:
         args.touch_only,
         args.rgb_only,
         args.voice_only,
+        args.audio_only,
         args.app_only,
         args.apps_only,
         args.flow_status_only,
@@ -178,6 +180,7 @@ def run_self_test() -> None:
         rgb_only=False,
         rgb_color=None,
         voice_only=False,
+        audio_only=False,
         app_only=False,
         apps_only=False,
         launch_app=None,
@@ -299,6 +302,8 @@ async def run_standard_transport_command_once(args: argparse.Namespace) -> int:
             print(await transport.rgb(args.rgb_color))
         elif args.voice_only:
             print(await transport.voice())
+        elif args.audio_only:
+            print(await transport.audio())
         elif args.app_only:
             print(await transport.app_status())
         elif args.apps_only:
@@ -351,6 +356,7 @@ def is_transport_install(args: argparse.Namespace) -> bool:
         args.touch_only,
         args.rgb_only,
         args.voice_only,
+        args.audio_only,
         args.app_only,
         args.apps_only,
         bool(args.launch_app),
@@ -451,6 +457,7 @@ def main() -> int:
     parser.add_argument("--touch-only", action="store_true", help="Connect and read Runtime touch JSON")
     parser.add_argument("--rgb-only", action="store_true", help="Connect and read Runtime RGB LED JSON")
     parser.add_argument("--voice-only", action="store_true", help="Connect and read Runtime voice bridge JSON")
+    parser.add_argument("--audio-only", action="store_true", help="Connect and read Runtime audio playback JSON")
     parser.add_argument("--app-only", action="store_true", help="Connect and read Runtime app manager status JSON")
     parser.add_argument("--apps-only", action="store_true", help="Connect and read Runtime installed app list JSON")
     parser.add_argument("--launch-app", help="Launch an installed Runtime app by app id")

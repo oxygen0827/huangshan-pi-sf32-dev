@@ -141,7 +141,7 @@ public struct RuntimePackage: Sendable {
         if value.hasPrefix("/") || value.contains("..") || value.contains("//") {
             return false
         }
-        let pattern = #"^(manifest\.json|app\.info|main\.lua|files\.txt|README\.md|(?:assets|images|fonts|lib)/[A-Za-z0-9_./-]+\.(?:json|txt|png|jpg|jpeg|bin|ttf|otf|lua))$"#
+        let pattern = #"^(manifest\.json|app\.info|main\.lua|files\.txt|README\.md|(?:assets|images|fonts|lib)/[A-Za-z0-9_./-]+\.(?:json|txt|png|jpg|jpeg|bin|ttf|otf|lua|wav))$"#
         return value.range(of: pattern, options: .regularExpression) != nil
     }
 
@@ -268,10 +268,27 @@ public struct RuntimePackage: Sendable {
         "vibeboard.gpio.key1.level",
         "vibeboard.gpio.key2",
         "vibeboard.gpio.key2.level",
+        "audio.state",
+        "audio.playback",
+        "audio.stop",
+        "audio.progress",
+        "audio.format",
+        "audio.volume",
+        "audio.available",
+        "audio.playing",
+        "vibeboard.audio.state",
+        "vibeboard.audio.playback",
+        "vibeboard.audio.stop",
+        "vibeboard.audio.progress",
+        "vibeboard.audio.format",
+        "vibeboard.audio.volume",
+        "vibeboard.audio.available",
+        "vibeboard.audio.playing",
     ]
 
     private static let manifestDeclaredCapabilities = manifestCapabilities.union([
         "assets",
+        "audio",
         "ble",
         "bridge",
         "display",
@@ -281,6 +298,8 @@ public struct RuntimePackage: Sendable {
         "huangshan",
         "launcher",
         "lua-subset",
+        "lua",
+        "lua.full",
         "manifest",
         "power",
         "rgb",
@@ -316,7 +335,6 @@ public struct RuntimePackage: Sendable {
     private static let manifestRequirementMaxLength = 48
 
     private static let esp32NativeCapabilityNames: Set<String> = [
-        "audio",
         "board_ip",
         "bluetooth.pan",
         "camera",
@@ -375,11 +393,19 @@ public struct RuntimePackage: Sendable {
         "vibe_snake_autoplay",
         "vibe_2048_game",
         "vibe_weather_pet",
+        "vibe_audio_play",
+        "vibe_audio_stop",
+        "vibe_audio_volume",
+        "vibe_audio_label",
     ]
 
     private static let unsupportedLuaStatements: Set<String> = [
         "function", "for", "while", "repeat", "if", "elseif", "else", "end", "return",
         "require", "dofile", "load", "loadfile", "pcall", "xpcall"
+    ]
+
+    private static let forbiddenLuaCalls: Set<String> = [
+        "wifi_start", "http_get", "http_post", "i2s_start", "native_load"
     ]
 
     private static func validateLuaSubset(_ data: Data) throws {
@@ -389,18 +415,16 @@ public struct RuntimePackage: Sendable {
         guard !script.contains("\0") else {
             throw RuntimePackageError.invalidManifest("main.lua must not contain NUL bytes")
         }
-        for (offset, rawLine) in script.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let line = stripLuaComment(String(rawLine)).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-            let first = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? ""
-            if unsupportedLuaStatements.contains(first) {
-                throw RuntimePackageError.invalidManifest("main.lua line \(offset + 1) uses unsupported Lua statement \(first)")
-            }
-            guard let callName = luaCallName(line) else {
-                throw RuntimePackageError.invalidManifest("main.lua line \(offset + 1) is outside Runtime script subset")
-            }
-            guard supportedLuaCalls.contains(callName) else {
-                throw RuntimePackageError.invalidManifest("main.lua line \(offset + 1) calls unsupported Runtime Lua helper \(callName)")
+        guard data.count <= 64 * 1024 else {
+            throw RuntimePackageError.invalidManifest("main.lua must be at most 65536 bytes")
+        }
+        if script.range(of: #"\b(?:os|io|debug|package)\s*[\.:]"#, options: .regularExpression) != nil {
+            throw RuntimePackageError.invalidManifest("main.lua accesses a standard library disabled by Huangshan Runtime")
+        }
+        for name in forbiddenLuaCalls {
+            let escaped = NSRegularExpression.escapedPattern(for: name)
+            if script.range(of: "\\b\(escaped)\\s*\\(", options: .regularExpression) != nil {
+                throw RuntimePackageError.invalidManifest("main.lua calls forbidden Runtime Lua function \(name)")
             }
         }
     }

@@ -7,6 +7,7 @@ objs = []
 if GetDepend('PKG_USING_LITTLEVGL2RTT'):
     inc = ['']
     Import('SIFLI_SDK')
+    inc.append(os.path.join(cwd, '../../third_party/lua'))
     if GetDepend('BLUETOOTH') or GetDepend('BSP_BLE_SIBLES') or GetDepend('BT_FINSH'):
         inc.append(os.path.join(SIFLI_SDK, 'middleware/bluetooth/include'))
     if GetDepend('BT_FINSH'):

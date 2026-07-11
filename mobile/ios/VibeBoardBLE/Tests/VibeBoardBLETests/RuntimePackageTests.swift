@@ -358,51 +358,34 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(package.appId == "flow_app")
 }
 
-@Test func rejectsUnsupportedLuaSubsetBeforeInstall() throws {
-    do {
-        _ = try RuntimePackage(appId: "bad", files: [
-            "main.lua": Data("for i=1,3 do\n".utf8),
-            "app.info": Data("bad".utf8)
-        ])
-        #expect(Bool(false), "Expected unsupported Lua statement to throw")
-    } catch RuntimePackageError.invalidManifest(let message) {
-        #expect(message.contains("unsupported Lua statement"))
-    } catch {
-        #expect(Bool(false), "Expected invalidManifest, got \(error)")
-    }
-
-    do {
-        _ = try RuntimePackage(appId: "bad", files: [
-            "main.lua": Data("root = lv_scr_act()\n".utf8),
-            "app.info": Data("bad".utf8)
-        ])
-        #expect(Bool(false), "Expected assignment outside subset to throw")
-    } catch RuntimePackageError.invalidManifest(let message) {
-        #expect(message.contains("outside Runtime script subset"))
-    } catch {
-        #expect(Bool(false), "Expected invalidManifest, got \(error)")
-    }
-
-    do {
-        _ = try RuntimePackage(appId: "bad", files: [
-            "main.lua": Data("local a,b = lv_scr_act()\n".utf8),
-            "app.info": Data("bad".utf8)
-        ])
-        #expect(Bool(false), "Expected multi-variable local assignment to throw")
-    } catch RuntimePackageError.invalidManifest(let message) {
-        #expect(message.contains("outside Runtime script subset"))
-    } catch {
-        #expect(Bool(false), "Expected invalidManifest, got \(error)")
-    }
+@Test func acceptsFullLuaAndRejectsDisabledCapabilitiesBeforeInstall() throws {
+    let package = try RuntimePackage(appId: "full_lua", files: [
+        "main.lua": Data("local total=0\nfor i=1,3 do total=total+i end\nlocal m=require('lib.demo')\nprint(total,m.value)\n".utf8),
+        "lib/demo.lua": Data("return {value=42}\n".utf8),
+        "manifest.json": Data(#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"full_lua","entry":"main.lua","runtimeProfile":"huangshan-pi","capabilities":["lua.full"],"components":[]}"#.utf8)
+    ])
+    #expect(package.appId == "full_lua")
 
     do {
         _ = try RuntimePackage(appId: "bad", files: [
             "main.lua": Data("wifi_start()\n".utf8),
             "app.info": Data("bad".utf8)
         ])
-        #expect(Bool(false), "Expected unsupported helper to throw")
+        #expect(Bool(false), "Expected forbidden Runtime call to throw")
     } catch RuntimePackageError.invalidManifest(let message) {
-        #expect(message.contains("unsupported Runtime Lua helper"))
+        #expect(message.contains("forbidden Runtime Lua function"))
+    } catch {
+        #expect(Bool(false), "Expected invalidManifest, got \(error)")
+    }
+
+    do {
+        _ = try RuntimePackage(appId: "bad", files: [
+            "main.lua": Data("os.execute('bad')\n".utf8),
+            "app.info": Data("bad".utf8)
+        ])
+        #expect(Bool(false), "Expected disabled standard library to throw")
+    } catch RuntimePackageError.invalidManifest(let message) {
+        #expect(message.contains("standard library disabled"))
     } catch {
         #expect(Bool(false), "Expected invalidManifest, got \(error)")
     }
@@ -732,6 +715,20 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(snapshot.requestedMs == 800)
     #expect(snapshot.rate == 16000)
     #expect(snapshot.summary.contains("voice ready=0 recording=0"))
+}
+
+@Test func decodesRuntimeAudioSnapshot() throws {
+    let json = #"""
+    {"api":"vibeboard-huangshan-audio-playback/v1","available":1,"playing":1,"ready":0,"suspended":0,"seq":2,"rate":16000,"channels":1,"bits":16,"bytes":1024,"total":23040,"volume":8,"err":1,"path":"/sdcard/apps/audio_stage/assets/chime.wav"}
+    """#
+    let snapshot = try JSONDecoder().decode(VibeBoardAudioSnapshot.self, from: Data(json.utf8))
+
+    #expect(snapshot.api == "vibeboard-huangshan-audio-playback/v1")
+    #expect(snapshot.playing == 1)
+    #expect(snapshot.rate == 16000)
+    #expect(snapshot.channels == 1)
+    #expect(snapshot.volume == 8)
+    #expect(snapshot.summary.contains("bytes=1024/23040"))
 }
 
 

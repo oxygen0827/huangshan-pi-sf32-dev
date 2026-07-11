@@ -98,7 +98,7 @@ curl --noproxy '*' -sS http://127.0.0.1:8765/api/runtime/apps
 这个问题不是安装失败，而是 App 实现方式不对：
 
 - Lua App 只画了静态 UI，没有实现游戏状态、滑动、合并、随机生成 tile 等逻辑。
-- 黄山派 Runtime 的 Lua 子集是受控子集，适合声明式 UI 和调用 helper，不适合一开始就用大量 Lua 对象堆复杂游戏。
+- 即使完整 Lua 语言可用，LVGL 对象池和回调模型仍受控，不适合一开始就用大量对象硬拼复杂游戏。
 - 之前的 `VB_MAX_SCRIPT_OBJECTS` 是固定数组实现限制，不是架构上限；已经从 24 提升到 96，但这不是复杂游戏的最佳路径。
 
 ### 修复方式
@@ -222,6 +222,20 @@ LVGL 坐标系仍是矩形，但用户能看到、能稳定点击的区域更接
 ### 验证方式
 
 构建烧录后观察真机：主屏标题、卡片、状态行都应完整显示在圆角安全区内；安装超过一屏数量的 App 后可以上下滚动；打开 `game_2048`、`auto_snake` 等 App 后，K1 能返回桌面，核心内容不被边缘遮挡。
+
+## 2026-07-11：完整 Lua 语言与受控 host binding 分层
+
+Runtime 使用 Lua 5.5 执行完整语言语法，不再由主机校验器拒绝函数、循环、条件、
+表或 App 本地模块。安全边界放在 VM 和 host binding：384 KiB 内存、50 万指令、
+64 KiB 单脚本、App 目录文件沙箱，并且不开放 `os/io/debug/package` 和动态 C 模块。
+
+音频通过 `vibe_audio_*` 和 transport `playback*` 暴露高层 PCM WAV 播放；App 只能
+播放自身包内资源，不能直接访问 I2S、codec 或任意文件。`audio_stage` 同时覆盖了
+Lua 函数/表/循环和 WAV 播放，是这一边界的最小回归包。
+
+后续规则：完整 Lua VM 只描述语言能力，不代表完整标准库、完整 LVGL binding 或
+无限资源；Python、Swift、板端 helper 与 capability JSON 必须同步；新音频格式需先
+增加解析和坏文件测试；App 停止或 Lua 启动失败时必须停止音频 worker。
 
 ## 待继续沉淀的问题
 
