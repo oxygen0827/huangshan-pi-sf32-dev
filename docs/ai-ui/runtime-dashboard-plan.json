@@ -1,0 +1,54 @@
+{
+  "app": {
+    "id": "ai_dashboard",
+    "name": "AI Dashboard",
+    "description": "A bounded dashboard composed from Huangshan UI modules.",
+    "category": "Tools",
+    "icon": "activity",
+    "author": "Runtime App Plan Writer",
+    "requirements": ["Runtime", "Display", "Power API"],
+    "capabilities": ["display", "power", "touch"]
+  },
+  "ui": {
+    "theme": "system",
+    "modules": [
+      {
+        "type": "header",
+        "title": "System Pulse",
+        "subtitle": "Live board health"
+      },
+      {
+        "type": "metric",
+        "label": "Battery",
+        "value": "--",
+        "status": "ok",
+        "capability": "power.battery"
+      },
+      {
+        "type": "metric",
+        "label": "Touch",
+        "value": "--",
+        "status": "neutral",
+        "capability": "touch.count"
+      },
+      {
+        "type": "metric",
+        "label": "Panel",
+        "value": "--",
+        "status": "ok",
+        "capability": "display.size"
+      },
+      {
+        "type": "badge",
+        "text": "RUNTIME OK",
+        "status": "ok"
+      },
+      {
+        "type": "progress",
+        "label": "Capability readiness",
+        "value": 84,
+        "status": "ok"
+      }
+    ]
+  }
+}

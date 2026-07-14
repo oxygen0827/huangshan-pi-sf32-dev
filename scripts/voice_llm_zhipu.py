@@ -187,7 +187,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Transcribe a VibeBoard WAV and print a Zhipu GLM reply.")
+    parser = argparse.ArgumentParser(description="Transcribe a VibeBoard WAV and optionally print a Zhipu GLM reply.")
     parser.add_argument("--wav", type=Path)
     parser.add_argument("--transcribe-model", default="glm-asr-2512")
     parser.add_argument("--reply-model", default="glm-4.5-flash")
@@ -196,6 +196,7 @@ def main() -> int:
     parser.add_argument("--max-output-tokens", type=int, default=120)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--print-transcript", action="store_true")
+    parser.add_argument("--transcribe-only", action="store_true", help="Print the ASR transcript without calling a chat model")
     parser.add_argument("--metadata-json", type=Path, help="Write transcript/model/reply metadata to this JSON file")
     parser.add_argument("--self-test", action="store_true", help="Run offline helper checks without network or API key")
     args = parser.parse_args()
@@ -211,6 +212,19 @@ def main() -> int:
     transcript = transcribe(api_key, args.wav, args.transcribe_model, args.prompt)
     if args.print_transcript:
         print(f"transcript: {transcript}", file=sys.stderr)
+    if args.transcribe_only:
+        write_metadata(
+            args.metadata_json,
+            {
+                "provider": "zhipu",
+                "transcribe_model": args.transcribe_model,
+                "language": args.language,
+                "transcript": transcript,
+                "api_key_env": api_key_env,
+            },
+        )
+        print(transcript)
+        return 0
     reply = generate_reply(api_key, transcript, args.reply_model, args.max_output_tokens, args.temperature)
     write_metadata(
         args.metadata_json,

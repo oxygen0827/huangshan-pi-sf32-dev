@@ -2,10 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -f "$ROOT_DIR/.voice_terminal.env" ]]; then
+ENV_FILE="${VOICE_TERMINAL_ENV_FILE:-$ROOT_DIR/.voice_terminal.env}"
+if [[ "${VOICE_TERMINAL_SKIP_ENV:-0}" != "1" && -f "$ENV_FILE" ]]; then
     set -a
     # shellcheck disable=SC1091
-    . "$ROOT_DIR/.voice_terminal.env"
+    . "$ENV_FILE"
     set +a
 fi
 

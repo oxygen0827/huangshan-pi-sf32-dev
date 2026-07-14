@@ -18,6 +18,7 @@ from runtime_package import build_install_commands
 SERVICE_UUID = "454d5452-0100-0000-5453-4e4954524256"
 COMMAND_UUID = "454d5452-0200-0000-5453-4e4954524256"
 STATUS_UUID = "454d5452-0300-0000-5453-4e4954524256"
+VOICE_STREAM_UUID = "454d5452-0400-0000-5453-4e4954524256"
 DEFAULT_DEVICE_NAME = "VibeBoard"
 DEFAULT_BLE_CACHE_PATH = Path.home() / ".vibeboard" / "huangshan_ble.json"
 
@@ -36,7 +37,7 @@ SERIAL_APP_PAGE_LIMIT = 5
 # Keep BLE app pages below the status characteristic buffer/MTU comfort zone.
 BLE_APP_PAGE_LIMIT = 1
 RUNTIME_DATA_CHUNK_BYTES = 160
-VOICE_CHUNK_BYTES = RUNTIME_DATA_CHUNK_BYTES
+VOICE_CHUNK_BYTES = 200
 SERIAL_MSH_VOICE_CHUNK_BYTES = 30
 INSTALL_CHUNK_BYTES = 48
 SERIAL_JSON_CHUNK_BYTES = SERIAL_MSH_VOICE_CHUNK_BYTES
@@ -115,6 +116,7 @@ class SyncRuntimeTransport(Protocol):
     def audio_volume(self, volume: int) -> str: ...
     def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     def voice_start(self, duration_ms: int, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
+    def voice_stop(self) -> str: ...
     def voice_read(self, sequence: int, offset: int, max_bytes: int) -> "VoiceReadChunk": ...
     def voice_clear(self) -> str: ...
     def capture_voice(
@@ -172,6 +174,7 @@ class AsyncRuntimeTransport(Protocol):
     async def audio_volume(self, volume: int) -> str: ...
     async def voice_status(self, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
     async def voice_start(self, duration_ms: int, expected_seq: int | None = None) -> tuple[str, dict[str, str]]: ...
+    async def voice_stop(self) -> str: ...
     async def voice_read(self, sequence: int, offset: int, max_bytes: int) -> "VoiceReadChunk": ...
     async def voice_clear(self) -> str: ...
     async def capture_voice(
@@ -480,6 +483,10 @@ def normalize_voice_read_text(text: str) -> str:
     return latest_line(text, lambda value: value.startswith(("ok voice_data ", "err voice_read ")))
 
 
+def normalize_voice_stop_text(text: str) -> str:
+    return latest_line(text, lambda value: value.startswith(("ok voice_stop ", "err voice_stop ")))
+
+
 def normalize_flow_send_text(text: str) -> str:
     return latest_line(
         text,
@@ -520,6 +527,10 @@ def voice_read_matches(status: str, expected_seq: int, offset: int) -> bool:
     if value.startswith("err voice_read "):
         return f"offset={offset}" in value
     return False
+
+
+def voice_stop_matches(status: str) -> bool:
+    return normalize_voice_stop_text(status).startswith(("ok voice_stop ", "err voice_stop "))
 
 
 def voice_clear_matches(status: str) -> bool:
@@ -992,6 +1003,14 @@ class SerialTransport:
         )
         return parse_voice_read_chunk(text, sequence, offset)
 
+    def voice_stop(self) -> str:
+        return self.read_matching(
+            "vb_runtime_voice_stop",
+            voice_stop_matches,
+            timeout=max(4.0, self.options.final_wait + 3.0),
+            wait=max(self.options.command_wait, 0.15),
+        )
+
     def voice_clear(self) -> str:
         return self.read_matching(
             "vb_runtime_voice_clear",
@@ -1038,14 +1057,17 @@ class SerialTransport:
         pcm = bytearray()
         offset = 0
         read_size = max(16, min(chunk_bytes, VOICE_CHUNK_BYTES))
-        while offset < total:
-            chunk = self.voice_read(expected_seq, offset, min(read_size, total - offset))
-            if len(chunk.data) == 0:
-                transport_fail(f"voice_read returned empty chunk before complete: offset={offset} total={total}")
-            pcm.extend(chunk.data)
-            offset += len(chunk.data)
-            if progress:
-                progress(offset, total)
+        try:
+            while offset < total:
+                chunk = self.voice_read(expected_seq, offset, min(read_size, total - offset))
+                if len(chunk.data) == 0:
+                    transport_fail(f"voice_read returned empty chunk before complete: offset={offset} total={total}")
+                pcm.extend(chunk.data)
+                offset += len(chunk.data)
+                if progress:
+                    progress(offset, total)
+        finally:
+            self.voice_clear()
         if len(pcm) != total:
             transport_fail(f"voice capture length mismatch: expected {total}, got {len(pcm)}")
         return bytes(pcm), info
@@ -1211,6 +1233,7 @@ class SerialTransport:
 @dataclass
 class BLETransportOptions:
     name: str = DEFAULT_DEVICE_NAME
+    address: str | None = None
     cache: Path = DEFAULT_BLE_CACHE_PATH
     no_cache: bool = False
     scan_timeout: float = 12.0
@@ -1220,6 +1243,8 @@ class BLETransportOptions:
     response_wait: float = 0.12
     final_wait: float = 0.8
     disconnect_pause: float = 0.8
+    write_with_response: bool = True
+    subscribe_status_notifications: bool = True
     echo: bool = False
 
 
@@ -1229,6 +1254,8 @@ class BLETransport:
         self._client_context = None
         self._client = None
         self._connection_label = ""
+        self._status_notify_started = False
+        self._voice_notify_started = False
 
     async def __aenter__(self) -> "BLETransport":
         await self.connect()
@@ -1245,6 +1272,8 @@ class BLETransport:
             self._client_context = BleakClient(device, timeout=self.options.connect_timeout, services=[SERVICE_UUID])
             self._client = await self._client_context.__aenter__()
         except Exception as exc:
+            if self.options.address:
+                transport_fail(f"Pinned BLE peripheral {self.options.address} failed: {exc}")
             if self.options.no_cache or not isinstance(device, str):
                 raise
             if self.options.echo:
@@ -1258,17 +1287,27 @@ class BLETransport:
         if self.options.connect_settle > 0:
             await asyncio.sleep(self.options.connect_settle)
         await self._wait_for_services()
-        try:
-            await self._client.start_notify(STATUS_UUID, lambda _sender, _data: None)
-        except Exception:
-            pass
+        if self.options.subscribe_status_notifications:
+            try:
+                await self._client.start_notify(STATUS_UUID, lambda _sender, _data: None)
+                self._status_notify_started = True
+            except Exception:
+                pass
 
     async def close(self) -> None:
         if self._client is not None:
-            try:
-                await self._client.stop_notify(STATUS_UUID)
-            except Exception:
-                pass
+            if self._voice_notify_started:
+                try:
+                    await self._client.stop_notify(VOICE_STREAM_UUID)
+                except Exception:
+                    pass
+                self._voice_notify_started = False
+            if self._status_notify_started:
+                try:
+                    await self._client.stop_notify(STATUS_UUID)
+                except Exception:
+                    pass
+                self._status_notify_started = False
         if self.options.disconnect_pause > 0:
             await asyncio.sleep(self.options.disconnect_pause)
         if self._client_context is not None:
@@ -1287,6 +1326,8 @@ class BLETransport:
         return f"{getattr(device, 'address', '')} {getattr(device, 'name', '')}".strip()
 
     def _cached_device(self) -> str | None:
+        if self.options.address:
+            return self.options.address
         if self.options.no_cache:
             return None
         cache = load_ble_cache(self.options.cache)
@@ -1343,6 +1384,19 @@ class BLETransport:
         except Exception as exc:
             return f"read_status_failed: {exc}"
 
+    async def start_voice_stream(self, callback: Callable[[bytes], None]) -> None:
+        if self._voice_notify_started:
+            return
+        services = self._client.services
+        if not services.get_characteristic(VOICE_STREAM_UUID):
+            transport_fail("Board firmware has no BLE voice stream characteristic")
+
+        def notify(_sender, data: bytearray) -> None:
+            callback(bytes(data))
+
+        await self._client.start_notify(VOICE_STREAM_UUID, notify)
+        self._voice_notify_started = True
+
     async def read_status_retrying(self, response_wait: float) -> str:
         status = await self.read_status()
         if "Service Discovery has not been performed yet" not in status:
@@ -1377,7 +1431,11 @@ class BLETransport:
         while time.monotonic() < deadline:
             try:
                 await self._wait_for_services_retrying(wait)
-                await self._client.write_gatt_char(COMMAND_UUID, payload, response=True)
+                await self._client.write_gatt_char(
+                    COMMAND_UUID,
+                    payload,
+                    response=self.options.write_with_response,
+                )
                 await asyncio.sleep(wait)
                 status = await self.read_status_retrying(wait)
                 if status_is_transport_failure(status):
@@ -1554,7 +1612,7 @@ class BLETransport:
             "voice_status",
             lambda current: voice_status_matches(current, expected_seq),
             timeout=max(4.0, self.options.final_wait + 3.0),
-            response_wait=max(self.options.response_wait, 0.15),
+            response_wait=max(self.options.response_wait, 0.03),
         )
         status = normalize_voice_status_text(status)
         return status, parse_key_values(status)
@@ -1578,9 +1636,17 @@ class BLETransport:
             f"voice_read {offset} {max_bytes}",
             lambda current: voice_read_matches(current, sequence, offset),
             timeout=max(4.0, self.options.final_wait + 3.0),
-            response_wait=max(self.options.response_wait, 0.15),
+            response_wait=max(self.options.response_wait, 0.03),
         )
         return parse_voice_read_chunk(status, sequence, offset)
+
+    async def voice_stop(self) -> str:
+        return await self.read_matching(
+            "voice_stop",
+            voice_stop_matches,
+            timeout=max(4.0, self.options.final_wait + 3.0),
+            response_wait=max(self.options.response_wait, 0.15),
+        )
 
     async def voice_clear(self) -> str:
         return await self.read_matching(
@@ -1628,14 +1694,17 @@ class BLETransport:
         pcm = bytearray()
         offset = 0
         read_size = max(16, min(chunk_bytes, VOICE_CHUNK_BYTES))
-        while offset < total:
-            chunk = await self.voice_read(expected_seq, offset, min(read_size, total - offset))
-            if len(chunk.data) == 0:
-                transport_fail(f"voice_read returned empty chunk before complete: offset={offset} total={total}")
-            pcm.extend(chunk.data)
-            offset += len(chunk.data)
-            if progress:
-                progress(offset, total)
+        try:
+            while offset < total:
+                chunk = await self.voice_read(expected_seq, offset, min(read_size, total - offset))
+                if len(chunk.data) == 0:
+                    transport_fail(f"voice_read returned empty chunk before complete: offset={offset} total={total}")
+                pcm.extend(chunk.data)
+                offset += len(chunk.data)
+                if progress:
+                    progress(offset, total)
+        finally:
+            await self.voice_clear()
         if len(pcm) != total:
             transport_fail(f"voice capture length mismatch: expected {total}, got {len(pcm)}")
         return bytes(pcm), info
@@ -1786,7 +1855,7 @@ class BLETransport:
 
 def run_self_test() -> None:
     assert RUNTIME_DATA_CHUNK_BYTES == 160
-    assert VOICE_CHUNK_BYTES == RUNTIME_DATA_CHUNK_BYTES
+    assert VOICE_CHUNK_BYTES > RUNTIME_DATA_CHUNK_BYTES
     assert 0 < SERIAL_MSH_VOICE_CHUNK_BYTES <= VOICE_CHUNK_BYTES
     assert INSTALL_CHUNK_BYTES == 48
     assert SERIAL_JSON_CHUNK_BYTES == SERIAL_MSH_VOICE_CHUNK_BYTES
@@ -1934,6 +2003,9 @@ def run_self_test() -> None:
     assert voice_status_matches("[vb_runtime][voice] ok voice api=v1 built=1 ready=0 recording=0 seq=3 bytes=0 bits=\x00msh />msh />[vb_runtime][lua] timer Runtime Tick 2", 3)
     assert voice_start_matches("ok voice_start seq=4 ms=800 rc=0", 4, 800)
     assert voice_start_matches("[vb_runtime] ok voice api=v1 seq=4 requested_ms=800", 4, 800)
+    assert voice_stop_matches("ok voice_stop seq=4 bytes=16000 rc=0")
+    assert voice_stop_matches("noise\nerr voice_stop seq=4 bytes=0 rc=-22")
+    assert not voice_stop_matches("voice_stop")
     assert voice_clear_matches("[vb_runtime][voice] cleared")
     assert voice_clear_matches("ok voice_clear")
     assert not voice_clear_matches("vb_runtime_voice_clear")
@@ -1977,6 +2049,15 @@ def run_self_test() -> None:
         save_ble_cache(cache_path, {"name": "VibeBoard", "address": "current-address"})
         cached = BLETransport(BLETransportOptions(name="VibeBoard", cache=cache_path))._cached_device()
         assert cached == "current-address"
+        pinned = BLETransport(
+            BLETransportOptions(
+                name="VibeBoard",
+                address="pinned-address",
+                cache=cache_path,
+                no_cache=True,
+            )
+        )._cached_device()
+        assert pinned == "pinned-address"
     finally:
         try:
             cache_path.unlink()
@@ -2012,9 +2093,13 @@ def run_self_test() -> None:
                 parts = command.split()
                 self.voice_seq += 1
                 response = f"ok voice_start seq={self.voice_seq} bytes=0 ms={parts[1]} rc=0 built=1"
+            elif command == "vb_runtime_voice_stop":
+                response = f"ok voice_stop seq={self.voice_seq} bytes={self.voice_bytes} rc=0"
             elif command.startswith("vb_runtime_voice_read "):
                 parts = command.split()
                 response = f"ok voice_data seq={self.voice_seq} offset={parts[1]} bytes=3 hex=010203"
+            elif command == "vb_runtime_voice_clear":
+                response = "ok voice_clear"
             elif command.startswith("vb_runtime_apps_page "):
                 parts = command.split()
                 response = f'{{"api":"{APP_MANAGER_API}","active":"demo","state":"running","offset":{parts[1]},"limit":{parts[2]},"apps":[],"count":0,"included":0,"truncated":0}}'
@@ -2085,9 +2170,13 @@ def run_self_test() -> None:
                 parts = command.split()
                 self.voice_seq += 1
                 response = f"ok voice_start seq={self.voice_seq} bytes=0 ms={parts[1]} rc=0 built=1"
+            elif command == "voice_stop":
+                response = f"ok voice_stop seq={self.voice_seq} bytes={self.voice_bytes} rc=0"
             elif command.startswith("voice_read "):
                 parts = command.split()
                 response = f"ok voice_data seq={self.voice_seq} offset={parts[1]} bytes=3 hex=010203"
+            elif command == "voice_clear":
+                response = "ok voice_clear"
             elif command.startswith("apps_page "):
                 parts = command.split()
                 response = f'{{"api":"{APP_MANAGER_API}","active":"demo","state":"running","offset":{parts[1]},"limit":{parts[2]},"apps":[],"count":0,"included":0,"truncated":0}}'
@@ -2106,6 +2195,7 @@ def run_self_test() -> None:
     fake_serial.flow_clear()
     fake_serial.flow_send("pc.voice", 7, "ok")
     fake_serial.voice_status(4)
+    fake_serial.voice_stop()
     fake_serial.voice_read(4, 0, 3)
     fake_serial.app_page(0, 5)
     fake_serial.launch_app("demo")
@@ -2115,6 +2205,7 @@ def run_self_test() -> None:
         "vb_runtime_flow_clear",
         "vb_runtime_flow_send pc.voice 7 6f6b",
         "vb_runtime_voice_status",
+        "vb_runtime_voice_stop",
         "vb_runtime_voice_read 0 3",
         "vb_runtime_apps_page 0 5",
         "vb_runtime_launch demo",
@@ -2127,6 +2218,7 @@ def run_self_test() -> None:
         await fake_ble.flow_clear()
         await fake_ble.flow_send("pc.voice", 7, "ok")
         await fake_ble.voice_status(4)
+        await fake_ble.voice_stop()
         await fake_ble.voice_read(4, 0, 3)
         await fake_ble.app_page(0, 1)
         await fake_ble.launch_app("demo")
@@ -2136,6 +2228,7 @@ def run_self_test() -> None:
             "flow_clear",
             "flow_send pc.voice 7 6f6b",
             "voice_status",
+            "voice_stop",
             "voice_read 0 3",
             "apps_page 0 1",
             "launch demo",
@@ -2149,6 +2242,7 @@ def run_self_test() -> None:
     pcm, voice_info = fake_serial.capture_voice(600, chunk_bytes=3)
     assert pcm == b"\x01\x02\x03"
     assert voice_info["bytes"] == "3"
+    assert fake_serial.commands[-1] == "vb_runtime_voice_clear"
 
     class EmptyVoiceSerialTransport(FakeSerialTransport):
         def __init__(self) -> None:
@@ -2171,7 +2265,9 @@ def run_self_test() -> None:
             assert matcher(response)
             return response + "\n"
 
-    _assert_raises(RuntimeTransportError, EmptyVoiceSerialTransport().capture_voice, 600, chunk_bytes=3)
+    empty_serial = EmptyVoiceSerialTransport()
+    _assert_raises(RuntimeTransportError, empty_serial.capture_voice, 600, chunk_bytes=3)
+    assert empty_serial.commands[-1] == "vb_runtime_voice_clear"
 
     fake_serial = FakeSerialTransport()
     serial_staged = fake_serial.install_package("demo", {"main.lua": b"print(1)"}, commit=False)
@@ -2189,6 +2285,7 @@ def run_self_test() -> None:
         pcm, voice_info = await fake_ble.capture_voice(600, chunk_bytes=3)
         assert pcm == b"\x01\x02\x03"
         assert voice_info["bytes"] == "3"
+        assert fake_ble.commands[-1] == "voice_clear"
 
         class EmptyVoiceBLETransport(FakeBLETransport):
             def __init__(self) -> None:
@@ -2218,7 +2315,9 @@ def run_self_test() -> None:
                 assert matcher(response)
                 return response
 
-        await _assert_raises_async(RuntimeTransportError, EmptyVoiceBLETransport().capture_voice, 600, chunk_bytes=3)
+        empty_ble = EmptyVoiceBLETransport()
+        await _assert_raises_async(RuntimeTransportError, empty_ble.capture_voice, 600, chunk_bytes=3)
+        assert empty_ble.commands[-1] == "voice_clear"
 
         fake_ble = FakeBLETransport()
         ble_staged = await fake_ble.install_package("demo", {"main.lua": b"print(1)"}, commit=False)

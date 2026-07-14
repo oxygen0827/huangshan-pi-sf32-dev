@@ -30,7 +30,7 @@ gamepad 等高阶能力的决策。2026-07-11 已重新打开完整 Lua 语言 V
 | NES / emulator | 暂缓 | 显示接管、帧率/功耗、输入延迟、ROM 版权、音频输出、资源包体积 | `vibe_2048_game`、`vibe_snake_autoplay` 这类内置游戏 helper | 先完成 gamepad JSON、音频输出、资源许可策略、性能预算和退出恢复 |
 | Camera | 暂缓 | 当前硬件路径未验证、带宽/内存压力、隐私提示、照片存储和权限 | 手机/桌面拍照后通过 bridge 发送结果或文本描述 | 明确摄像头硬件、驱动、权限 UI、隐私说明、存储配额和失败降级 |
 | Gamepad | 暂缓 | BLE HID/配对复杂、输入归一化、焦点与系统手势冲突、测试矩阵大 | 触摸、KEY1/KEY2、`vb_runtime_touch`、`vb_runtime_gpio` | 先定义只读 gamepad JSON 和 helper，再接真实手柄发现/配对 |
-| 受控 audio playback | 已实现，待真机长稳 | 异常 WAV、播放切换、功放状态、实时性和功耗 | SiFli `audio_server`；包内 PCM WAV、异步 worker、停止、0-15 音量、状态 JSON | 真机听感/loopback、多轮播放、停止和坏文件回归 |
+| 受控 audio playback | 已实现，外接喇叭待验收 | 异常 WAV、播放切换、功放状态、实时性和功耗 | SiFli `audio_server`；包内 PCM WAV、异步 worker、停止、0-15 音量、状态 JSON；裸板只有 `SPK` 输出接口 | 连接匹配外接喇叭后做听感/loopback、多轮播放、停止和坏文件回归 |
 | 直接 I2S / codec API | 暂缓 | App 可绕过混音、功放和生命周期，容易卡住实时链路 | 使用受控 `vibe_audio_*` / transport playback API | 先建立设备路由、仲裁、权限和恢复模型 |
 
 ## 必须先完成的基础 gate

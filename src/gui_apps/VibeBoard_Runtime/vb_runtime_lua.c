@@ -245,12 +245,16 @@ static int vb_lua_create_object(lua_State *L)
     const char *function_name = lua_tostring(L, lua_upvalueindex(1));
     vb_lua_object_t *parent = (vb_lua_object_t *)luaL_checkudata(L, 1, VB_LUA_OBJECT_METATABLE);
     char object_name[VB_LUA_OBJECT_NAME_MAX];
+    char call[VB_LUA_LINE_MAX];
     char line[VB_LUA_LINE_MAX];
+    int result;
+    (void)parent;
     g_vb_lua.object_sequence++;
     rt_snprintf(object_name, sizeof(object_name), "__lua%lu",
                 (unsigned long)g_vb_lua.object_sequence);
-    rt_snprintf(line, sizeof(line), "local %s = %s(%s)",
-                object_name, function_name, parent->name);
+    result = vb_lua_build_call(L, function_name, call, sizeof(call), 1);
+    if (result != RT_EOK) return luaL_error(L, "%s arguments are invalid", function_name);
+    rt_snprintf(line, sizeof(line), "local %s = %s", object_name, call);
     line[sizeof(line) - 1] = '\0';
     if (vibeboard_lua_host_execute(line) != RT_EOK)
     {
@@ -424,7 +428,9 @@ static void vb_lua_register_function(lua_State *L, const char *name, lua_CFuncti
 static void vb_lua_register_host_api(lua_State *L)
 {
     static const char *const creators[] = {
-        "lv_obj_create", "lv_label_create", "lv_btn_create", "lv_img_create", RT_NULL
+        "lv_obj_create", "lv_label_create", "lv_btn_create", "lv_img_create",
+        "vibe_ui_header", "vibe_ui_metric", "vibe_ui_badge",
+        "vibe_ui_progress", "vibe_ui_button", RT_NULL
     };
     static const char *const calls[] = {
         "lv_obj_clean", "lv_obj_set_size", "lv_obj_set_width", "lv_obj_set_height",
@@ -437,8 +443,11 @@ static void vb_lua_register_host_api(lua_State *L)
         "vibe_touch_label", "vibe_gpio_label", "vibe_power_label",
         "vibe_display_label", "vibe_display_brightness", "vibe_voice_start",
         "vibe_voice_clear", "vibe_voice_label", "vibe_flow_label", "vibe_rgb",
-        "vibe_audio_play", "vibe_audio_stop", "vibe_audio_volume", "vibe_audio_label",
-        "vibe_snake_autoplay", "vibe_2048_game", "vibe_weather_pet", RT_NULL
+        "vibe_peer_label", "vibe_peer_send", "vibe_peer_pager",
+        "vibe_audio_play", "vibe_audio_tone", "vibe_audio_stop", "vibe_audio_volume",
+        "vibe_audio_label", "vibe_audio_tone_button", "vibe_audio_stop_button",
+        "vibe_snake_autoplay", "vibe_2048_game", "vibe_breakout_game", "vibe_thunder_wing", "vibe_imu_lab",
+        "vibe_pomodoro", "vibe_weather_pet", RT_NULL
     };
     static const char *const align_constants[] = {
         "LV_ALIGN_CENTER", "LV_ALIGN_TOP_LEFT", "LV_ALIGN_TOP_MID",

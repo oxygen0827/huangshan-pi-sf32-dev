@@ -1,6 +1,6 @@
 # 对标 vibeboard-runtime-gpl 的黄山派 Runtime 进度
 
-更新时间：2026-07-11
+更新时间：2026-07-12
 
 本文对标本机目录 `/Users/hushaohong/vibe-coding/vibeboard-runtime-gpl`，整理黄山派 Runtime 目前已经实现的功能、待开发/待优化能力，以及相对 ESP32-S3 GPL Runtime 的取舍。
 
@@ -49,6 +49,7 @@
 | Flow 信息流 | `flow_clear/send/status` 已稳定，最近一条可持久化，App 可只读展示手机/电脑注入的文本 | GPL 版更多依赖板载 HTTP/网络和桌面 bridge |
 | Voice 桥 | 串口/BLE 可录 16 kHz PCM、WAV 落盘、文本回复回写，App 可受控触发录音/清空 | GPL 版有 Voice AI bridge、I2S/audio 生态更完整 |
 | Lua 5.5 VM | 已迁移完整语言 VM；开放安全标准库和 App 本地模块，限制 384 KiB 内存、50 万指令、64 KiB 脚本 | GPL 版 Lua/LVGL binding 面更广，但黄山派增加了明确资源和文件边界 |
+| AI UI 生成 | `huangshan-ui/v1` 共享 C 组件库供 UI Lab 和 Runtime 共用；Plan Writer 可按 `header/metric/badge/progress/button` 模块自动布局、绑定标量能力并执行安全区/对象配额校验 | GPL 版同步加入面向 320x240 的 `vibeboard-ui-plan/v1`，保留完整 LVGL 作为高级路径 |
 | Audio playback | 已接 SiFli `audio_server`，支持包内 PCM WAV、停止、音量、状态 JSON，以及 serial/BLE/iOS API | GPL 版音频格式和 I2S 生态更广 |
 | 示例 App | 已有 `clock_test`、`status_test`、`sensor_stage`、`power_stage`、`display_stage`、`touch_stage`、`gpio_keys_stage`、`rgb_test`、`flow_stage`、`voice_stage`、`weather_pet`、`game_2048`、`auto_snake` 等 | GPL 版已有大量用户向 App：2048、weather、voice_ai、NES、photos、plane、matrix 等 |
 | iOS | `VibeBoardBLE` Swift package、DemoModel、RuntimePackage 校验、BLE 安装/状态读取、长 JSON fallback 已接入并测试通过 | GPL 版主要是桌面/HTTP 工具，黄山派 iOS 方向更靠前 |
@@ -62,12 +63,12 @@
 | App Manager 产品化 | 板端已取消工程态 App Manager，桌面卡片可滚动启动；Web/iOS 管理器已能启动/停止/删除，但错误解释、日志和安装态仍需打磨 | 增强桌面卡片图标/空状态，完善 Web/iOS 的加载中、缓存、失败详情和日志下载 |
 | App 生态 | 当前多为 stage/regression app，用户向应用不足 | 先打磨天气、语音助手、传感器仪表、电源面板、RGB/触摸工具、小游戏 |
 | Lua/LVGL 能力 | 完整 Lua 语言已具备，LVGL/硬件 binding 仍受控 | 增加高价值 binding、事件模型、对象配额和长稳测试 |
-| UI 组件体系 | `Huangshan_UI_Lab` 已起步，但尚未成为 Runtime App 标准组件库 | 固化列表、卡片、状态条、按钮、图标、错误态、加载态等组件规范 |
+| UI 组件体系 | `huangshan-ui/v1` 已成为 built-in/Runtime 共用基础层，首版覆盖 header、metric、badge、progress、button | 继续补列表行、空状态、加载态和图标，并用真机照片校验中文与长文本 |
 | 资源/图片能力 | `weather_pet` 已带资源，但图片/字体/动画能力还没形成完整 App API | 明确图片格式、尺寸、缓存策略、字体策略和打包约束 |
 | 手机 App 闭环 | iOS package 与 Demo 已通，仍偏验证工具 | 做成可给开发者/用户用的安装、管理、日志、升级、故障提示界面 |
 | 桌面管理工具 | 本地 Web bridge 已可用，但体验还不如 GPL 版 Device Web UI | 做传输选择、设备连接状态、App 市场、安装进度、日志下载、错误解释 |
 | 语音产品化 | 已有录音/回写和 WAV 播放；App 仍不能直接读 PCM | 补长录音、权限提示、端侧唤醒或按钮流程 |
-| 音频输出 | 高层 WAV API 已完成，真实扬声器听感和长稳尚未完成 | 做真机 loopback/播放 smoke、坏文件、多轮停止/切换和功耗测试 |
+| 音频输出 | 高层 WAV API 已完成；板上有 AW8155 和 `SPK` 接口但无扬声器单元 | 连接匹配外接喇叭后做 loopback/播放 smoke、坏文件、多轮停止/切换和功耗测试 |
 | Native module / NES | 尚未迁移 GPL 版 NES/native ABI/gamepad host | 等 Runtime API 稳定后评估 NES/native ABI、内存和显示接管风险 |
 | Gamepad | 当前只有触摸/GPIO/按键状态，没有 BLE/Xbox/手柄输入层 | 先定义受控 gamepad JSON + App helper，再考虑真实手柄发现/配对 |
 | Camera | 黄山派当前没有接入摄像头 Runtime | 仅在硬件确实需要时新增，避免照搬 ESP32 GC2145 路线 |
@@ -102,6 +103,6 @@
 
 1. 把板端首页卡片和 Web/iOS App Manager 做到可日常使用：图标、空状态、错误详情、安装进度、恢复提示。
 2. 打磨 3-5 个 C 端可展示 App：天气宠物、语音助手、传感器仪表、电源面板、小游戏。
-3. 完善手机/桌面 bridge：设备连接、App 安装、日志、故障解释、云数据注入。
-4. 增加包签名、权限模型、BLE 配对安全和版本兼容策略。
+3. 用 `huangshan-ui/v1` 把传感器、电源和语音 stage 页面迁成统一的用户向界面。
+4. 完善手机/桌面 bridge，并增加包签名、权限模型、BLE 配对安全和版本兼容策略。
 5. 做 Lua/audio 长时稳定性和掉电恢复矩阵，再评估 NES/native/gamepad 等高阶能力。

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "pager",
+  "name": "Pager",
+  "description": "Two-board Bluetooth pager with push-to-talk transcription, delivery status, and message history.",
+  "category": "Communication",
+  "icon": "message",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:pager",
+  "requirements": ["Two Huangshan Pi boards", "Peer Link v1", "Zhipu GLM-ASR bridge"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "ble", "peer", "peer.status", "peer.messages", "peer.send", "peer.pair", "voice", "voice.start", "voice.stop", "flow"],
+  "components": []
+}

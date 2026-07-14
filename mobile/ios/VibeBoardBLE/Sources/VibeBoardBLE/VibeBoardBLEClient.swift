@@ -20,6 +20,7 @@ public struct VibeBoardBLEUUIDs {
 public enum VibeBoardRuntimeDefaults {
     public static let bleAppPageLimit = 1
     public static let dataChunkBytes: UInt32 = 160
+    public static let voiceChunkBytes: UInt32 = 200
     public static let installChunkBytes = 48
     public static let maxInstallChunkBytes = 240
 }
@@ -1003,6 +1004,13 @@ enum VibeBoardBLEStatusMatcher {
         }
         return line.hasPrefix("ok voice_clear") || line.hasPrefix("err voice_clear") || line == "cleared"
     }
+
+    static func voiceStopMatches(_ status: String) -> Bool {
+        let line = vibeBoardLatestStatusLine(status) { value in
+            value.hasPrefix("ok voice_stop ") || value.hasPrefix("err voice_stop ")
+        }
+        return line.hasPrefix("ok voice_stop ") || line.hasPrefix("err voice_stop ")
+    }
 }
 
 
@@ -1044,6 +1052,7 @@ public protocol VibeBoardRuntimeTransport: AnyObject {
 
     func voiceStatus(expectedSequence: UInt32?) async throws -> VibeBoardVoiceStatus
     func voiceStart(durationMs: UInt32) async throws -> VibeBoardVoiceStartAck
+    func voiceStop() async throws -> String
     func voiceRead(offset: UInt32, maxBytes: UInt32, expectedSequence: UInt32) async throws -> VibeBoardVoiceChunk
     func voiceClear() async throws -> String
     func captureVoice(durationMs: UInt32, chunkBytes: UInt32, pollInterval: TimeInterval, readyTimeout: TimeInterval) async throws -> (status: VibeBoardVoiceStatus, pcm: Data)
@@ -1075,7 +1084,7 @@ public extension VibeBoardRuntimeTransport {
 
     func captureVoice(
         durationMs: UInt32 = 1500,
-        chunkBytes: UInt32 = VibeBoardRuntimeDefaults.dataChunkBytes,
+        chunkBytes: UInt32 = VibeBoardRuntimeDefaults.voiceChunkBytes,
         pollInterval: TimeInterval = 0.25,
         readyTimeout: TimeInterval = 8.0
     ) async throws -> (status: VibeBoardVoiceStatus, pcm: Data) {
@@ -1508,8 +1517,8 @@ public final class VibeBoardBLEClient: NSObject {
         return ack
     }
 
-    public func voiceRead(offset: UInt32, maxBytes: UInt32 = VibeBoardRuntimeDefaults.dataChunkBytes, expectedSequence: UInt32) async throws -> VibeBoardVoiceChunk {
-        let boundedBytes = min(max(maxBytes, 1), VibeBoardRuntimeDefaults.dataChunkBytes)
+    public func voiceRead(offset: UInt32, maxBytes: UInt32 = VibeBoardRuntimeDefaults.voiceChunkBytes, expectedSequence: UInt32) async throws -> VibeBoardVoiceChunk {
+        let boundedBytes = min(max(maxBytes, 1), VibeBoardRuntimeDefaults.voiceChunkBytes)
         try await send("voice_read \(offset) \(boundedBytes)")
         let status = try await readStatusMatching {
             VibeBoardBLEStatusMatcher.voiceReadMatches($0, expectedSequence: expectedSequence, offset: offset)
@@ -1520,6 +1529,18 @@ public final class VibeBoardBLEClient: NSObject {
             throw VibeBoardBLEError.commandFailed(status)
         }
         return try VibeBoardVoiceChunk(statusText: status)
+    }
+
+    public func voiceStop() async throws -> String {
+        try await send("voice_stop")
+        let status = try await readStatusMatching { VibeBoardBLEStatusMatcher.voiceStopMatches($0) }
+        trace("voice stop \(status)")
+        if vibeBoardStatusLineIsError(status, matching: { value in
+            value.hasPrefix("ok voice_stop ") || value.hasPrefix("err voice_stop ")
+        }) {
+            throw VibeBoardBLEError.commandFailed(status)
+        }
+        return status
     }
 
     public func voiceClear() async throws -> String {
@@ -1536,7 +1557,7 @@ public final class VibeBoardBLEClient: NSObject {
 
     public func captureVoice(
         durationMs: UInt32 = 1500,
-        chunkBytes: UInt32 = VibeBoardRuntimeDefaults.dataChunkBytes,
+        chunkBytes: UInt32 = VibeBoardRuntimeDefaults.voiceChunkBytes,
         pollInterval: TimeInterval = 0.25,
         readyTimeout: TimeInterval = 8.0
     ) async throws -> (status: VibeBoardVoiceStatus, pcm: Data) {
@@ -1564,7 +1585,7 @@ public final class VibeBoardBLEClient: NSObject {
             throw VibeBoardBLEError.commandFailed(lastStatus.rawStatus)
         }
 
-        let boundedChunkBytes = min(max(chunkBytes, 16), VibeBoardRuntimeDefaults.dataChunkBytes)
+        let boundedChunkBytes = min(max(chunkBytes, 16), VibeBoardRuntimeDefaults.voiceChunkBytes)
         var pcm = Data()
         pcm.reserveCapacity(Int(lastStatus.bytes))
         var offset: UInt32 = 0

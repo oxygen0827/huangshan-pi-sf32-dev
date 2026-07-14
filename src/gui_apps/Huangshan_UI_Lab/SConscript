@@ -1,15 +1,16 @@
 from building import *
+import os
 
 cwd = GetCurrentDir()
 objs = []
 
 if GetDepend('PKG_USING_LITTLEVGL2RTT'):
-    objs = Glob('*.c')
+    objs = Glob('main.c')
     group = DefineGroup(
         'App_Huangshan_UI_Lab',
         objs,
         depend=['PKG_USING_LITTLEVGL2RTT'],
-        CPPPATH=[cwd],
+        CPPPATH=[cwd, os.path.join(cwd, '../../huangshan_ui')],
         LOCAL_CCFLAGS=' -include compat_sdk25.h'
     )
 

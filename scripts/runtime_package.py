@@ -114,6 +114,18 @@ MANIFEST_CAPABILITIES = {
     "vibeboard.flow.retained",
     "vibeboard.flow.count",
     "vibeboard.flow.capacity",
+    "peer.status",
+    "peer.messages",
+    "peer.send",
+    "peer.pair",
+    "peer.state",
+    "peer.latest",
+    "peer.unread",
+    "peer.pending",
+    "vibeboard.peer.status",
+    "vibeboard.peer.messages",
+    "vibeboard.peer.send",
+    "vibeboard.peer.pair",
     "voice.ready",
     "voice.recording",
     "voice.state",
@@ -127,6 +139,7 @@ MANIFEST_CAPABILITIES = {
     "voice.available",
     "voice.start",
     "voice.record",
+    "voice.stop",
     "voice.clear",
     "vibeboard.voice.ready",
     "vibeboard.voice.recording",
@@ -141,6 +154,7 @@ MANIFEST_CAPABILITIES = {
     "vibeboard.voice.available",
     "vibeboard.voice.start",
     "vibeboard.voice.record",
+    "vibeboard.voice.stop",
     "vibeboard.voice.clear",
     "sensor.light",
     "sensor.mag",
@@ -208,6 +222,7 @@ MANIFEST_DECLARED_CAPABILITIES = MANIFEST_CAPABILITIES | {
     "lua.full",
     "manifest",
     "power",
+    "peer",
     "rgb",
     "screen",
     "sensor",
@@ -282,6 +297,11 @@ LUA_SUPPORTED_CALLS = {
     "vibe_label",
     "vibe_button",
     "vibe_image",
+    "vibe_ui_header",
+    "vibe_ui_metric",
+    "vibe_ui_badge",
+    "vibe_ui_progress",
+    "vibe_ui_button",
     "vibe_read_file",
     "vibe_timer_label",
     "vibe_sensor_label",
@@ -291,17 +311,28 @@ LUA_SUPPORTED_CALLS = {
     "vibe_display_label",
     "vibe_display_brightness",
     "vibe_voice_start",
+    "vibe_voice_stop",
     "vibe_voice_clear",
     "vibe_voice_label",
     "vibe_flow_label",
+    "vibe_peer_label",
+    "vibe_peer_send",
+    "vibe_peer_pager",
     "vibe_rgb",
     "vibe_snake_autoplay",
     "vibe_2048_game",
+    "vibe_breakout_game",
+    "vibe_thunder_wing",
+    "vibe_imu_lab",
+    "vibe_pomodoro",
     "vibe_weather_pet",
     "vibe_audio_play",
+    "vibe_audio_tone",
     "vibe_audio_stop",
     "vibe_audio_volume",
     "vibe_audio_label",
+    "vibe_audio_tone_button",
+    "vibe_audio_stop_button",
 }
 
 LUA_FORBIDDEN_CALLS = {
@@ -761,11 +792,12 @@ def run_self_test() -> int:
         lambda: validate_package(
             "test_app",
             {
-                "main.lua": b"local l = lv_label_create(lv_scr_act())\nvibe_voice_start('600')\nvibe_voice_clear()\nvibe_voice_label(l, 'ready')\n",
+                "main.lua": b"local l = lv_label_create(lv_scr_act())\nvibe_voice_start('600')\nvibe_voice_stop()\nvibe_voice_clear()\nvibe_voice_label(l, 'ready')\n",
                 "manifest.json": manifest_bytes(
                     components=[
                         {"type": "status", "capability": "voice.ready", "label": "Voice"},
                         {"type": "action", "capability": "voice.start", "label": "Record", "value": "600"},
+                        {"type": "action", "capability": "voice.stop", "label": "Finish"},
                         {"type": "action", "capability": "voice.clear", "label": "Clear"},
                     ]
                 ),
@@ -780,6 +812,20 @@ def run_self_test() -> int:
                 "main.lua": b"local l = lv_label_create(lv_scr_act())\nvibe_flow_label(l, 'latest')\n",
                 "manifest.json": manifest_bytes(
                     components=[{"type": "status", "capability": "flow.latest", "label": "Flow"}]
+                ),
+            },
+        ),
+    )
+    expect_ok(
+        "valid peer pager package",
+        lambda: validate_package(
+            "test_app",
+            {
+                "main.lua": b"vibe_peer_pager()\n",
+                "manifest.json": manifest_bytes(
+                    runtimeProfile="huangshan-pi",
+                    capabilities=["peer", "peer.status", "peer.messages", "peer.send", "peer.pair", "voice", "voice.start", "voice.stop", "flow"],
+                    components=[],
                 ),
             },
         ),

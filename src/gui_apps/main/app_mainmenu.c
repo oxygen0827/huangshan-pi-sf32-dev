@@ -62,6 +62,10 @@ LV_IMG_DECLARE(img_world_clock);
 #define HUANGSHAN_HOME_SAFE_RIGHT 28
 #define HUANGSHAN_HOME_SAFE_TOP 34
 #define HUANGSHAN_HOME_SAFE_BOTTOM 34
+#define HUANGSHAN_HOME_DETAIL_EDGE_WIDTH 48
+#define HUANGSHAN_HOME_DETAIL_BACK_DX 50
+#define HUANGSHAN_HOME_DETAIL_BACK_MAX_DY 120
+#define HUANGSHAN_HOME_REFRESH_MS 1500
 #define HUANGSHAN_RUNTIME_APP_ROOT "/sdcard/apps"
 #define HUANGSHAN_RUNTIME_ACTIVE_APP_FILE HUANGSHAN_RUNTIME_APP_ROOT "/.active"
 
@@ -1587,9 +1591,13 @@ static lv_obj_t *huangshan_home_root;
 static lv_obj_t *huangshan_home_status;
 static lv_obj_t *huangshan_home_list;
 static lv_obj_t *huangshan_home_detail;
+static lv_timer_t *huangshan_home_refresh_timer;
 static huangshan_home_card_t huangshan_home_cards[HUANGSHAN_HOME_MAX_APPS];
 static int huangshan_home_card_count;
 static const huangshan_home_card_t *huangshan_home_pending_delete;
+static lv_point_t huangshan_home_detail_press;
+static uint8_t huangshan_home_detail_tracking;
+static uint8_t huangshan_home_refresh_on_resume;
 
 static void huangshan_home_ui_init(void);
 
@@ -1938,6 +1946,24 @@ static int home_load_installed_runtime_apps(void)
     return RT_EOK;
 }
 
+static int home_count_installed_runtime_apps(void)
+{
+    DIR *dir;
+    struct dirent *entry;
+    int count = 0;
+    dir = opendir(HUANGSHAN_RUNTIME_APP_ROOT);
+    if (!dir) return -1;
+    while ((entry = readdir(dir)) != RT_NULL)
+    {
+        char path[180];
+        if (entry->d_name[0] == '.' || !home_is_safe_app_id(entry->d_name)) continue;
+        home_build_app_path(path, sizeof(path), entry->d_name, "main.lua");
+        if (home_file_exists(path)) count++;
+    }
+    closedir(dir);
+    return count;
+}
+
 static void home_close_detail(void)
 {
     if (huangshan_home_detail)
@@ -1946,6 +1972,7 @@ static void home_close_detail(void)
         huangshan_home_detail = RT_NULL;
     }
     huangshan_home_pending_delete = RT_NULL;
+    huangshan_home_detail_tracking = 0;
 }
 
 static void home_rebuild_ui(void)
@@ -1958,6 +1985,20 @@ static void home_rebuild_ui(void)
         huangshan_home_list = NULL;
     }
     huangshan_home_ui_init();
+}
+
+static void home_refresh_timer_cb(lv_timer_t *timer)
+{
+    int installed;
+    (void)timer;
+    if (!huangshan_home_root || huangshan_home_detail) return;
+    installed = home_count_installed_runtime_apps();
+    if (installed >= 0 && installed != huangshan_home_card_count)
+    {
+        rt_kprintf("[Huangshan_Home] app count changed %d -> %d\n",
+                   huangshan_home_card_count, installed);
+        home_rebuild_ui();
+    }
 }
 
 static void home_start_runtime_card(const huangshan_home_card_t *card)
@@ -1976,11 +2017,43 @@ static void home_start_runtime_card(const huangshan_home_card_t *card)
     gui_app_run("vb_runtime");
 }
 
-static void home_detail_back_event_cb(lv_event_t *event)
+static void home_detail_edge_event_cb(lv_event_t *event)
 {
-    if (LV_EVENT_CLICKED != lv_event_get_code(event)) return;
-    home_close_detail();
-    home_set_status("details closed", lv_color_hex(0xa8b3bd));
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t *indev;
+    lv_point_t point = {0, 0};
+    lv_coord_t dx;
+    lv_coord_t dy;
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING &&
+        code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST &&
+        code != LV_EVENT_GESTURE)
+    {
+        return;
+    }
+    indev = lv_event_get_indev(event);
+    if (!indev) indev = lv_indev_get_act();
+    if (indev) lv_indev_get_point(indev, &point);
+    if (code == LV_EVENT_PRESSED)
+    {
+        huangshan_home_detail_press = point;
+        huangshan_home_detail_tracking = 1;
+        return;
+    }
+    if (!huangshan_home_detail_tracking) return;
+    dx = point.x - huangshan_home_detail_press.x;
+    dy = point.y - huangshan_home_detail_press.y;
+    if (dx >= HUANGSHAN_HOME_DETAIL_BACK_DX &&
+        LV_ABS(dy) <= HUANGSHAN_HOME_DETAIL_BACK_MAX_DY)
+    {
+        rt_kprintf("[Huangshan_Home] details edge back dx=%d dy=%d\n", (int)dx, (int)dy);
+        home_close_detail();
+        home_set_status("details closed", lv_color_hex(0xa8b3bd));
+        return;
+    }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST || code == LV_EVENT_GESTURE)
+    {
+        huangshan_home_detail_tracking = 0;
+    }
 }
 
 static void home_detail_launch_event_cb(lv_event_t *event)
@@ -2036,44 +2109,35 @@ static void home_show_detail(const huangshan_home_card_t *card)
     lv_obj_clear_flag(huangshan_home_detail, LV_OBJ_FLAG_SCROLLABLE);
     home_set_obj_bg(huangshan_home_detail, 0x07111f);
 
-    lv_obj_t *back = lv_btn_create(huangshan_home_detail);
-    lv_obj_set_size(back, 72, 32);
-    lv_obj_align(back, LV_ALIGN_TOP_LEFT, safe_x, safe_y);
-    lv_obj_set_style_radius(back, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_event_cb(back, home_detail_back_event_cb, LV_EVENT_CLICKED, RT_NULL);
-    lv_obj_t *back_label = home_create_label(back, "Back", FONT_SMALL, LV_COLOR_WHITE);
-    lv_obj_center(back_label);
-
     lv_obj_t *title = home_create_label(huangshan_home_detail, card->title, FONT_BIGL, LV_COLOR_WHITE);
     lv_obj_set_width(title, safe_w);
     lv_label_set_long_mode(title, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, safe_y + 50);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, safe_y + 18);
 
     rt_snprintf(line, sizeof(line), "%s  by %s", card->category, card->author);
     lv_obj_t *meta = home_create_label(huangshan_home_detail, line, FONT_SMALL, lv_color_hex(0x93c5fd));
     lv_obj_set_width(meta, safe_w);
     lv_label_set_long_mode(meta, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(meta, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, safe_y + 92);
+    lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, safe_y + 60);
 
     lv_obj_t *desc = home_create_label(huangshan_home_detail, card->subtitle, FONT_SMALL, lv_color_hex(0xd7e5f5));
     lv_obj_set_width(desc, safe_w);
     lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(desc, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(desc, LV_ALIGN_TOP_MID, 0, safe_y + 122);
+    lv_obj_align(desc, LV_ALIGN_TOP_MID, 0, safe_y + 94);
 
     rt_snprintf(line, sizeof(line), "Needs: %s", card->requirements);
     lv_obj_t *req = home_create_label(huangshan_home_detail, line, FONT_SMALL, lv_color_hex(0xa7f3d0));
     lv_obj_set_width(req, safe_w);
     lv_label_set_long_mode(req, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(req, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(req, LV_ALIGN_TOP_MID, 0, safe_y + 182);
+    lv_obj_align(req, LV_ALIGN_TOP_MID, 0, safe_y + 158);
 
     lv_obj_t *launch = lv_btn_create(huangshan_home_detail);
     lv_obj_set_size(launch, 142, 40);
-    lv_obj_align(launch, LV_ALIGN_BOTTOM_LEFT, safe_x, -HUANGSHAN_HOME_SAFE_BOTTOM);
+    lv_obj_align(launch, LV_ALIGN_BOTTOM_LEFT, safe_x + 32, -HUANGSHAN_HOME_SAFE_BOTTOM);
     lv_obj_set_style_radius(launch, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(launch, lv_color_hex(0x2dd4bf), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_event_cb(launch, home_detail_launch_event_cb, LV_EVENT_CLICKED, (void *)card);
@@ -2089,24 +2153,49 @@ static void home_show_detail(const huangshan_home_card_t *card)
     lv_obj_t *del_label = home_create_label(del, "Delete", FONT_SMALL, LV_COLOR_WHITE);
     lv_obj_center(del_label);
 
+    lv_obj_t *edge = lv_obj_create(huangshan_home_detail);
+    lv_obj_remove_style_all(edge);
+    lv_obj_set_size(edge, HUANGSHAN_HOME_DETAIL_EDGE_WIDTH, LV_VER_RES_MAX);
+    lv_obj_align(edge, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_flag(edge, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_clear_flag(edge, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN |
+                      LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_set_style_bg_opa(edge, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_ext_click_area(edge, 8);
+    lv_obj_add_event_cb(edge, home_detail_edge_event_cb, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(edge, home_detail_edge_event_cb, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(edge, home_detail_edge_event_cb, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(edge, home_detail_edge_event_cb, LV_EVENT_PRESS_LOST, RT_NULL);
+    lv_obj_add_event_cb(edge, home_detail_edge_event_cb, LV_EVENT_GESTURE, RT_NULL);
+
     home_set_status("details", lv_color_hex(0xa8b3bd));
 }
 
 static void home_card_event_cb(lv_event_t *event)
 {
     const huangshan_home_card_t *card = (const huangshan_home_card_t *)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
 
-    if ((LV_EVENT_CLICKED != lv_event_get_code(event) &&
-         LV_EVENT_SHORT_CLICKED != lv_event_get_code(event)) || !card || !card->target[0])
+    if ((code != LV_EVENT_SHORT_CLICKED && code != LV_EVENT_LONG_PRESSED) ||
+        !card || !card->target[0])
     {
         return;
     }
 
     if (card->kind == HUANGSHAN_HOME_CARD_RUNTIME_APP)
     {
-        home_show_detail(card);
+        if (code == LV_EVENT_LONG_PRESSED)
+        {
+            home_show_detail(card);
+        }
+        else
+        {
+            home_start_runtime_card(card);
+        }
         return;
     }
+
+    if (code != LV_EVENT_SHORT_CLICKED) return;
 
     home_set_status("opening app", lv_color_hex(0xa7f3d0));
     rt_kprintf("[Huangshan_Home] run %s\n", card->target);
@@ -2123,7 +2212,8 @@ static lv_obj_t *home_create_card(lv_obj_t *parent, const huangshan_home_card_t 
     lv_obj_set_style_radius(obj, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(obj, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(obj, lv_color_hex(0x334155), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_event_cb(obj, home_card_event_cb, LV_EVENT_CLICKED, (void *)card);
+    lv_obj_add_event_cb(obj, home_card_event_cb, LV_EVENT_SHORT_CLICKED, (void *)card);
+    lv_obj_add_event_cb(obj, home_card_event_cb, LV_EVENT_LONG_PRESSED, (void *)card);
 
     lv_obj_t *title = home_create_label(obj, card->title, FONT_SMALL, LV_COLOR_WHITE);
     lv_obj_set_width(title, card->w - 18);
@@ -2204,6 +2294,8 @@ static void huangshan_home_ui_init(void)
     lv_obj_set_style_radius(huangshan_home_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_scroll_dir(huangshan_home_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(huangshan_home_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(huangshan_home_list, LV_OBJ_FLAG_SCROLLABLE |
+                    LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM);
 
     load_result = home_load_installed_runtime_apps();
     if (load_result == RT_EOK && huangshan_home_card_count > 0)
@@ -2217,6 +2309,16 @@ static void huangshan_home_ui_init(void)
             huangshan_home_cards[i].w = card_w;
             huangshan_home_cards[i].h = card_h;
             home_create_card(huangshan_home_list, &huangshan_home_cards[i]);
+        }
+        {
+            lv_coord_t rows = (huangshan_home_card_count + 1) / 2;
+            lv_coord_t content_h = rows * (card_h + card_gap) - card_gap + 12;
+            lv_obj_t *extent = lv_obj_create(huangshan_home_list);
+            lv_obj_remove_style_all(extent);
+            lv_obj_set_size(extent, 1, 1);
+            lv_obj_set_pos(extent, 0, content_h - 1);
+            lv_obj_clear_flag(extent, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                              LV_OBJ_FLAG_SCROLL_CHAIN | LV_OBJ_FLAG_GESTURE_BUBBLE);
         }
     }
     else
@@ -2247,16 +2349,24 @@ static void huangshan_home_ui_init(void)
 static void on_start(void)
 {
     memset(&app_mainmenu_ctx, 0, sizeof(app_mainmenu_ctx));
+    huangshan_home_refresh_on_resume = 0;
     huangshan_home_ui_init();
+    huangshan_home_refresh_timer = lv_timer_create(home_refresh_timer_cb,
+                                                   HUANGSHAN_HOME_REFRESH_MS, RT_NULL);
 }
 
 static void on_resume(void)
 {
-
-
+    if (huangshan_home_refresh_on_resume)
+    {
+        home_close_detail();
+        home_rebuild_ui();
+        huangshan_home_refresh_on_resume = 0;
+    }
 }
 static void on_pause(void)
 {
+    huangshan_home_refresh_on_resume = 1;
     mm_trans_anim_init();
 #ifdef AUTO_CIRCLE_ANIM
     if (app_mainmenu_ctx.pg_obj)
@@ -2274,6 +2384,11 @@ static void on_pause(void)
 }
 static void on_stop(void)
 {
+    if (huangshan_home_refresh_timer)
+    {
+        lv_timer_del(huangshan_home_refresh_timer);
+        huangshan_home_refresh_timer = RT_NULL;
+    }
     home_close_detail();
     if (huangshan_home_root)
     {

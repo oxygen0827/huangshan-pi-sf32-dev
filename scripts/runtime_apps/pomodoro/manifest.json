@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "pomodoro",
+  "name": "Focus Garden",
+  "description": "A playful focus timer with touch controls, breaks, progress, and completed rounds.",
+  "category": "Productivity",
+  "icon": "timer-reset",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:pomodoro",
+  "requirements": ["Runtime", "Display", "Touch"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "clock"],
+  "components": [
+    {
+      "type": "clock",
+      "capability": "clock",
+      "label": "Timer",
+      "value": "25:00"
+    },
+    {
+      "type": "status",
+      "capability": "touch.count",
+      "label": "Controls",
+      "value": "Start / Reset / Skip"
+    }
+  ]
+}

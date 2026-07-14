@@ -21,7 +21,8 @@ repository.
 - Use `LV_HOR_RES_MAX` and `LV_VER_RES_MAX` where practical, while designing
   for 390x450 portrait.
 - Prefer reusable component helpers and a theme file over one-off styling.
-- Use app-specific prefixes, for example `hs_ui_` or the app name prefix.
+- Reuse `src/huangshan_ui/` first. Use an app-specific prefix only for a
+  component that is genuinely local to one app.
 - Separate page creation from dynamic data updates.
 - Delete timers and root objects in `ONSTOP`.
 - Use `rt_kprintf` for lifecycle and important interaction evidence.
@@ -53,12 +54,17 @@ repository.
 
 For `VibeBoard_Runtime` packages:
 
-- Treat `manifest.json` as the stable UI contract.
-- Use `main.lua` only within the documented script subset.
-- Prefer manifest components and existing sensor capabilities before asking for
-  firmware changes.
-- Firmware changes are still required for new LVGL bindings, complex Lua syntax,
-  networking primitives, or new hardware APIs.
+- Treat `manifest.json` plus `uiKit: huangshan-ui/v1` as the stable UI contract.
+- Prefer `ui.modules` in the App Plan Writer for headers, metrics, badges,
+  progress and buttons. Its layout budget protects the 390x450 safe area.
+- Runtime Lua may hold at most 96 tracked LVGL handles and at most 8
+  `vibe_ui_*` high-level components per app.
+- The Runtime uses a full, memory/instruction-limited Lua VM. Lua language
+  features are available, but board access still goes through the documented
+  LVGL and `vibe_*` APIs.
+- Prefer existing capability bindings before asking for firmware changes.
+- Firmware changes are still required for new LVGL/widget bindings, networking
+  primitives, button actions, or hardware APIs.
 
 ## Review Loop
 

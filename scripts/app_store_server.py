@@ -47,7 +47,8 @@ from runtime_transport import (
 ROOT_DIR = Path(__file__).resolve().parents[1]
 RUNTIME_APPS_DIR = ROOT_DIR / "scripts" / "runtime_apps"
 FLASH_SCRIPT = ROOT_DIR / "scripts" / "flash.py"
-APP_ORDER = ["weather_pet", "game_2048", "auto_snake", "sensor_stage"]
+PAGER_VOICE_ACTIVE_FILE = Path.home() / ".vibeboard" / "pager-voice-active"
+APP_ORDER = ["thunder_wing", "imu_lab", "breakout", "pomodoro", "weather_pet", "game_2048", "auto_snake", "sensor_stage"]
 DEFAULT_CITY = "Nanchang Honggutan"
 DEFAULT_LATITUDE = 28.6986
 DEFAULT_LONGITUDE = 115.8582
@@ -141,6 +142,17 @@ def run_self_test() -> None:
     asset_url = app_screenshot_url("weather_pet", "assets/weather/cloudy.png")
     if not asset_url.startswith("/api/apps/weather_pet/asset/"):
         raise SystemExit(f"asset screenshot should be served through app asset API, got {asset_url}")
+    runtime_payload = normalize_runtime_app_screenshots({
+        "apps": [
+            {"id": "weather_pet", "screenshot": "assets/weather/cloudy.png"},
+            {"id": "third_party", "screenshot": "assets/private.png"},
+        ]
+    })
+    runtime_shots = [item.get("screenshot") for item in runtime_payload["apps"]]
+    if not str(runtime_shots[0]).startswith("/api/apps/weather_pet/asset/"):
+        raise SystemExit("Runtime App Manager should resolve curated package screenshots")
+    if runtime_shots[1] != "generated:third_party":
+        raise SystemExit("unknown Runtime app screenshots should use a safe generated fallback")
     matrix = matrix_from_capabilities({"hw": {"disp": 1, "touch": 1, "flow": 1}, "disp": "display/v1", "touch": "touch/v1", "flow": "flow/v1", "ins": {"ser": 1, "ble": 1}})
     if len(matrix) != 8 or not matrix[0]["available"]:
         raise SystemExit("capability matrix should expose all advertised Runtime rows")
@@ -192,10 +204,35 @@ def run_self_test() -> None:
     finally:
         BLE_NAME = previous_ble_name
         BLE_NO_CACHE = previous_ble_no_cache
+    test_state = StoreState()
+    first_job = test_state.start_job("test", "demo", lambda job: None, request_key="request-1")
+    repeated_job = test_state.start_job("test", "demo", lambda job: None, request_key="request-1")
+    if repeated_job is not first_job:
+        raise SystemExit("repeated install request IDs should return the original job")
     print("app_store_server self-test ok")
 
 
 APP_META = {
+    "thunder_wing": {
+        "summary": "左右倾斜控制原创战机，倾角越大飞得越快。击破波次并挑战阶段首领。",
+        "accent": "#38bdf8",
+        "requiresWeather": False,
+    },
+    "imu_lab": {
+        "summary": "红色姿态点会随板子倾斜，在电子水平表盘中实时移动。",
+        "accent": "#5db7ff",
+        "requiresWeather": False,
+    },
+    "breakout": {
+        "summary": "拖动霓虹挡板，弹回小球并清空整面砖墙。",
+        "accent": "#47d7ac",
+        "requiresWeather": False,
+    },
+    "pomodoro": {
+        "summary": "会在专注与休息间自动切换的触控番茄钟。",
+        "accent": "#ff5c65",
+        "requiresWeather": False,
+    },
     "weather_pet": {
         "summary": "真实天气生成的可爱动画天气角色。",
         "accent": "#fbbf24",
@@ -219,6 +256,9 @@ APP_META = {
 }
 
 ICON_GLYPHS = {
+    "rocket": "T",
+    "axis-3d": "I",
+    "brick-wall": "B",
     "cloud-sun": "W",
     "gamepad-2": "G",
     "activity": "S",
@@ -718,6 +758,25 @@ HTML = r"""<!doctype html>
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     };
+    const createInstallJob = async (appId, payload) => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          return await api(`/api/apps/${appId}/install`, {
+            method: "POST",
+            body: JSON.stringify(payload)
+          });
+        } catch (err) {
+          lastError = err;
+          const transient = /failed to fetch|networkerror|load failed/i.test(String(err?.message || err));
+          if (!transient || attempt === 2) throw err;
+          setInstallProgress(4);
+          $("jobText").textContent = "连接短暂中断，正在恢复安装请求...";
+          await new Promise(resolve => setTimeout(resolve, 450));
+        }
+      }
+      throw lastError || new Error("安装请求失败");
+    };
     const setTransport = (ok, text) => {
       $("transportDot").className = `dot ${ok ? "ok" : "bad"}`;
       $("transportText").textContent = text;
@@ -840,7 +899,7 @@ HTML = r"""<!doctype html>
         : (app.description || "Runtime app package");
       merged.icon = app.icon || meta.icon || "app";
       merged.iconText = app.iconText || meta.iconText || iconText(merged);
-      merged.screenshot = app.screenshot || meta.screenshot || `generated:${app.id}`;
+      merged.screenshot = meta.screenshot || app.screenshot || `generated:${app.id}`;
       merged.requirements = app.requirements || meta.requirements || [];
       merged.accent = app.accent || meta.accent || "#5db7ff";
       return merged;
@@ -1256,10 +1315,8 @@ HTML = r"""<!doctype html>
       setInstallProgress(3);
       $("jobText").textContent = `准备安装 ${appId}`;
       try {
-        const data = await api(`/api/apps/${appId}/install`, {
-          method: "POST",
-          body: JSON.stringify({ weather: state.weather })
-        });
+        const requestId = `install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const data = await createInstallJob(appId, { weather: state.weather, request_id: requestId });
         const job = await pollJob(data.job_id);
         if (!job || job.status !== "done") return;
         if (!state.runtimeApps.some(item => item.id === appId)) {
@@ -1432,6 +1489,23 @@ def list_apps() -> list[dict[str, Any]]:
     return apps
 
 
+def normalize_runtime_app_screenshots(payload: dict[str, Any]) -> dict[str, Any]:
+    apps = payload.get("apps")
+    if not isinstance(apps, list):
+        return payload
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        app_id = str(app.get("id") or "")
+        if app_id in APP_ORDER and (RUNTIME_APPS_DIR / app_id / "manifest.json").is_file():
+            app["screenshot"] = app_entry(app_id)["screenshot"]
+            continue
+        screenshot = str(app.get("screenshot") or "")
+        if not screenshot.startswith("/api/apps/"):
+            app["screenshot"] = f"generated:{app_id or 'app'}"
+    return payload
+
+
 def local_app_asset(app_id: str, raw_path: str) -> tuple[bytes, str]:
     app_id = safe_package_id(app_id)
     rel = safe_package_path(urllib.parse.unquote(raw_path))
@@ -1560,6 +1634,31 @@ def generated_screenshot_png(seed: str, icon_text: str, accent: str = "#5db7ff")
                 if (xx - cx) * (xx - cx) + (yy - cy) * (yy - cy) <= radius2:
                     set_px(xx, yy, color)
 
+    def seven_segment_digit(x: int, y: int, digit: int, color: tuple[int, int, int]) -> None:
+        segments = {
+            0: "abcedf",
+            1: "bc",
+            2: "abdeg",
+            3: "abcdg",
+            4: "bcfg",
+            5: "acdfg",
+            6: "acdefg",
+            7: "abc",
+            8: "abcdefg",
+            9: "abcdfg",
+        }[digit]
+        geometry = {
+            "a": (x + 4, y, x + 18, y + 4),
+            "b": (x + 18, y + 4, x + 22, y + 20),
+            "c": (x + 18, y + 24, x + 22, y + 40),
+            "d": (x + 4, y + 40, x + 18, y + 44),
+            "e": (x, y + 24, x + 4, y + 40),
+            "f": (x, y + 4, x + 4, y + 20),
+            "g": (x + 4, y + 20, x + 18, y + 24),
+        }
+        for segment in segments:
+            rect(*geometry[segment], color)
+
     for y in range(height):
         for x in range(width):
             t = (x * 0.65 + y) / (width * 0.65 + height)
@@ -1570,7 +1669,78 @@ def generated_screenshot_png(seed: str, icon_text: str, accent: str = "#5db7ff")
     rect(44, 36, 276, 184, mix(panel, accent_rgb, 0.12))
 
     app_key = seed.lower()
-    if "2048" in app_key:
+    if "thunder" in app_key:
+        space = (5, 11, 24)
+        cyan = (56, 189, 248)
+        mint = (94, 234, 212)
+        red = (255, 64, 88)
+        amber = (251, 191, 36)
+        rect(48, 28, 272, 196, space)
+        for index in range(18):
+            x = 56 + (index * 47) % 208
+            y = 34 + (index * 31) % 152
+            circle(x, y, 1 + (index % 5 == 0), muted if index & 1 else white)
+        rect(145, 157, 175, 164, cyan)
+        rect(154, 141, 166, 184, mint)
+        rect(157, 137, 163, 146, white)
+        rect(158, 184, 162, 193, amber)
+        for x, y in ((84, 62), (142, 78), (218, 54), (190, 104)):
+            rect(x, y, x + 28, y + 16, red)
+            rect(x + 8, y - 5, x + 20, y + 20, (255, 107, 117))
+        rect(123, 38, 197, 48, red)
+        rect(135, 32, 185, 54, (190, 24, 52))
+        for x in (155, 159, 163):
+            rect(x, 118, x + 2, 137, mint)
+        for x, y in ((96, 91), (226, 86), (180, 122)):
+            circle(x, y, 3, red)
+    elif "imu" in app_key:
+        dial_bg = (12, 28, 43)
+        grid = (53, 81, 111)
+        circle(160, 105, 78, accent_rgb)
+        circle(160, 105, 74, dial_bg)
+        circle(160, 105, 52, grid)
+        circle(160, 105, 50, dial_bg)
+        circle(160, 105, 28, grid)
+        circle(160, 105, 26, dial_bg)
+        rect(88, 104, 232, 106, grid)
+        rect(159, 33, 161, 177, grid)
+        circle(160, 105, 11, (71, 215, 172))
+        circle(160, 105, 8, dial_bg)
+        circle(193, 77, 13, (255, 181, 191))
+        circle(193, 77, 10, (255, 64, 88))
+        rect(84, 188, 145, 192, (226, 232, 240))
+        rect(175, 188, 236, 192, (226, 232, 240))
+    elif "breakout" in app_key:
+        colors = [(255, 92, 101), (251, 191, 36), (71, 215, 172), (93, 183, 255)]
+        for row in range(4):
+            for col in range(6):
+                x0 = 57 + col * 35
+                y0 = 48 + row * 22
+                rect(x0, y0, x0 + 29, y0 + 14, colors[row])
+        rect(112, 174, 208, 184, (71, 215, 172))
+        circle(178, 150, 7, white)
+        rect(66, 38, 254, 40, (38, 59, 85))
+    elif "pomodoro" in app_key:
+        tomato = (255, 92, 101)
+        tomato_dark = (180, 48, 65)
+        leaf = (71, 215, 172)
+        clock_bg = (12, 18, 24)
+        circle(160, 105, 72, tomato_dark)
+        circle(160, 105, 65, tomato)
+        circle(160, 105, 51, clock_bg)
+        circle(151, 35, 12, leaf)
+        circle(168, 35, 12, leaf)
+        rect(157, 20, 164, 43, leaf)
+        seven_segment_digit(104, 82, 2, white)
+        seven_segment_digit(130, 82, 5, white)
+        circle(157, 96, 3, leaf)
+        circle(157, 112, 3, leaf)
+        seven_segment_digit(166, 82, 0, white)
+        seven_segment_digit(192, 82, 0, white)
+        rect(105, 170, 151, 182, tomato)
+        rect(157, 170, 203, 182, (39, 50, 68))
+        rect(209, 170, 255, 182, (39, 50, 68))
+    elif "2048" in app_key:
         board = [
             [(238, 228, 218), (237, 224, 200), (242, 177, 121), (245, 149, 99)],
             [(246, 124, 95), (246, 94, 59), (237, 207, 114), (237, 204, 97)],
@@ -2148,6 +2318,10 @@ def run_transport_operation(
         if TRANSPORT_KIND == "serial":
             with SerialTransport(serial_options()) as transport:
                 return sync_operation(transport)
+        if PAGER_VOICE_ACTIVE_FILE.exists():
+            raise RuntimeTransportError(
+                "Pager voice bridges are active; close the voice bridge terminal before using BLE App Store"
+            )
         return asyncio.run(run_ble_transport_operation(async_operation, timeout=timeout))
 
 
@@ -2263,18 +2437,26 @@ class StoreState:
     def __init__(self) -> None:
         self.jobs: dict[str, Job] = {}
         self.imports: dict[str, ImportedPackage] = {}
+        self.install_requests: dict[str, str] = {}
         self.lock = threading.Lock()
 
-    def start_job(self, kind: str, app_id: str, target, *args) -> Job:
+    def start_job(self, kind: str, app_id: str, target, *args, request_key: str = "") -> Job:
         job = Job(f"job-{uuid.uuid4().hex[:12]}", app_id, kind)
         with self.lock:
+            if request_key:
+                existing_id = self.install_requests.get(request_key)
+                existing = self.jobs.get(existing_id or "")
+                if existing:
+                    return existing
             self.jobs[job.job_id] = job
+            if request_key:
+                self.install_requests[request_key] = job.job_id
         thread = threading.Thread(target=target, args=(job, *args), daemon=True)
         thread.start()
         return job
 
-    def create_job(self, app_id: str, weather: dict[str, Any] | None) -> Job:
-        return self.start_job("install", app_id, self.run_install, weather)
+    def create_job(self, app_id: str, weather: dict[str, Any] | None, request_key: str = "") -> Job:
+        return self.start_job("install", app_id, self.run_install, weather, request_key=request_key)
 
     def create_import_install_job(self, package: ImportedPackage) -> Job:
         return self.start_job("install_import", package.package_id, self.run_install_files, package.package_id, package.files)
@@ -2634,7 +2816,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/runtime/apps":
                 ok, payload = run_runtime_apps()
                 if ok:
-                    self.send_json(200, {"ok": True, "transport": TRANSPORT_KIND, "runtime": payload})
+                    self.send_json(200, {
+                        "ok": True,
+                        "transport": TRANSPORT_KIND,
+                        "runtime": normalize_runtime_app_screenshots(payload),
+                    })
                 else:
                     self.send_json(200, {"ok": False, "transport": TRANSPORT_KIND, "error": payload, "errorSummary": transportErrorSummary(payload)})
             elif path == "/api/runtime/capabilities":
@@ -2705,6 +2891,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_error_json(404, "unknown app")
                     return
                 payload = self.read_json()
+                request_key = str(payload.get("request_id") or "").strip()
+                if len(request_key) > 80 or any(not (char.isalnum() or char in "-_") for char in request_key):
+                    self.send_error_json(400, "invalid install request_id")
+                    return
                 weather = payload.get("weather")
                 if isinstance(weather, dict) and isinstance(weather.get("weather"), dict):
                     weather = weather["weather"]
@@ -2712,7 +2902,7 @@ class Handler(BaseHTTPRequestHandler):
                     weather_keys = {"city", "latitude", "longitude", "temperature_c", "humidity", "weather_code", "condition"}
                     if weather_keys.intersection(payload):
                         weather = payload
-                job = STATE.create_job(app_id, weather if isinstance(weather, dict) else None)
+                job = STATE.create_job(app_id, weather if isinstance(weather, dict) else None, request_key=request_key)
                 self.send_json(202, {"job_id": job.job_id})
                 return
             if path == "/api/recovery/staging-clear":

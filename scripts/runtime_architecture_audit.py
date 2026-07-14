@@ -170,12 +170,82 @@ def audit_lua_audio_runtime() -> None:
         "vb_runtime_audio_play_wav",
         "vb_runtime_audio_read_json",
         "vb_runtime_audio_set_volume",
+        "static char g_vb_audio_msh_json[VB_AUDIO_JSON_MAX]",
+        "char *json = g_vb_audio_msh_json",
     ):
         require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c", needle)
     require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/main.c", "vibe_audio_play")
     require_contains("lua_audio_runtime", "src/gui_apps/VibeBoard_Runtime/main.c", "!vb_is_resource_package_path(src)")
     require_contains("lua_audio_runtime", "scripts/runtime_package.py", '"lua.full"')
     require_contains("lua_audio_runtime", "scripts/runtime_package.py", '"audio.playback"')
+
+
+def audit_huangshan_ui_kit() -> None:
+    for rel in (
+        "src/huangshan_ui/hs_ui_theme.h",
+        "src/huangshan_ui/hs_ui_theme.c",
+        "src/huangshan_ui/hs_ui_components.h",
+        "src/huangshan_ui/hs_ui_components.c",
+    ):
+        require_file("huangshan_ui_kit", rel)
+    require_contains("huangshan_ui_kit", "src/SConscript", "huangshan_ui/SConscript")
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c", '"vibe_ui_metric"')
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "hs_ui_metric_create")
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "VB_MAX_SCRIPT_UI_COMPONENTS 8")
+    require_contains("huangshan_ui_kit", "scripts/runtime_app_plan_writer.py", 'UI_KIT_VERSION = "huangshan-ui/v1"')
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "vb_pomodoro_start")
+    require_file("huangshan_ui_kit", "scripts/runtime_apps/pomodoro/main.lua")
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "vb_breakout_start")
+    require_file("huangshan_ui_kit", "scripts/runtime_apps/breakout/main.lua")
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "vb_thunder_start")
+    require_file("huangshan_ui_kit", "scripts/runtime_apps/thunder_wing/main.lua")
+    require_contains("huangshan_ui_kit", "src/gui_apps/VibeBoard_Runtime/main.c", "vb_imu_start")
+    require_file("huangshan_ui_kit", "scripts/runtime_apps/imu_lab/main.lua")
+
+
+def audit_voice_memory_lifecycle() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    transport = read("scripts/runtime_transport.py")
+    for needle in (
+        "vb_runtime_voice_required_bytes",
+        "vb_runtime_voice_allocate_buffer(duration_ms)",
+        "vb_runtime_voice_release_buffer",
+        "app_cache_alloc(required_bytes, IMAGE_CACHE_PSRAM)",
+        "app_cache_free(g_vb_voice.buffer)",
+        "rt_ringbuffer_destroy(g_vb_voice.stream_rb)",
+        "#define VB_VOICE_MAX_MS 3000",
+    ):
+        if needle not in main:
+            fail("voice_memory", f"voice capture memory lifecycle missing {needle!r}")
+    if "VB_VOICE_MAX_BYTES" in main:
+        fail("voice_memory", "voice capture must not preallocate the maximum-duration buffer")
+    if "finally:\n            self.voice_clear()" not in transport:
+        fail("voice_memory", "serial voice capture does not release board PCM after transfer")
+    if "finally:\n            await self.voice_clear()" not in transport:
+        fail("voice_memory", "BLE voice capture does not release board PCM after transfer")
+    if not any(item[0] == "fail" and item[1].startswith("voice_memory") for item in CHECKS):
+        ok("voice_memory", "voice PCM uses bounded PSRAM/ring buffers and is released after transfer")
+
+
+def audit_msh_stack_usage() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    msh = main.split("#ifdef FINSH_USING_MSH", 1)[-1]
+    if "static char g_vb_msh_text[VB_APP_JSON_MAX]" not in main:
+        fail("msh_stack", "shared static MSH response buffer is missing")
+    for forbidden in (
+        "char json[VB_APP_JSON_MAX]",
+        "char json[VB_BLE_STATUS_MAX]",
+        "char text[VB_BLE_STATUS_MAX]",
+        "char json[VB_JSON_READ_MAX]",
+    ):
+        if forbidden in msh:
+            fail("msh_stack", f"MSH command still allocates a large response buffer: {forbidden}")
+    if "rt_malloc(VB_JSON_READ_MAX)" not in main or "rt_free(json)" not in main:
+        fail("msh_stack", "long JSON source buffer is not heap-backed with explicit release")
+    if "vb_runtime_audio_read_json(json, VB_JSON_READ_MAX)" not in main:
+        fail("msh_stack", "json_read audio is not routed to the audio JSON provider")
+    if not any(item[0] == "fail" and item[1].startswith("msh_stack") for item in CHECKS):
+        ok("msh_stack", "large MSH responses avoid the 4 KiB shell stack")
 
 
 def audit_high_risk_capability_evaluation() -> None:
@@ -198,6 +268,7 @@ def audit_direct_transport_usage() -> None:
         "scripts/flash.py",
         "scripts/monitor.sh",
         "scripts/monitor.ps1",
+        "scripts/peer_reliability.py",
     }
     allowed_direct_ble = {
         "scripts/runtime_transport.py",
@@ -218,7 +289,7 @@ def audit_direct_transport_usage() -> None:
     if direct_serial:
         fail("direct_transport_usage", "unexpected direct pyserial users: " + ", ".join(direct_serial))
     else:
-        ok("direct_transport_usage", "direct pyserial use is limited to RuntimeTransport/flash/monitor diagnostics")
+        ok("direct_transport_usage", "direct pyserial use is limited to RuntimeTransport and hardware diagnostics")
     if direct_ble:
         fail("direct_transport_usage", "unexpected direct Bleak users: " + ", ".join(direct_ble))
     else:
@@ -234,6 +305,9 @@ def run_audit() -> int:
     audit_default_networking()
     audit_capability_model()
     audit_lua_audio_runtime()
+    audit_huangshan_ui_kit()
+    audit_voice_memory_lifecycle()
+    audit_msh_stack_usage()
     audit_high_risk_capability_evaluation()
     audit_direct_transport_usage()
     failures = [message for status, message in CHECKS if status == "fail"]

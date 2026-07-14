@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "breakout",
+  "name": "Neon Breakout",
+  "description": "A touch-controlled neon brick breaker with score, lives, and instant replay.",
+  "category": "Games",
+  "icon": "brick-wall",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:breakout",
+  "requirements": ["Runtime", "Display", "Touch"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "game"],
+  "components": [
+    {"type": "status", "label": "Mode", "capability": "game", "value": "brick breaker"},
+    {"type": "status", "label": "Control", "capability": "touch.count", "value": "touch paddle"}
+  ]
+}

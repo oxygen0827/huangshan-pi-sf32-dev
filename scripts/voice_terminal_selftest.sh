@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export VOICE_TERMINAL_SKIP_ENV=1
 
 assert_contains() {
     local haystack="$1"

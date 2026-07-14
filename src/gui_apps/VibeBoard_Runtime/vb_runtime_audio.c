@@ -14,11 +14,14 @@
 #endif
 
 #define VB_AUDIO_PATH_MAX 192
+#define VB_AUDIO_JSON_MAX 512
 #define VB_AUDIO_IO_CHUNK 1024
 #define VB_AUDIO_CACHE_SIZE 4096
 #define VB_AUDIO_THREAD_STACK 4096
 #define VB_AUDIO_DRAIN_TIMEOUT_MS 3000
 #define VB_AUDIO_DEFAULT_VOLUME 8
+#define VB_AUDIO_TONE_SAMPLE_RATE 16000
+#define VB_AUDIO_TONE_DURATION_SECONDS 1
 
 typedef struct
 {
@@ -35,6 +38,8 @@ typedef struct
     uint32_t data_bytes;
     uint32_t played_bytes;
     char path[VB_AUDIO_PATH_MAX];
+    int tone_requested;
+    int tone_continuous;
     rt_thread_t worker;
 #if VB_AUDIO_BUILT
     audio_client_t client;
@@ -53,6 +58,7 @@ typedef struct
 static vb_audio_state_t g_vb_audio = {
     .volume = VB_AUDIO_DEFAULT_VOLUME,
 };
+static char g_vb_audio_msh_json[VB_AUDIO_JSON_MAX];
 
 static uint16_t vb_audio_le16(const uint8_t *data)
 {
@@ -190,16 +196,29 @@ static void vb_audio_worker(void *parameter)
     vb_wav_info_t wav;
     uint8_t *buffer = RT_NULL;
     uint32_t remaining;
+    uint32_t tone_sample = 0;
     (void)parameter;
 
-    fd = open(g_vb_audio.path, O_RDONLY);
-    if (fd < 0)
+    if (g_vb_audio.tone_requested)
     {
-        result = -RT_ERROR;
-        goto done;
+        wav.sample_rate = VB_AUDIO_TONE_SAMPLE_RATE;
+        wav.channels = 1;
+        wav.bits_per_sample = 16;
+        wav.data_offset = 0;
+        wav.data_size = g_vb_audio.tone_continuous ? 0u :
+                        VB_AUDIO_TONE_SAMPLE_RATE * 2u * VB_AUDIO_TONE_DURATION_SECONDS;
     }
-    result = vb_audio_parse_wav(fd, &wav);
-    if (result != RT_EOK) goto done;
+    else
+    {
+        fd = open(g_vb_audio.path, O_RDONLY);
+        if (fd < 0)
+        {
+            result = -RT_ERROR;
+            goto done;
+        }
+        result = vb_audio_parse_wav(fd, &wav);
+        if (result != RT_EOK) goto done;
+    }
     g_vb_audio.sample_rate = wav.sample_rate;
     g_vb_audio.channels = wav.channels;
     g_vb_audio.bits_per_sample = wav.bits_per_sample;
@@ -230,10 +249,30 @@ static void vb_audio_worker(void *parameter)
     }
     remaining = wav.data_size;
     result = RT_EOK;
-    while (remaining > 0 && !g_vb_audio.stop_requested)
+    while ((g_vb_audio.tone_continuous || remaining > 0) && !g_vb_audio.stop_requested)
     {
-        uint32_t wanted = remaining > VB_AUDIO_IO_CHUNK ? VB_AUDIO_IO_CHUNK : remaining;
-        int got = read(fd, buffer, wanted);
+        uint32_t wanted = g_vb_audio.tone_continuous || remaining > VB_AUDIO_IO_CHUNK ?
+                          VB_AUDIO_IO_CHUNK : remaining;
+        int got;
+        if (g_vb_audio.tone_requested)
+        {
+            static const int16_t sine_1khz[16] = {
+                0, 9184, 16971, 22173, 24000, 22173, 16971, 9184,
+                0, -9184, -16971, -22173, -24000, -22173, -16971, -9184
+            };
+            uint32_t i;
+            int16_t *samples = (int16_t *)buffer;
+            for (i = 0; i < wanted / 2u; i++)
+            {
+                samples[i] = sine_1khz[tone_sample & 15u];
+                tone_sample++;
+            }
+            got = (int)wanted;
+        }
+        else
+        {
+            got = read(fd, buffer, wanted);
+        }
         if (got <= 0)
         {
             result = -RT_ERROR;
@@ -241,7 +280,7 @@ static void vb_audio_worker(void *parameter)
         }
         result = vb_audio_write_all(buffer, (uint32_t)got);
         if (result != RT_EOK) break;
-        remaining -= (uint32_t)got;
+        if (!g_vb_audio.tone_continuous) remaining -= (uint32_t)got;
     }
     if (result == RT_EOK) vb_audio_drain();
 #else
@@ -291,6 +330,8 @@ int vb_runtime_audio_play_wav(const char *path)
     g_vb_audio.suspended = 0;
     g_vb_audio.stop_requested = 0;
     g_vb_audio.last_error = 1;
+    g_vb_audio.tone_requested = 0;
+    g_vb_audio.tone_continuous = 0;
     rt_strncpy(g_vb_audio.path, path, sizeof(g_vb_audio.path) - 1);
     g_vb_audio.path[sizeof(g_vb_audio.path) - 1] = '\0';
     worker = rt_thread_create("vbaudio", vb_audio_worker, RT_NULL,
@@ -307,6 +348,44 @@ int vb_runtime_audio_play_wav(const char *path)
     rt_thread_startup(worker);
     rt_kprintf("[vb_runtime][audio] play seq=%lu path=%s volume=%d\n",
                (unsigned long)g_vb_audio.sequence, g_vb_audio.path, g_vb_audio.volume);
+    return RT_EOK;
+}
+
+int vb_runtime_audio_play_tone(int continuous)
+{
+    rt_thread_t worker;
+    if (!VB_AUDIO_BUILT) return -RT_ENOSYS;
+    if (g_vb_audio.worker || g_vb_audio.playing) return -RT_EBUSY;
+    g_vb_audio.sequence++;
+    g_vb_audio.played_bytes = 0;
+    g_vb_audio.data_bytes = 0;
+    g_vb_audio.sample_rate = 0;
+    g_vb_audio.channels = 0;
+    g_vb_audio.bits_per_sample = 0;
+    g_vb_audio.ready = 0;
+    g_vb_audio.suspended = 0;
+    g_vb_audio.stop_requested = 0;
+    g_vb_audio.last_error = 1;
+    g_vb_audio.tone_requested = 1;
+    g_vb_audio.tone_continuous = continuous ? 1 : 0;
+    rt_strncpy(g_vb_audio.path, continuous ? "<1khz-continuous>" : "<1khz-tone>",
+               sizeof(g_vb_audio.path) - 1);
+    g_vb_audio.path[sizeof(g_vb_audio.path) - 1] = '\0';
+    worker = rt_thread_create("vbaudio", vb_audio_worker, RT_NULL,
+                              VB_AUDIO_THREAD_STACK,
+                              RT_THREAD_PRIORITY_MIDDLE + 3,
+                              RT_THREAD_TICK_DEFAULT);
+    if (!worker)
+    {
+        g_vb_audio.last_error = -RT_ENOMEM;
+        return -RT_ENOMEM;
+    }
+    g_vb_audio.worker = worker;
+    g_vb_audio.playing = 1;
+    rt_thread_startup(worker);
+    rt_kprintf("[vb_runtime][audio] tone seq=%lu volume=%d continuous=%d\n",
+               (unsigned long)g_vb_audio.sequence, g_vb_audio.volume,
+               g_vb_audio.tone_continuous);
     return RT_EOK;
 }
 
@@ -399,25 +478,32 @@ void vb_runtime_audio_shutdown(void)
 
 static int vb_runtime_audio_msh(int argc, char **argv)
 {
-    char json[512];
+    char *json = g_vb_audio_msh_json;
     int result;
     if (argc < 2 || rt_strcmp(argv[1], "status") == 0)
     {
-        result = vb_runtime_audio_read_json(json, sizeof(json));
+        result = vb_runtime_audio_read_json(json, VB_AUDIO_JSON_MAX);
         rt_kprintf("%s\n", json);
         return result;
     }
     if (rt_strcmp(argv[1], "play") == 0 && argc >= 3)
     {
         result = vb_runtime_audio_play_wav(argv[2]);
-        vb_runtime_audio_read_json(json, sizeof(json));
+        vb_runtime_audio_read_json(json, VB_AUDIO_JSON_MAX);
+        rt_kprintf("%s\n", json);
+        return result;
+    }
+    if (rt_strcmp(argv[1], "tone") == 0)
+    {
+        result = vb_runtime_audio_play_tone(0);
+        vb_runtime_audio_read_json(json, VB_AUDIO_JSON_MAX);
         rt_kprintf("%s\n", json);
         return result;
     }
     if (rt_strcmp(argv[1], "stop") == 0)
     {
         result = vb_runtime_audio_stop();
-        vb_runtime_audio_read_json(json, sizeof(json));
+        vb_runtime_audio_read_json(json, VB_AUDIO_JSON_MAX);
         rt_kprintf("%s\n", json);
         return result;
     }
@@ -427,11 +513,11 @@ static int vb_runtime_audio_msh(int argc, char **argv)
         long volume = strtol(argv[2], &end, 10);
         result = end != argv[2] && *end == '\0' && volume >= 0 && volume <= 15 ?
                  vb_runtime_audio_set_volume((int)volume) : -RT_EINVAL;
-        vb_runtime_audio_read_json(json, sizeof(json));
+        vb_runtime_audio_read_json(json, VB_AUDIO_JSON_MAX);
         rt_kprintf("%s\n", json);
         return result;
     }
-    rt_kprintf("usage: vb_runtime_audio [status|play <absolute-wav>|stop|volume <0-15>]\n");
+    rt_kprintf("usage: vb_runtime_audio [status|play <absolute-wav>|tone|stop|volume <0-15>]\n");
     return -RT_EINVAL;
 }
 MSH_CMD_EXPORT_ALIAS(vb_runtime_audio_msh, vb_runtime_audio, control VibeBoard WAV audio playback);

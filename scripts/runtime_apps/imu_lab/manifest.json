@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "imu_lab",
+  "name": "Gyro Dial",
+  "description": "A live attitude dial with a red tilt marker and zero calibration.",
+  "category": "Hardware",
+  "icon": "axis-3d",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:imu_lab",
+  "requirements": ["Runtime", "LSM6DSL", "Touch"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "sensor.acce", "sensor.gyro"],
+  "components": [
+    {"type": "status", "capability": "sensor.acce", "label": "Attitude", "value": "--"},
+    {"type": "status", "capability": "sensor.gyro", "label": "Motion", "value": "--"}
+  ]
+}

@@ -25,6 +25,16 @@ typedef struct
 
 static huangshan_ui_lab_t g_ui_lab;
 
+static void action_event_cb(lv_event_t *event)
+{
+    const char *text = (const char *)lv_event_get_user_data(event);
+    lv_obj_t *label;
+    if (LV_EVENT_CLICKED != lv_event_get_code(event) || !g_ui_lab.status_badge) return;
+    label = lv_obj_get_child(g_ui_lab.status_badge, 0);
+    if (label) lv_label_set_text(label, text ? text : "READY");
+    rt_kprintf("[Huangshan_UI_Lab] action=%s\n", text ? text : "ready");
+}
+
 static void back_event_cb(lv_event_t *event)
 {
     if (LV_EVENT_CLICKED == lv_event_get_code(event))
@@ -81,7 +91,7 @@ static void create_header(huangshan_ui_lab_t *state)
     lv_obj_set_size(state->status_badge, 86, 28);
     lv_obj_align(state->status_badge, LV_ALIGN_TOP_RIGHT, -12, 20);
 
-    lv_obj_t *subtitle = hs_ui_label_create(state->root, "LVGL theme + components + review loop",
+    lv_obj_t *subtitle = hs_ui_label_create(state->root, "Native components / 390 x 450",
                                             FONT_SMALL, HS_UI_COLOR_MUTED);
     lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 58);
 }
@@ -137,17 +147,20 @@ static void create_footer(huangshan_ui_lab_t *state)
 {
     lv_obj_t *review = hs_ui_action_button_create(state->root, "Review", false);
     lv_obj_align(review, LV_ALIGN_BOTTOM_LEFT, 18, -54);
+    lv_obj_add_event_cb(review, action_event_cb, LV_EVENT_CLICKED, "REVIEW");
 
     lv_obj_t *limit = hs_ui_action_button_create(state->root, "Budget", false);
     lv_obj_align(limit, LV_ALIGN_BOTTOM_MID, 0, -54);
+    lv_obj_add_event_cb(limit, action_event_cb, LV_EVENT_CLICKED, "BOUNDED");
 
     lv_obj_t *danger = hs_ui_action_button_create(state->root, "Alert", true);
     lv_obj_align(danger, LV_ALIGN_BOTTOM_RIGHT, -18, -54);
+    lv_obj_add_event_cb(danger, action_event_cb, LV_EVENT_CLICKED, "ALERT");
 
     state->touch_label = hs_ui_label_create(state->root, "Touch 0", FONT_SMALL, HS_UI_COLOR_TEXT);
     lv_obj_align(state->touch_label, LV_ALIGN_BOTTOM_LEFT, 22, -18);
 
-    lv_obj_t *hint = hs_ui_label_create(state->root, "Component-first LVGL page. Tap blank area.",
+    lv_obj_t *hint = hs_ui_label_create(state->root, "Component events",
                                         FONT_SMALL, HS_UI_COLOR_MUTED);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_RIGHT, -18, -18);
 }
@@ -159,7 +172,7 @@ static void on_start(void)
 
     g_ui_lab.root = lv_obj_create(lv_scr_act());
     lv_obj_remove_style_all(g_ui_lab.root);
-    lv_obj_add_style(g_ui_lab.root, &hs_ui_style_screen, 0);
+    hs_ui_screen_apply(g_ui_lab.root);
     lv_obj_set_size(g_ui_lab.root, LV_HOR_RES_MAX, LV_VER_RES_MAX);
     lv_obj_align(g_ui_lab.root, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(g_ui_lab.root, LV_OBJ_FLAG_SCROLLABLE);

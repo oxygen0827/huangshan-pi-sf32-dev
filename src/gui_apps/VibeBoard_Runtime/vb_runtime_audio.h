@@ -7,6 +7,7 @@
 
 int vb_runtime_audio_available(void);
 int vb_runtime_audio_play_wav(const char *path);
+int vb_runtime_audio_play_tone(int continuous);
 int vb_runtime_audio_stop(void);
 int vb_runtime_audio_set_volume(int volume);
 int vb_runtime_audio_read_json(char *dst, rt_size_t cap);

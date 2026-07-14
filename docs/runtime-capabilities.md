@@ -20,10 +20,19 @@ ESP32-S3 GPL Runtime 的完整能力集合。
 | GPIO | `vb_runtime_gpio`、`vibe_gpio_label` | KEY1/KEY2 只读白名单 |
 | RGB | `vb_runtime_rgb`、`vibe_rgb` | 板载 RGB 设色、读回、恢复 |
 | Flow | `flow_send/status/clear`、`vibe_flow_label` | 手机/桌面注入文本，App 只读展示 |
+| Peer Link | `peer_status/pair/send/messages_page`、`vibe_peer_label`、`vibe_peer_send`、`vibe_peer_pager` | 两块黄山派一对一配对、自动重连、可靠短消息和 Pager UI |
 | Voice | `vb_runtime_voice*`、`vibe_voice_label`、`vibe_voice_start`、`vibe_voice_clear` | 受控短录音、状态读取、bridge 导出 |
 | Audio playback | `vb_runtime_audio`、BLE `playback*`、`vibe_audio_*` | App 包内 PCM WAV 异步播放、停止、音量和状态；底层 I2S 不开放 |
 | Lua VM | capability `lua.full` | Lua 5.5 完整语言；安全标准库、App 本地模块、384 KiB 内存和 50 万指令预算 |
 | Game helper | `vibe_2048_game`、`vibe_snake_autoplay` | 复杂交互放 Runtime 原生 helper |
+
+## 音频硬件边界
+
+- 麦克风是板载模拟麦克风，通过内部 Codec 录音。
+- 板上有 AW8155 功放和 `SPK` 输出接口，但没有焊接扬声器单元。
+- `audio.playback` 表示 Runtime 能把 PCM 送到 `SPK` 路径，不表示裸板能直接发声。
+- `audio_stage` 只在用户明确点击后播放 1 秒测试音；听感验收必须先连接匹配的外接喇叭。
+- Voice PCM 缓冲按实际录音时长分配，最多 3000 ms；主机拉取完成或执行 `voice_clear` 后释放。
 
 ## manifest 能力原则
 

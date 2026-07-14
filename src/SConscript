@@ -21,6 +21,9 @@ src.extend(SConscript(os.path.join(cwd, 'resource/strings/SConscript'), variant_
 # Full Lua VM used by VibeBoard Runtime apps.
 src.extend(SConscript(os.path.join(cwd, 'third_party/lua/SConscript'), variant_dir="third_party/lua", duplicate=0))
 
+# Shared, bounded LVGL theme and components for built-in and Runtime apps.
+src.extend(SConscript(os.path.join(cwd, 'huangshan_ui/SConscript'), variant_dir="huangshan_ui", duplicate=0))
+
 #Add GUI applications
 app_objs = SConscript(os.path.join(cwd, 'gui_apps/SConscript'), variant_dir="gui_apps", duplicate=0)
 

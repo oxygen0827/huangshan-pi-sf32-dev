@@ -5,6 +5,7 @@ import Testing
 @Test func exposesRuntimeTransportDefaults() {
     #expect(VibeBoardRuntimeDefaults.bleAppPageLimit == 1)
     #expect(VibeBoardRuntimeDefaults.dataChunkBytes == 160)
+    #expect(VibeBoardRuntimeDefaults.voiceChunkBytes == 200)
     #expect(VibeBoardRuntimeDefaults.installChunkBytes == 48)
     #expect(VibeBoardRuntimeDefaults.maxInstallChunkBytes == 240)
 }
@@ -356,6 +357,15 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     ])
 
     #expect(package.appId == "flow_app")
+}
+
+@Test func acceptsPeerPagerManifestAndLuaHelpersBeforeInstall() throws {
+    let package = try RuntimePackage(appId: "pager", files: [
+        "main.lua": Data("vibe_peer_pager()\n".utf8),
+        "manifest.json": Data(#"{"schemaVersion":1,"kind":"huangshan-runtime-app-manifest","id":"pager","entry":"main.lua","runtimeProfile":"huangshan-pi","capabilities":["peer","peer.status","peer.messages","peer.send","peer.pair"],"components":[]}"#.utf8)
+    ])
+
+    #expect(package.appId == "pager")
 }
 
 @Test func acceptsFullLuaAndRejectsDisabledCapabilitiesBeforeInstall() throws {
@@ -853,6 +863,9 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
         expectedSequence: 4,
         offset: 320
     ))
+    #expect(VibeBoardBLEStatusMatcher.voiceStopMatches("ok voice_stop seq=4 bytes=16000 rc=0"))
+    #expect(VibeBoardBLEStatusMatcher.voiceStopMatches("noise\nerr voice_stop seq=4 bytes=0 rc=-22"))
+    #expect(!VibeBoardBLEStatusMatcher.voiceStopMatches("voice_stop"))
     #expect(VibeBoardBLEStatusMatcher.voiceClearMatches("ok voice_clear"))
     #expect(VibeBoardBLEStatusMatcher.voiceClearMatches("err voice_clear rc=-1"))
     #expect(VibeBoardBLEStatusMatcher.voiceClearMatches("noise\n[vb_runtime][voice] err voice_clear rc=-5"))

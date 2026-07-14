@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "thunder_wing",
+  "name": "Thunder Wing",
+  "description": "An original tilt-controlled vertical shooter with waves, power cores, and stage bosses.",
+  "category": "Games",
+  "icon": "rocket",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "assets/screenshot.png",
+  "requirements": ["Runtime", "LSM6DSL", "Display", "Touch"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "sensor.acce"],
+  "components": [
+    {"type": "status", "capability": "sensor.acce", "label": "Tilt steering", "value": "--"},
+    {"type": "status", "capability": "display.state", "label": "Game loop", "value": "30 ms"}
+  ]
+}

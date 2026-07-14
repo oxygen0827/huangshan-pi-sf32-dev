@@ -3,7 +3,7 @@
 
 #include "lvgl.h"
 
-#define HS_UI_COLOR_BG       lv_color_hex(0x070B12)
+#define HS_UI_COLOR_BG       lv_color_hex(0x080D14)
 #define HS_UI_COLOR_PANEL    lv_color_hex(0x172033)
 #define HS_UI_COLOR_PANEL_2  lv_color_hex(0x22314A)
 #define HS_UI_COLOR_TEXT     lv_color_hex(0xF8FAFC)
@@ -24,7 +24,8 @@ typedef enum
 {
     HS_UI_STATUS_OK = 0,
     HS_UI_STATUS_WARN,
-    HS_UI_STATUS_DANGER
+    HS_UI_STATUS_DANGER,
+    HS_UI_STATUS_NEUTRAL
 } hs_ui_status_t;
 
 extern lv_style_t hs_ui_style_screen;
@@ -37,6 +38,8 @@ extern lv_style_t hs_ui_style_badge_warn;
 extern lv_style_t hs_ui_style_badge_danger;
 
 void hs_ui_theme_init(void);
+void hs_ui_screen_apply(lv_obj_t *screen);
 lv_color_t hs_ui_status_color(hs_ui_status_t status);
+hs_ui_status_t hs_ui_status_from_name(const char *name);
 
 #endif
