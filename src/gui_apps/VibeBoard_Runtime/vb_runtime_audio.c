@@ -40,6 +40,7 @@ typedef struct
     char path[VB_AUDIO_PATH_MAX];
     int tone_requested;
     int tone_continuous;
+    int capture_reserved;
     rt_thread_t worker;
 #if VB_AUDIO_BUILT
     audio_client_t client;
@@ -300,7 +301,8 @@ done:
     if (fd >= 0) close(fd);
     g_vb_audio.playing = 0;
     g_vb_audio.ready = result == RT_EOK ? 1 : 0;
-    g_vb_audio.last_error = g_vb_audio.stop_requested ? -RT_EINTR : result;
+    /* A requested stop is a successful control action, not a playback fault. */
+    g_vb_audio.last_error = result == -RT_EINTR ? RT_EOK : result;
     g_vb_audio.stop_requested = 0;
     rt_kprintf("[vb_runtime][audio] finished seq=%lu rc=%d bytes=%lu/%lu\n",
                (unsigned long)g_vb_audio.sequence, g_vb_audio.last_error,
@@ -314,10 +316,31 @@ int vb_runtime_audio_available(void)
     return VB_AUDIO_BUILT;
 }
 
+int vb_runtime_audio_is_playing(void)
+{
+    return g_vb_audio.worker || g_vb_audio.playing;
+}
+
+int vb_runtime_audio_prepare_capture(void)
+{
+    int result;
+    if (g_vb_audio.capture_reserved) return -RT_EBUSY;
+    g_vb_audio.capture_reserved = 1;
+    result = vb_runtime_audio_stop();
+    if (result != RT_EOK) g_vb_audio.capture_reserved = 0;
+    return result;
+}
+
+void vb_runtime_audio_finish_capture(void)
+{
+    g_vb_audio.capture_reserved = 0;
+}
+
 int vb_runtime_audio_play_wav(const char *path)
 {
     rt_thread_t worker;
     if (!VB_AUDIO_BUILT) return -RT_ENOSYS;
+    if (g_vb_audio.capture_reserved) return -RT_EBUSY;
     if (!path || rt_strncmp(path, "/sdcard/apps/", 13) != 0 || strstr(path, "..")) return -RT_EINVAL;
     if (g_vb_audio.worker || g_vb_audio.playing) return -RT_EBUSY;
     g_vb_audio.sequence++;
@@ -329,7 +352,7 @@ int vb_runtime_audio_play_wav(const char *path)
     g_vb_audio.ready = 0;
     g_vb_audio.suspended = 0;
     g_vb_audio.stop_requested = 0;
-    g_vb_audio.last_error = 1;
+    g_vb_audio.last_error = RT_EOK;
     g_vb_audio.tone_requested = 0;
     g_vb_audio.tone_continuous = 0;
     rt_strncpy(g_vb_audio.path, path, sizeof(g_vb_audio.path) - 1);
@@ -355,6 +378,7 @@ int vb_runtime_audio_play_tone(int continuous)
 {
     rt_thread_t worker;
     if (!VB_AUDIO_BUILT) return -RT_ENOSYS;
+    if (g_vb_audio.capture_reserved) return -RT_EBUSY;
     if (g_vb_audio.worker || g_vb_audio.playing) return -RT_EBUSY;
     g_vb_audio.sequence++;
     g_vb_audio.played_bytes = 0;
@@ -365,7 +389,7 @@ int vb_runtime_audio_play_tone(int continuous)
     g_vb_audio.ready = 0;
     g_vb_audio.suspended = 0;
     g_vb_audio.stop_requested = 0;
-    g_vb_audio.last_error = 1;
+    g_vb_audio.last_error = RT_EOK;
     g_vb_audio.tone_requested = 1;
     g_vb_audio.tone_continuous = continuous ? 1 : 0;
     rt_strncpy(g_vb_audio.path, continuous ? "<1khz-continuous>" : "<1khz-tone>",
@@ -424,7 +448,7 @@ int vb_runtime_audio_read_json(char *dst, rt_size_t cap)
                        "{\"api\":\"%s\",\"available\":%d,\"playing\":%d,\"ready\":%d,"
                        "\"suspended\":%d,\"seq\":%lu,\"rate\":%lu,\"channels\":%lu,"
                        "\"bits\":%lu,\"bytes\":%lu,\"total\":%lu,\"volume\":%d,"
-                       "\"err\":%d,\"path\":\"%s\"}",
+                       "\"err\":%d,\"capture_reserved\":%d,\"path\":\"%s\"}",
                        VB_RUNTIME_AUDIO_API_VERSION, VB_AUDIO_BUILT,
                        g_vb_audio.playing, g_vb_audio.ready, g_vb_audio.suspended,
                        (unsigned long)g_vb_audio.sequence,
@@ -433,7 +457,8 @@ int vb_runtime_audio_read_json(char *dst, rt_size_t cap)
                        (unsigned long)g_vb_audio.bits_per_sample,
                        (unsigned long)g_vb_audio.played_bytes,
                        (unsigned long)g_vb_audio.data_bytes,
-                       g_vb_audio.volume, g_vb_audio.last_error, g_vb_audio.path);
+                       g_vb_audio.volume, g_vb_audio.last_error,
+                       g_vb_audio.capture_reserved, g_vb_audio.path);
     dst[cap - 1] = '\0';
     return used >= 0 && used < (int)cap ? RT_EOK : -RT_EFULL;
 }

@@ -3,7 +3,9 @@ project/build_*/
 project/.sconsign.dblite
 project/__pycache__/
 .sifli-tools/
+.venv/
 .venv-ble/
+.local/
 *.pyc
 compile_commands.json
 .DS_Store
@@ -11,3 +13,4 @@ compile_commands.json
 .voice_terminal.env
 captures/
 assets/lvgl-official/upstream-master/
+scripts/runtime_apps/codex_pet/assets/rocky/

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import struct
 import sys
 import tempfile
 import time
@@ -20,7 +19,13 @@ from runtime_transport import (
     ensure_bleak,
     save_ble_cache,
 )
-from voice_bridge_common import append_jsonl, capture_timestamped_wav
+from voice_bridge_common import (
+    VoiceStreamCollector,
+    append_jsonl,
+    capture_timestamped_wav,
+    mulaw_to_pcm16,
+    truncate_utf8,
+)
 from voice_llm_zhipu import API_KEY_ENV_NAMES
 
 
@@ -40,54 +45,6 @@ class MonitorState:
     initialized: bool = False
 
 
-class VoiceStreamCollector:
-    DATA = 1
-    END = 2
-    CANCEL = 3
-
-    def __init__(self) -> None:
-        self.buffers: dict[int, bytearray] = {}
-        self.completed: dict[int, int] = {}
-        self.errors: dict[int, str] = {}
-
-    def receive(self, packet: bytes) -> None:
-        if len(packet) < 9:
-            return
-        packet_type = packet[0]
-        sequence = int.from_bytes(packet[1:5], "little")
-        offset = int.from_bytes(packet[5:9], "little")
-        buffer = self.buffers.setdefault(sequence, bytearray())
-        if packet_type == self.DATA:
-            payload = packet[9:]
-            if offset == len(buffer):
-                buffer.extend(payload)
-            elif offset > len(buffer):
-                self.errors[sequence] = f"voice stream gap at {len(buffer)}/{offset}"
-        elif packet_type == self.END:
-            self.completed[sequence] = offset
-        elif packet_type == self.CANCEL:
-            self.buffers.pop(sequence, None)
-            self.completed.pop(sequence, None)
-            self.errors.pop(sequence, None)
-
-    async def take(self, sequence: int, expected_bytes: int, timeout: float = 3.0) -> bytes:
-        deadline = time.monotonic() + timeout
-        while sequence not in self.completed and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        error = self.errors.pop(sequence, None)
-        buffer = bytes(self.buffers.pop(sequence, b""))
-        total = self.completed.pop(sequence, None)
-        if error:
-            raise RuntimeError(error)
-        if total is None:
-            raise RuntimeError(f"voice stream end missing for seq={sequence}")
-        if total != len(buffer) or expected_bytes != len(buffer):
-            raise RuntimeError(
-                f"voice stream length mismatch: board={expected_bytes} end={total} received={len(buffer)}"
-            )
-        return buffer
-
-
 def fail(message: str, code: int = 1) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(code)
@@ -98,25 +55,6 @@ def safe_int(value: str | None, default: int = 0) -> int:
         return int(value or "")
     except ValueError:
         return default
-
-
-def truncate_utf8(text: str, max_bytes: int = MAX_TRANSCRIPT_BYTES) -> str:
-    normalized = " ".join(text.strip().split())
-    encoded = normalized.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return normalized
-    return encoded[:max_bytes].decode("utf-8", "ignore").rstrip()
-
-
-def mulaw_to_pcm16(payload: bytes) -> bytes:
-    pcm = bytearray(len(payload) * 2)
-    for index, encoded in enumerate(payload):
-        value = (~encoded) & 0xFF
-        magnitude = ((value & 0x0F) << 3) + 0x84
-        magnitude <<= (value & 0x70) >> 4
-        sample = 0x84 - magnitude if value & 0x80 else magnitude - 0x84
-        struct.pack_into("<h", pcm, index * 2, max(-32768, min(32767, sample)))
-    return bytes(pcm)
 
 
 def api_key_is_set() -> bool:

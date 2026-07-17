@@ -1,0 +1,74 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "statusMessage": "Notifying Codex Pet",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

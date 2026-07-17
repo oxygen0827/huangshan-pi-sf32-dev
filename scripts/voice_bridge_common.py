@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,6 +19,73 @@ DEFAULT_LOG_PATH = DEFAULT_OUT_DIR / "voice_terminal.jsonl"
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
+
+
+class VoiceStreamCollector:
+    DATA = 1
+    END = 2
+    CANCEL = 3
+
+    def __init__(self) -> None:
+        self.buffers: dict[int, bytearray] = {}
+        self.completed: dict[int, int] = {}
+        self.errors: dict[int, str] = {}
+
+    def receive(self, packet: bytes) -> None:
+        if len(packet) < 9:
+            return
+        packet_type = packet[0]
+        sequence = int.from_bytes(packet[1:5], "little")
+        offset = int.from_bytes(packet[5:9], "little")
+        buffer = self.buffers.setdefault(sequence, bytearray())
+        if packet_type == self.DATA:
+            payload = packet[9:]
+            if offset == len(buffer):
+                buffer.extend(payload)
+            elif offset > len(buffer):
+                self.errors[sequence] = f"voice stream gap at {len(buffer)}/{offset}"
+        elif packet_type == self.END:
+            self.completed[sequence] = offset
+        elif packet_type == self.CANCEL:
+            self.buffers.pop(sequence, None)
+            self.completed.pop(sequence, None)
+            self.errors.pop(sequence, None)
+
+    async def take(self, sequence: int, expected_bytes: int, timeout: float = 3.0) -> bytes:
+        deadline = time.monotonic() + timeout
+        while sequence not in self.completed and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        error = self.errors.pop(sequence, None)
+        buffer = bytes(self.buffers.pop(sequence, b""))
+        total = self.completed.pop(sequence, None)
+        if error:
+            raise RuntimeError(error)
+        if total is None:
+            raise RuntimeError(f"voice stream end missing for seq={sequence}")
+        if total != len(buffer) or expected_bytes != len(buffer):
+            raise RuntimeError(
+                f"voice stream length mismatch: board={expected_bytes} end={total} received={len(buffer)}"
+            )
+        return buffer
+
+
+def truncate_utf8(text: str, max_bytes: int = 192) -> str:
+    normalized = " ".join(text.strip().split())
+    encoded = normalized.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return normalized
+    return encoded[:max_bytes].decode("utf-8", "ignore").rstrip()
+
+
+def mulaw_to_pcm16(payload: bytes) -> bytes:
+    pcm = bytearray(len(payload) * 2)
+    for index, encoded in enumerate(payload):
+        value = (~encoded) & 0xFF
+        magnitude = ((value & 0x0F) << 3) + 0x84
+        magnitude <<= (value & 0x70) >> 4
+        sample = 0x84 - magnitude if value & 0x80 else magnitude - 0x84
+        struct.pack_into("<h", pcm, index * 2, max(-32768, min(32767, sample)))
+    return bytes(pcm)
 
 
 def write_wav(path: Path, pcm: bytes) -> None:
@@ -169,6 +238,16 @@ def run_self_test() -> None:
         assert loaded["wav"] == str(wav_path)
         assert loaded["transport"] == "test"
         assert build_reply_text("static", None, wav_path, 160) == "static"
+        assert truncate_utf8("  你好\n 世界  ", 192) == "你好 世界"
+        collector = VoiceStreamCollector()
+        collector.receive(bytes([1]) + (7).to_bytes(4, "little") + (0).to_bytes(4, "little") + b"abc")
+        collector.receive(bytes([1]) + (7).to_bytes(4, "little") + (3).to_bytes(4, "little") + b"def")
+        collector.receive(bytes([2]) + (7).to_bytes(4, "little") + (6).to_bytes(4, "little"))
+        assert asyncio.run(collector.take(7, 6)) == b"abcdef"
+        collector.receive(bytes([1]) + (8).to_bytes(4, "little") + (0).to_bytes(4, "little") + b"cancel")
+        collector.receive(bytes([3]) + (8).to_bytes(4, "little") + (6).to_bytes(4, "little"))
+        assert 8 not in collector.buffers
+        assert mulaw_to_pcm16(bytes([0xFF, 0x7F])) == b"\x00\x00\x00\x00"
     print("voice_bridge_common self-test ok")
 
 

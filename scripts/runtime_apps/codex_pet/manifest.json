@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "codex_pet",
+  "name": "Codex Pet",
+  "description": "Codex Desktop companion with multi-task status, alerts, and physical approval controls.",
+  "category": "Companions",
+  "icon": "bot",
+  "author": "Huangshan Runtime Team",
+  "screenshot": "generated:codex-pet",
+  "requirements": ["Codex Pet Desktop Monitor", "Codex Hooks", "BLE", "Optional external speaker on SPK port"],
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "gpio", "gpio.key2", "ble", "voice", "voice.start", "voice.stop", "flow", "audio", "audio.playback"],
+  "components": []
+}

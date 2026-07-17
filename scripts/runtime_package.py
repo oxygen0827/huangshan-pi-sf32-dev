@@ -34,7 +34,7 @@ SAFE_APP_ID = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
 SAFE_PATH = re.compile(
     r"^(manifest\.json|app\.info|main\.lua|files\.txt|README\.md|"
     r"(?:assets|images|fonts|lib)/[A-Za-z0-9_./-]+\."
-    r"(?:json|txt|png|jpg|jpeg|bin|ttf|otf|lua|wav))$"
+    r"(?:json|txt|png|jpg|jpeg|bin|rle|ttf|otf|lua|wav))$"
 )
 
 LUA_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -318,6 +318,7 @@ LUA_SUPPORTED_CALLS = {
     "vibe_peer_label",
     "vibe_peer_send",
     "vibe_peer_pager",
+    "vibe_codex_pet",
     "vibe_rgb",
     "vibe_snake_autoplay",
     "vibe_2048_game",

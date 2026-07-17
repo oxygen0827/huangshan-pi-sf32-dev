@@ -1,0 +1,25 @@
+# Review and merge this table into ~/.codex/config.toml when the Bridge is running.
+# It is intentionally project-local and is not installed automatically.
+[mcp_servers.huangshan_pet]
+command = "/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/.venv/bin/python"
+args = ["/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_mcp.py"]
+cwd = "/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev"
+startup_timeout_sec = 10.0
+tool_timeout_sec = 20.0
+enabled_tools = [
+  "huangshan_status",
+  "huangshan_capabilities",
+  "huangshan_sensors",
+  "huangshan_power",
+  "huangshan_rgb",
+  "huangshan_display",
+  "huangshan_app_status",
+  "huangshan_apps",
+  "huangshan_audio",
+  "huangshan_set_rgb",
+  "huangshan_set_brightness",
+  "huangshan_show_message",
+  "huangshan_launch_app",
+  "huangshan_play_cue",
+  "huangshan_stop_audio",
+]

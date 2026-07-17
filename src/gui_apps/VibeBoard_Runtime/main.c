@@ -56,6 +56,7 @@
 #include "app_mem.h"
 #include "vb_runtime_package.h"
 #include "vb_runtime_audio.h"
+#include "vb_runtime_codex_pet.h"
 #include "vb_runtime_lua_host.h"
 #if defined(RGB_SK6812MINI_HS_ENABLE)
 #include "bf0_hal.h"
@@ -83,6 +84,7 @@
 #define VIBEBOARD_STAGING_PREFIX ".__install_"
 #define VIBEBOARD_BACKUP_PREFIX ".__backup_"
 #define VIBEBOARD_DEFAULT_APP_ID "welcome"
+#define VIBEBOARD_CODEX_PET_APP_ID "codex_pet"
 #define VIBEBOARD_FS_DEVICE "vbfs"
 #define VIBEBOARD_BT_PAN_NAME "VibeBoard-PAN"
 #define VIBEBOARD_BLE_NAME "VibeBoard"
@@ -105,7 +107,7 @@
 #define VB_MAX_SCRIPT_ARG 96
 #define VB_MAX_HEX_CHARS 512
 #define VB_AUTORUN_DELAY_MS 2200
-#define VB_RUNTIME_AUTORUN_UI 0
+#define VB_RUNTIME_AUTORUN_UI 1
 #define VB_SCREEN_SAFE_LEFT 30
 #define VB_SCREEN_SAFE_RIGHT 30
 #define VB_SCREEN_SAFE_TOP 36
@@ -591,6 +593,8 @@ typedef struct
     uint32_t dropped_bytes;
     uint32_t callback_count;
     int open_attempts;
+    int audio_reserved;
+    char context[16];
     uint32_t max_bytes;
     uint8_t *buffer;
 #if VB_RUNTIME_HAS_VOICE_CAPTURE
@@ -715,6 +719,7 @@ typedef struct
     int adv_configured;
     int advertising;
     int connected;
+    int encrypted;
     uint8_t last_adv_start_rc;
     uint8_t last_adv_stop_rc;
     uint8_t last_adv_stop_reason;
@@ -986,6 +991,7 @@ static int vb_runtime_flow_load_state(void);
 static void vb_runtime_flow_clear_state(void);
 static int vb_runtime_flow_status_command(void);
 static int vb_runtime_voice_start(uint32_t duration_ms);
+static int vb_runtime_voice_start_with_context(uint32_t duration_ms, const char *context);
 static int vb_runtime_voice_stop(void);
 static void vb_runtime_voice_clear(void);
 static int vb_runtime_voice_status(char *dst, rt_size_t cap);
@@ -1108,6 +1114,7 @@ static int vb_is_resource_package_path(const char *path)
         rt_strcmp(dot, ".jpg") != 0 &&
         rt_strcmp(dot, ".jpeg") != 0 &&
         rt_strcmp(dot, ".bin") != 0 &&
+        rt_strcmp(dot, ".rle") != 0 &&
         rt_strcmp(dot, ".ttf") != 0 &&
         rt_strcmp(dot, ".otf") != 0 &&
         rt_strcmp(dot, ".lua") != 0 &&
@@ -2607,24 +2614,32 @@ BLE_GATT_SERVICE_DEFINE_128(vb_ble_install_att_db)
     BLE_GATT_CHAR_DECLARE(VB_BLE_INSTALL_CMD_CHAR, SERIAL_UUID_16_CHARACTERISTIC, BLE_GATT_PERM_READ_ENABLE),
     BLE_GATT_CHAR_VALUE_DECLARE(VB_BLE_INSTALL_CMD_VALUE, VB_UUID128(0x00, 0x00, 0x00, 0x02),
                                 BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_WRITE_REQ_ENABLE |
-                                BLE_GATT_PERM_WRITE_COMMAND_ENABLE,
+                                BLE_GATT_PERM_WRITE_COMMAND_ENABLE |
+                                BLE_GATT_PERM_READ_PERMISSION_UNAUTH |
+                                BLE_GATT_PERM_WRITE_PERMISSION_UNAUTH,
                                 BLE_GATT_VALUE_PERM_UUID_128 | BLE_GATT_VALUE_PERM_RI_ENABLE,
                                 VB_BLE_MAX_COMMAND),
     BLE_GATT_CHAR_DECLARE(VB_BLE_INSTALL_STATUS_CHAR, SERIAL_UUID_16_CHARACTERISTIC, BLE_GATT_PERM_READ_ENABLE),
     BLE_GATT_CHAR_VALUE_DECLARE(VB_BLE_INSTALL_STATUS_VALUE, VB_UUID128(0x00, 0x00, 0x00, 0x03),
-                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_NOTIFY_ENABLE,
+                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_NOTIFY_ENABLE |
+                                BLE_GATT_PERM_READ_PERMISSION_UNAUTH |
+                                BLE_GATT_PERM_NOTIFY_PERMISSION_UNAUTH,
                                 BLE_GATT_VALUE_PERM_UUID_128 | BLE_GATT_VALUE_PERM_RI_ENABLE,
                                 VB_BLE_STATUS_MAX),
     BLE_GATT_DESCRIPTOR_DECLARE(VB_BLE_INSTALL_STATUS_CCCD, SERIAL_UUID_16_CLIENT_CHAR_CFG,
-                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_WRITE_REQ_ENABLE,
+                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_WRITE_REQ_ENABLE |
+                                BLE_GATT_PERM_READ_PERMISSION_UNAUTH |
+                                BLE_GATT_PERM_WRITE_PERMISSION_UNAUTH,
                                 BLE_GATT_VALUE_PERM_RI_ENABLE, 2),
     BLE_GATT_CHAR_DECLARE(VB_BLE_INSTALL_VOICE_CHAR, SERIAL_UUID_16_CHARACTERISTIC, BLE_GATT_PERM_READ_ENABLE),
     BLE_GATT_CHAR_VALUE_DECLARE(VB_BLE_INSTALL_VOICE_VALUE, VB_UUID128(0x00, 0x00, 0x00, 0x04),
-                                BLE_GATT_PERM_NOTIFY_ENABLE,
+                                BLE_GATT_PERM_NOTIFY_ENABLE | BLE_GATT_PERM_NOTIFY_PERMISSION_UNAUTH,
                                 BLE_GATT_VALUE_PERM_UUID_128 | BLE_GATT_VALUE_PERM_RI_ENABLE,
                                 VB_VOICE_STREAM_HEADER_BYTES + VB_VOICE_STREAM_MAX_PAYLOAD),
     BLE_GATT_DESCRIPTOR_DECLARE(VB_BLE_INSTALL_VOICE_CCCD, SERIAL_UUID_16_CLIENT_CHAR_CFG,
-                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_WRITE_REQ_ENABLE,
+                                BLE_GATT_PERM_READ_ENABLE | BLE_GATT_PERM_WRITE_REQ_ENABLE |
+                                BLE_GATT_PERM_READ_PERMISSION_UNAUTH |
+                                BLE_GATT_PERM_WRITE_PERMISSION_UNAUTH,
                                 BLE_GATT_VALUE_PERM_RI_ENABLE, 2),
 };
 
@@ -2685,7 +2700,7 @@ static void vb_ble_set_status(const char *fmt, ...)
 static void vb_ble_notify_status(void)
 {
     sibles_value_t value;
-    if (!g_vb_ble.connected || !g_vb_ble.notify_cccd || !g_vb_ble.srv_handle) return;
+    if (!g_vb_ble.connected || !g_vb_ble.encrypted || !g_vb_ble.notify_cccd || !g_vb_ble.srv_handle) return;
     value.hdl = g_vb_ble.srv_handle;
     value.idx = VB_BLE_INSTALL_STATUS_VALUE;
     value.len = (uint16_t)rt_strlen(g_vb_ble.status);
@@ -2695,7 +2710,7 @@ static void vb_ble_notify_status(void)
 
 static int vb_ble_voice_stream_ready(void)
 {
-    return g_vb_ble.connected && g_vb_ble.voice_cccd && g_vb_ble.srv_handle;
+    return g_vb_ble.connected && g_vb_ble.encrypted && g_vb_ble.voice_cccd && g_vb_ble.srv_handle;
 }
 
 static int vb_ble_notify_voice_packet(uint8_t type, uint32_t sequence,
@@ -2800,18 +2815,19 @@ static int vb_ble_execute_line(char *line)
     {
         char active[VB_MAX_APP_ID];
         vb_read_active_app(active, sizeof(active));
-        vb_ble_set_status("ok status api=%s active=%s flow=%lu", VIBEBOARD_RUNTIME_BLE_API_VERSION,
+        vb_ble_set_status("ok status api=%s active=%s flow=%lu secure=%d", VIBEBOARD_RUNTIME_BLE_API_VERSION,
                           active[0] ? active : "(unknown)",
-                          (unsigned long)g_vb_flow.total_count);
+                          (unsigned long)g_vb_flow.total_count,
+                          g_vb_ble.encrypted);
         return RT_EOK;
     }
     if (rt_strcmp(argv[0], "ble_status") == 0 ||
         rt_strcmp(argv[0], "vb_runtime_ble_status") == 0)
     {
-        vb_ble_set_status("ok ble api=%s init=%d power=%d service=%d adv=%d conn=%d mtu=%d state=%d idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu",
+        vb_ble_set_status("ok ble api=%s init=%d power=%d service=%d adv=%d conn=%d secure=%d mtu=%d state=%d idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu",
                           VIBEBOARD_RUNTIME_BLE_API_VERSION,
                           g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready,
-                          g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.mtu,
+                          g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.encrypted, g_vb_ble.mtu,
                           (int)vb_ble_adv_context_state(),
                           (int)vb_ble_adv_context_index(),
                           (int)vb_ble_adv_context_transist(),
@@ -3195,6 +3211,11 @@ static void vb_ble_receive_bytes(const uint8_t *data, uint16_t len)
 
 static int vb_ble_claim_host_connection(uint8_t conn_idx)
 {
+    if (connection_manager_get_enc_state(conn_idx) != ENC_STATE_ON)
+    {
+        rt_kprintf("[vb_runtime][ble] reject unencrypted host idx=%u\n", (unsigned)conn_idx);
+        return 0;
+    }
     if (g_vb_ble.connected && g_vb_ble.conn_idx != conn_idx)
     {
         rt_kprintf("[vb_runtime][ble] reject host claim idx=%u owner=%u\n",
@@ -3204,12 +3225,13 @@ static int vb_ble_claim_host_connection(uint8_t conn_idx)
     if (!g_vb_ble.connected)
     {
         g_vb_ble.connected = 1;
+        g_vb_ble.encrypted = 1;
         g_vb_ble.conn_idx = conn_idx;
         g_vb_ble.mtu = conn_idx < VB_BLE_TRACKED_CONNECTIONS && g_vb_ble.mtu_by_conn[conn_idx] ?
                        g_vb_ble.mtu_by_conn[conn_idx] : 23;
         g_vb_ble.rx_len = 0;
         vb_peer_release_host_connection(conn_idx);
-        rt_kprintf("[vb_runtime][ble] host claimed idx=%u\n", (unsigned)conn_idx);
+        rt_kprintf("[vb_runtime][ble] host claimed idx=%u secure=1\n", (unsigned)conn_idx);
     }
     return 1;
 }
@@ -3466,6 +3488,12 @@ static void vb_ble_worker_entry(void *parameter)
         {
             g_vb_ble.power_on = 1;
             g_vb_ble.mtu = 23;
+            /* Require a bond-backed, no-MITM link before exposing Runtime GATT data. */
+            (void)connection_manager_set_bond_cnf_sec(GAP_SEC1_NOAUTH_PAIR_ENC);
+            (void)connection_manager_set_connected_auth(GAP_AUTH_REQ_NO_MITM_BOND);
+            (void)connection_manager_set_bond_cnf_auth(GAP_AUTH_REQ_NO_MITM_BOND);
+            (void)connection_manager_set_bond_cnf_iocap(GAP_IO_CAP_NO_INPUT_NO_OUTPUT);
+            (void)connection_manager_set_bond_ack(BOND_ACCEPT);
             vb_ble_service_init();
             vb_ble_advertising_start();
         }
@@ -3553,11 +3581,33 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
                        (unsigned)ind->conn_idx, (unsigned)ind->role,
                        (unsigned)ind->con_interval, g_vb_ble.connected,
                        (unsigned)g_vb_ble.conn_idx);
+            /* Some controller builds publish the connection-manager event late; request
+             * security at the raw link event as well so protected GATT never races it. */
+            if (ind->role == 1)
+            {
+                uint8_t security_rc = connection_manager_set_link_security(
+                    ind->conn_idx, LE_SECURITY_LEVEL_NO_MITM_BOND);
+                rt_kprintf("[vb_runtime][ble] raw security requested idx=%u rc=%u\n",
+                           (unsigned)ind->conn_idx, (unsigned)security_rc);
+            }
             if (ind->role == 1)
             {
                 g_vb_ble.advertising = 0;
                 if (g_vb_ble.mailbox) rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
             }
+        }
+        break;
+    }
+    case CONNECTION_MANAGER_CONNCTED_IND:
+    {
+        connection_manager_connect_ind_t *ind = (connection_manager_connect_ind_t *)data;
+        if (ind)
+        {
+            /* Initiate Just Works pairing before macOS touches protected GATT. */
+            (void)connection_manager_set_link_security(ind->conn_idx,
+                                                        LE_SECURITY_LEVEL_NO_MITM_BOND);
+            rt_kprintf("[vb_runtime][ble] security requested idx=%u level=no_mitm_bond\n",
+                       (unsigned)ind->conn_idx);
         }
         break;
     }
@@ -3570,6 +3620,7 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
         if (ind->conn_idx == g_vb_ble.conn_idx)
         {
             g_vb_ble.connected = 0;
+            g_vb_ble.encrypted = 0;
             g_vb_ble.notify_cccd = 0;
             g_vb_ble.voice_cccd = 0;
             g_vb_ble.conn_idx = INVALID_CONN_IDX;
@@ -3580,6 +3631,18 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
             rt_kprintf("[vb_runtime][ble] non-host disconnected idx=%u reason=%u\n",
                        (unsigned)ind->conn_idx, (unsigned)ind->reason);
         if (g_vb_ble.mailbox) rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
+        break;
+    }
+    case CONNECTION_MANAGER_ENCRYPT_IND_EVENT:
+    {
+        connection_manager_encrypt_ind_t *ind = (connection_manager_encrypt_ind_t *)data;
+        if (ind)
+        {
+            int encrypted = connection_manager_get_enc_state(ind->conn_idx) == ENC_STATE_ON;
+            if (ind->conn_idx == g_vb_ble.conn_idx) g_vb_ble.encrypted = encrypted;
+            rt_kprintf("[vb_runtime][ble] encryption idx=%u secure=%d auth=%u\n",
+                       (unsigned)ind->conn_idx, encrypted, (unsigned)ind->auth);
+        }
         break;
     }
     case SIBLES_MTU_EXCHANGE_IND:
@@ -5418,7 +5481,9 @@ static void vb_runtime_voice_stop_client(void)
 
 static void vb_runtime_voice_clear(void)
 {
+    int had_capture = g_vb_voice.audio_reserved || g_vb_voice.recording;
 #if VB_RUNTIME_HAS_VOICE_CAPTURE
+    had_capture = had_capture || g_vb_voice.worker;
     if (g_vb_voice.worker)
     {
         g_vb_voice.stop_requested = 1;
@@ -5441,7 +5506,10 @@ static void vb_runtime_voice_clear(void)
     g_vb_voice.dropped_bytes = 0;
     g_vb_voice.callback_count = 0;
     g_vb_voice.open_attempts = 0;
+    g_vb_voice.context[0] = '\0';
     vb_runtime_voice_release_buffer();
+    if (had_capture) vb_runtime_audio_finish_capture();
+    g_vb_voice.audio_reserved = 0;
 }
 
 #if VB_RUNTIME_HAS_VOICE_CAPTURE
@@ -5562,11 +5630,13 @@ static void vb_runtime_voice_worker_entry(void *parameter)
                (unsigned long)g_vb_voice.stream_packets);
     g_vb_voice.stop_requested = 0;
     g_vb_voice.finish_requested = 0;
+    vb_runtime_audio_finish_capture();
+    g_vb_voice.audio_reserved = 0;
     g_vb_voice.worker = RT_NULL;
 }
 #endif
 
-static int vb_runtime_voice_start(uint32_t duration_ms)
+static int vb_runtime_voice_start_with_context(uint32_t duration_ms, const char *context)
 {
 #if VB_RUNTIME_HAS_VOICE_CAPTURE
     int result;
@@ -5578,6 +5648,7 @@ static int vb_runtime_voice_start(uint32_t duration_ms)
     if (g_vb_voice.recording || g_vb_voice.worker) return -RT_EBUSY;
 
     vb_runtime_voice_clear();
+    vb_safe_copy(g_vb_voice.context, sizeof(g_vb_voice.context), context ? context : "");
     g_vb_voice.streaming = duration_ms == VB_VOICE_HOLD_UNTIL_RELEASE_MS && vb_ble_voice_stream_ready();
     if (duration_ms == VB_VOICE_HOLD_UNTIL_RELEASE_MS && !g_vb_voice.streaming)
     {
@@ -5599,6 +5670,15 @@ static int vb_runtime_voice_start(uint32_t duration_ms)
         return result;
     }
 
+    result = vb_runtime_audio_prepare_capture();
+    if (result != RT_EOK)
+    {
+        g_vb_voice.last_error = result;
+        vb_runtime_voice_release_buffer();
+        return result;
+    }
+    g_vb_voice.audio_reserved = 1;
+
     g_vb_voice.requested_ms = duration_ms;
     g_vb_voice.sequence++;
     g_vb_voice.recording = 1;
@@ -5617,6 +5697,8 @@ static int vb_runtime_voice_start(uint32_t duration_ms)
         g_vb_voice.recording = 0;
         g_vb_voice.last_error = -RT_ENOMEM;
         vb_runtime_voice_release_buffer();
+        vb_runtime_audio_finish_capture();
+        g_vb_voice.audio_reserved = 0;
         return -RT_ENOMEM;
     }
     g_vb_voice.worker = worker;
@@ -5631,6 +5713,11 @@ static int vb_runtime_voice_start(uint32_t duration_ms)
     g_vb_voice.last_error = -RT_ENOSYS;
     return -RT_ENOSYS;
 #endif
+}
+
+static int vb_runtime_voice_start(uint32_t duration_ms)
+{
+    return vb_runtime_voice_start_with_context(duration_ms, "");
 }
 
 static int vb_runtime_voice_stop(void)
@@ -5652,7 +5739,7 @@ static int vb_runtime_voice_status(char *dst, rt_size_t cap)
 {
     if (!dst || cap == 0) return -RT_EINVAL;
     rt_snprintf(dst, cap,
-                "ok voice api=%s built=%d ready=%d recording=%d seq=%lu bytes=%lu rate=%d bits=%d channels=%d codec=%s dropped=%lu callbacks=%lu opens=%d stream=%d packets=%lu err=%d",
+                "ok voice api=%s built=%d ready=%d recording=%d seq=%lu bytes=%lu rate=%d bits=%d channels=%d codec=%s dropped=%lu callbacks=%lu opens=%d stream=%d packets=%lu err=%d context=%s",
                 VIBEBOARD_RUNTIME_VOICE_API_VERSION,
                 VB_RUNTIME_HAS_VOICE_CAPTURE,
                 g_vb_voice.ready,
@@ -5668,7 +5755,8 @@ static int vb_runtime_voice_status(char *dst, rt_size_t cap)
                 g_vb_voice.open_attempts,
                 g_vb_voice.streaming,
                 (unsigned long)g_vb_voice.stream_packets,
-                g_vb_voice.last_error);
+                g_vb_voice.last_error,
+                g_vb_voice.context);
     dst[cap - 1] = '\0';
     return RT_EOK;
 }
@@ -5681,7 +5769,7 @@ static int vb_runtime_voice_read_json(char *dst, rt_size_t cap)
                        "{\"api\":\"%s\",\"available\":%d,\"built\":%d,\"ready\":%d,"
                        "\"recording\":%d,\"seq\":%lu,\"requested_ms\":%lu,\"bytes\":%lu,"
                        "\"rate\":%d,\"bits\":%d,\"channels\":%d,\"codec\":\"%s\",\"dropped\":%lu,"
-                       "\"callbacks\":%lu,\"opens\":%d,\"err\":%d}",
+                       "\"callbacks\":%lu,\"opens\":%d,\"err\":%d,\"context\":\"%s\"}",
                        VIBEBOARD_RUNTIME_VOICE_API_VERSION,
                        VB_RUNTIME_HAS_VOICE_CAPTURE,
                        VB_RUNTIME_HAS_VOICE_CAPTURE,
@@ -5697,7 +5785,8 @@ static int vb_runtime_voice_read_json(char *dst, rt_size_t cap)
                        (unsigned long)g_vb_voice.dropped_bytes,
                        (unsigned long)g_vb_voice.callback_count,
                        g_vb_voice.open_attempts,
-                       g_vb_voice.last_error);
+                       g_vb_voice.last_error,
+                       g_vb_voice.context);
     dst[cap - 1] = '\0';
     if (used < 0 || used >= (int)cap)
     {
@@ -5850,6 +5939,90 @@ static int vb_runtime_voice_read_hex(uint32_t offset, uint32_t max_bytes, char *
                                  dst + rt_strlen(dst), cap - rt_strlen(dst));
     return result == RT_EOK ? RT_EOK : result;
 }
+
+static int vb_codex_pet_voice_start(const char *context)
+{
+    return vb_runtime_voice_start_with_context(VB_VOICE_HOLD_UNTIL_RELEASE_MS,
+                                               context);
+}
+
+static void vb_codex_pet_voice_snapshot(vb_codex_pet_voice_snapshot_t *snapshot)
+{
+    if (!snapshot) return;
+    snapshot->recording = g_vb_voice.recording;
+    snapshot->ready = g_vb_voice.ready;
+    snapshot->error = g_vb_voice.last_error;
+    snapshot->sequence = g_vb_voice.sequence;
+    snapshot->bytes = g_vb_voice.recorded_bytes;
+}
+
+static int vb_codex_pet_key2_pressed(void)
+{
+    return g_vb_runtime.gpio.key2_ok && g_vb_runtime.gpio.key2_pressed;
+}
+
+static int vb_codex_pet_rgb_set(const char *color)
+{
+    char json[VB_RGB_JSON_MAX];
+    return vb_runtime_rgb_set_text(color, json, sizeof(json)) == RT_EOK ? RT_EOK : -RT_ERROR;
+}
+
+static int vb_codex_pet_send_action(const char *action, const char *request_id)
+{
+    const char *cursor;
+    if (!action || !request_id ||
+        (rt_strcmp(action, "approve") != 0 && rt_strcmp(action, "deny") != 0 &&
+         rt_strcmp(action, "prev") != 0 && rt_strcmp(action, "next") != 0))
+        return -RT_EINVAL;
+    if (!request_id[0] || rt_strlen(request_id) > 24) return -RT_EINVAL;
+    for (cursor = request_id; *cursor; cursor++)
+    {
+        char value = *cursor;
+        if (!((value >= 'A' && value <= 'Z') ||
+              (value >= 'a' && value <= 'z') ||
+              (value >= '0' && value <= '9') ||
+              value == '_' || value == '.' || value == ':' || value == '-'))
+            return -RT_EINVAL;
+    }
+    if (!g_vb_ble.connected || !g_vb_ble.encrypted || !g_vb_ble.notify_cccd)
+        return -RT_ERROR;
+    vb_ble_set_status("pet_action action=%s request=%s", action, request_id);
+    vb_ble_notify_status();
+    return RT_EOK;
+}
+
+static int vb_codex_pet_cue_play(const char *cue)
+{
+    char path[VB_MAX_PATH];
+    if (!cue ||
+        (rt_strcmp(cue, "listening") != 0 &&
+         rt_strcmp(cue, "submitted") != 0 &&
+         rt_strcmp(cue, "needs_input") != 0 &&
+         rt_strcmp(cue, "done") != 0 &&
+         rt_strcmp(cue, "error") != 0))
+        return -RT_EINVAL;
+    (void)vb_runtime_audio_stop();
+    rt_snprintf(path, sizeof(path), "/sdcard/apps/codex_pet/assets/%s.wav", cue);
+    path[sizeof(path) - 1] = '\0';
+    return vb_runtime_audio_play_wav(path);
+}
+
+static void vb_codex_pet_cue_stop(void)
+{
+    (void)vb_runtime_audio_stop();
+}
+
+static const vb_codex_pet_ops_t g_vb_codex_pet_ops = {
+    vb_codex_pet_voice_start,
+    vb_runtime_voice_stop,
+    vb_runtime_voice_clear,
+    vb_codex_pet_voice_snapshot,
+    vb_codex_pet_key2_pressed,
+    vb_codex_pet_rgb_set,
+    vb_codex_pet_send_action,
+    vb_codex_pet_cue_play,
+    vb_codex_pet_cue_stop,
+};
 
 static int vb_runtime_voice_json_status_command(void)
 {
@@ -6114,6 +6287,7 @@ static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, cons
                item->channel,
                (unsigned long)item->bytes,
                item->payload);
+    vb_codex_pet_receive_flow(item->channel, item->sequence, item->payload);
     vb_runtime_flow_save_latest();
     return (int)bytes;
 }
@@ -9802,8 +9976,9 @@ static lv_obj_t *vb_pager_button(const char *text, int x, int y, int width, int 
     return button;
 }
 
-static void vb_pager_clear_root(void)
+static void vb_runtime_clear_root_children(void)
 {
+    int i;
     if (!g_vb_runtime.root) return;
     lv_obj_clean(g_vb_runtime.root);
     g_vb_runtime.status_label = RT_NULL;
@@ -9814,6 +9989,11 @@ static void vb_pager_clear_root(void)
     g_vb_runtime.script_flow_label = RT_NULL;
     g_vb_runtime.script_audio_label = RT_NULL;
     g_vb_runtime.script_peer_label = RT_NULL;
+    g_vb_runtime.script_last_label = RT_NULL;
+    g_vb_runtime.script_tick_label = RT_NULL;
+    for (i = 0; i < g_vb_runtime.component_count; i++)
+        g_vb_runtime.components[i].value_label = RT_NULL;
+    g_vb_runtime.component_count = 0;
     g_vb_runtime.pager.status_label = RT_NULL;
     g_vb_runtime.pager.messages_label = RT_NULL;
     g_vb_runtime.pager.voice_button = RT_NULL;
@@ -10218,7 +10398,7 @@ static void vb_pager_render(void)
     vb_peer_status_t status;
     if (!g_vb_runtime.pager.active || !g_vb_runtime.root) return;
     vb_peer_get_status(&status);
-    vb_pager_clear_root();
+    vb_runtime_clear_root_children();
     vb_set_obj_bg(g_vb_runtime.root, 0x0f172a);
     vb_pager_render_header(&status);
     if (g_vb_runtime.pager.compose_view && status.connected)
@@ -10747,6 +10927,21 @@ static int vb_script_execute_helper_call(const char *line)
         rt_kprintf("[vb_runtime][lua] peer.pager rc=%d\n", result);
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_codex_pet", args, &argc))
+    {
+        vb_runtime_clear_root_children();
+        vb_runtime_init_image_decoders();
+        int result = vb_codex_pet_start(g_vb_runtime.root, &g_vb_codex_pet_ops,
+                                        argc >= 1 ? args[0] : "Codex workspace");
+        int index = vb_runtime_flow_latest_index();
+        if (result == RT_EOK && index >= 0)
+        {
+            vb_info_flow_item_t *item = &g_vb_flow.items[index];
+            vb_codex_pet_receive_flow(item->channel, item->sequence, item->payload);
+        }
+        rt_kprintf("[vb_runtime][lua] codex.pet rc=%d\n", result);
+        return 1;
+    }
     if (vb_extract_call_args(line, "vibe_rgb", args, &argc) && argc >= 1)
     {
         char json[VB_RGB_JSON_MAX];
@@ -10809,6 +11004,7 @@ int vibeboard_lua_host_reset(void)
 {
     if (!g_vb_runtime.root) return -RT_ERROR;
     vb_pager_stop();
+    vb_codex_pet_stop();
     rt_memset(g_vb_runtime.script_objects, 0, sizeof(g_vb_runtime.script_objects));
     g_vb_runtime.script_object_count = 1;
     g_vb_runtime.script_ui_component_count = 0;
@@ -10911,6 +11107,7 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
 static void vb_builtin_script_stop(void)
 {
     vb_pager_stop();
+    vb_codex_pet_stop();
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_last_label = RT_NULL;
     g_vb_runtime.script_tick_label = RT_NULL;
@@ -12793,6 +12990,7 @@ static void vb_timer_cb(lv_timer_t *timer)
         }
     }
     vb_pager_refresh(now);
+    vb_codex_pet_tick(now);
     vb_pomodoro_step(now);
     if (g_vb_runtime.snake.active && now - g_vb_runtime.snake.last_run >= g_vb_runtime.snake.period_ticks)
     {
@@ -12868,9 +13066,17 @@ static int app_main(intent_t i)
 #if VB_RUNTIME_AUTORUN_UI
 static void vb_runtime_autorun_entry(void *parameter)
 {
+    char active[VB_MAX_APP_ID];
     int attempt;
     (void)parameter;
     rt_thread_mdelay(VB_AUTORUN_DELAY_MS);
+    vb_runtime_state_bootstrap();
+    vb_read_active_app(active, sizeof(active));
+    if (rt_strcmp(active, VIBEBOARD_CODEX_PET_APP_ID) != 0)
+    {
+        rt_kprintf("[vb_runtime] autorun skipped active=%s\n", active);
+        return;
+    }
     for (attempt = 0; attempt < 8; attempt++)
     {
         if (gui_app_run(APP_ID) == RT_EOK)
@@ -13222,8 +13428,9 @@ static int vb_runtime_ble_status(int argc, char **argv)
     rt_kprintf("[vb_runtime][ble] ok ble_core api=%s name=%s init=%d power=%d service=%d\n",
                VIBEBOARD_RUNTIME_BLE_API_VERSION, VIBEBOARD_BLE_NAME,
                g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready);
-    rt_kprintf("[vb_runtime][ble] ok ble_conn adv=%d conn=%d notify=%d mtu=%d state=%d\n",
-               g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.notify_cccd ? 1 : 0,
+    rt_kprintf("[vb_runtime][ble] ok ble_conn adv=%d conn=%d secure=%d notify=%d mtu=%d state=%d\n",
+               g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.encrypted,
+               g_vb_ble.notify_cccd ? 1 : 0,
                g_vb_ble.mtu, (int)vb_ble_adv_context_state());
     rt_kprintf("[vb_runtime][ble] ok ble_adv idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu\n",
                (int)vb_ble_adv_context_index(),

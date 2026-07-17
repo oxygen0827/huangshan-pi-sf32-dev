@@ -262,6 +262,255 @@ def audit_high_risk_capability_evaluation() -> None:
         ok("high_risk_capability_evaluation", "high-risk Runtime capability evaluation and links are present")
 
 
+def audit_voice_stop_contract() -> None:
+    required = {
+        "src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c": '"vibe_voice_stop"',
+        "src/gui_apps/VibeBoard_Runtime/main.c": '"vibe_voice_stop"',
+        "scripts/runtime_package.py": '"vibe_voice_stop"',
+        "scripts/runtime_transport.py": "def voice_stop(",
+        "mobile/ios/VibeBoardBLE/Sources/VibeBoardBLE/RuntimePackage.swift": '"vibe_voice_stop"',
+    }
+    for rel, token in required.items():
+        if token not in read(rel):
+            fail("voice_stop_contract", f"{rel} does not expose {token}")
+    if not any(item[0] == "fail" and item[1].startswith("voice_stop_contract") for item in CHECKS):
+        ok("voice_stop_contract", "voice_stop is aligned across Lua, firmware, Python and Swift")
+
+
+def audit_codex_pet_bridge() -> None:
+    protocol = read("scripts/codex_pet_protocol.py")
+    bridge = read("scripts/codex_pet_bridge.py")
+    helper = read("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c")
+    required_protocol = (
+        'PROTOCOL_VERSION = "pet/v1"',
+        "MAX_WIRE_BYTES = 192",
+        "MAX_TTL_MS = 30_000",
+        "class SequenceWindow:",
+        "class EventReducer:",
+    )
+    required_bridge = (
+        "class TransportCommandQueue:",
+        "class DeviceSession:",
+        "class TaskJournal:",
+        "class LocalIPCServer:",
+        'os.chmod(self.path, 0o600)',
+        'os.chmod(temporary, 0o600)',
+        '"inputSha256"',
+    )
+    for token in required_protocol:
+        if token not in protocol:
+            fail("codex_pet_bridge", f"pet/v1 protocol is missing {token!r}")
+    for token in required_bridge:
+        if token not in bridge:
+            fail("codex_pet_bridge", f"single-owner Bridge is missing {token!r}")
+    if bridge.count("BLETransport(options)") != 1:
+        fail("codex_pet_bridge", "codex_pet_bridge.py must instantiate exactly one BLETransport")
+    if "promptSha256" in bridge:
+        fail("codex_pet_bridge", "task journal must not use the obsolete promptSha256 field")
+    if "int(time.time() * 1000) & 0xFFFFFFFF" not in bridge:
+        fail("codex_pet_bridge", "Bridge sequence seed must advance across rapid restarts")
+    if "vb_pet_sequence_newer" not in helper:
+        fail("codex_pet_bridge", "board sequence checks must tolerate uint32 wraparound")
+    keychain_launcher = read("scripts/codex_pet_test_backend.command")
+    monitor = read("scripts/codex_pet_monitor.py")
+    monitor_launcher = read("scripts/codex_pet_monitor.command")
+    approval_helper = read("scripts/codex_pet_desktop_approval.swift")
+    for token in (
+        "class DesktopTaskRegistry:",
+        "class CodexDesktopMonitor:",
+        'TASKS_CHANNEL = "pet.tasks"',
+        "APPROVAL_TTL_MS",
+        "SubprocessApprovalExecutor",
+    ):
+        if token not in monitor:
+            fail("codex_pet_bridge", f"desktop monitor is missing {token!r}")
+    for token in ("--mode monitor", "CodexPetDesktopApproval", "swiftc"):
+        if token not in monitor_launcher:
+            fail("codex_pet_bridge", f"desktop monitor launcher is missing {token!r}")
+    for token in ("AXIsProcessTrusted", "codex://threads/", "safePair", "kAXPressAction"):
+        if token not in approval_helper:
+            fail("codex_pet_bridge", f"restricted desktop approval helper is missing {token!r}")
+    for token in (
+        "find-generic-password",
+        "add-generic-password",
+        "delete-generic-password",
+        "KEYCHAIN_SERVICE=",
+    ):
+        if token not in keychain_launcher:
+            fail("codex_pet_bridge", f"Keychain test launcher is missing {token!r}")
+    if "ZHIPU_API_KEY=" in keychain_launcher and "ZHIPU_API_KEY=\"$(read_api_key)\"" not in keychain_launcher:
+        fail("codex_pet_bridge", "test launcher must not contain a literal GLM API key")
+    if re.search(r"^\s*status=", keychain_launcher, re.MULTILINE):
+        fail("codex_pet_bridge", "zsh test launcher must not assign the read-only status parameter")
+    if not any(item[0] == "fail" and item[1].startswith("codex_pet_bridge") for item in CHECKS):
+        ok("codex_pet_bridge", "pet/v1 and the single-owner Bridge contracts are present")
+
+
+def audit_codex_pet_voice_app() -> None:
+    required = (
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.h", "vb_codex_pet_receive_flow"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c", "static void vb_pet_begin_voice(void)"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", '#include "vb_runtime_codex_pet.h"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", '"vibe_codex_pet"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", 'VIBEBOARD_CODEX_PET_APP_ID "codex_pet"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "rt_strcmp(active, VIBEBOARD_CODEX_PET_APP_ID)"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "static void vb_runtime_clear_root_children(void)"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_runtime_clear_root_children();"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_codex_pet_rgb_set"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c", '"vibe_codex_pet"'),
+        ("scripts/runtime_package.py", '"vibe_codex_pet"'),
+        ("mobile/ios/VibeBoardBLE/Sources/VibeBoardBLE/RuntimePackage.swift", '"vibe_codex_pet"'),
+        ("scripts/runtime_apps/codex_pet/main.lua", "vibe_codex_pet"),
+        ("scripts/runtime_apps/codex_pet/manifest.json", '"id": "codex_pet"'),
+        ("scripts/codex_pet_voice.py", "class CodexPetVoiceService:"),
+        ("scripts/voice_bridge_common.py", "class VoiceStreamCollector:"),
+        ("scripts/pager_voice_bridge.py", "from voice_bridge_common import ("),
+        ("scripts/codex_pet_status.py", "class CodexPetStatusService:"),
+        ("scripts/codex_pet_status.py", "async def observe_external("),
+        ("scripts/codex_pet_status.py", 'QUOTA_CHANNEL = "pet.quota"'),
+        ("scripts/codex_pet_hook.py", '"PermissionRequest": ("needs_input", "approval", "Approval required")'),
+        ("scripts/codex_pet_hook.py", 'str(Path(tempfile.gettempdir()) / f"huangshan-codex-pet-{os.getuid()}.sock")'),
+        ("scripts/codex_pet_hook.py", "def ack_accepted("),
+    )
+    for rel, token in required:
+        if token not in read(rel):
+            fail("codex_pet_voice_app", f"{rel} does not contain {token!r}")
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    helper = read("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c")
+    rocky_extractor = read("scripts/extract_codex_rocky.js")
+    if "static void vb_pet_begin_voice(void)" in main:
+        fail("codex_pet_voice_app", "Codex Pet business state leaked into Runtime main.c")
+    for token in ("pet.new", "pet.continue", "pet.transcript", "pet.task.ack", "pet.asr.error"):
+        if token not in helper and token not in read("scripts/codex_pet_voice.py"):
+            fail("codex_pet_voice_app", f"Codex Pet flow is missing {token!r}")
+    for token in ("pet.quota", "vb_pet_rgb_tick", "rgb_set"):
+        if token not in helper and token not in main:
+            fail("codex_pet_voice_app", f"Codex Pet status/RGB flow is missing {token!r}")
+    for token in ('rt_strcmp(channel, "pet.tasks")', '"Allow" : "<"', '"Deny" : ">"',
+                  "VB_PET_VOICE_UI_ENABLED 0"):
+        if token not in helper:
+            fail("codex_pet_voice_app", f"monitor-first board UI is missing {token!r}")
+    for token in (
+        "rocky-spritesheet-v5-",
+        "integrity?.hash",
+        "kernel: \"nearest\"",
+        "EXPECTED_ROWS = 11",
+        "ROCKY_RLE_MAGIC",
+        "encodeRleFrame",
+    ):
+        if token not in rocky_extractor:
+            fail("codex_pet_voice_app", f"verified Rocky extractor is missing {token!r}")
+    for token in (
+        "VB_PET_ROCKY_DIR",
+        "VB_PET_ROCKY_RLE_MAGIC",
+        "g_vb_pet_rocky_paths",
+        "vb_pet_load_rocky_frame",
+        "app_cache_img_alloc",
+        "IMAGE_CACHE_PSRAM",
+        "vb_pet_release_rocky_frames",
+        "vb_pet_update_rocky",
+        "rocky_available",
+    ):
+        if token not in helper:
+            fail("codex_pet_voice_app", f"Rocky board renderer is missing {token!r}")
+    if 'rt_strcmp(dot, ".rle")' not in main:
+        fail("codex_pet_voice_app", "firmware package validator does not allow Rocky RLE resources")
+    for token in (
+        "BLE_GATT_PERM_WRITE_PERMISSION_UNAUTH",
+        "BLE_GATT_PERM_NOTIFY_PERMISSION_UNAUTH",
+        "connection_manager_get_enc_state",
+        "connection_manager_set_bond_cnf_sec",
+        "connection_manager_set_link_security",
+        "security requested idx=%u level=no_mitm_bond",
+        "secure=%d",
+    ):
+        if token not in main:
+            fail("codex_pet_voice_app", f"encrypted BLE gate is missing {token!r}")
+    if 'values["secure"] != "1"' not in read("scripts/runtime_transport.py"):
+        fail("codex_pet_voice_app", "desktop BLE transport does not reject explicitly unencrypted Runtime links")
+    for token in ("BLE_AUTHENTICATION_TIMEOUT_SECONDS", "_ble_authentication_pending"):
+        if token not in read("scripts/runtime_transport.py"):
+            fail("codex_pet_voice_app", f"desktop BLE pairing recovery is missing {token!r}")
+    if "context=%s" not in main or r'\"context\":\"%s\"' not in main:
+        fail("codex_pet_voice_app", "voice status does not expose the Codex Pet capture context")
+    if not any(item[0] == "fail" and item[1].startswith("codex_pet_voice_app") for item in CHECKS):
+        ok("codex_pet_voice_app", "native pet UI and the shared voice-to-Codex pipeline are present")
+
+
+def audit_codex_pet_mcp() -> None:
+    mcp_rel = "scripts/codex_pet_mcp.py"
+    bridge_rel = "scripts/codex_pet_bridge.py"
+    status_rel = "scripts/codex_pet_status.py"
+    helper_rel = "src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c"
+    for rel in (mcp_rel, "docs/codex-pet-mcp.toml"):
+        require_file("codex_pet_mcp", rel)
+    required = (
+        (mcp_rel, 'PROTOCOL_VERSION = "2025-06-18"'),
+        (mcp_rel, '"method": "tools/call"'),
+        (mcp_rel, '"readOnlyHint"'),
+        (mcp_rel, '"additionalProperties": False'),
+        (bridge_rel, "class HardwareAuditLog:"),
+        (bridge_rel, 'action == "hardware_command"'),
+        (bridge_rel, 'source = "hook" if action == "hook_event" else "mcp"'),
+        (status_rel, "async def resolve_approval("),
+        (status_rel, '_BOARD_APPROVAL_METHODS'),
+        (helper_rel, 'rt_strcmp(channel, "pet.approval")'),
+        (helper_rel, 'g_pet.ops.send_action("approve"'),
+        (helper_rel, 'g_pet.ops.send_action("deny"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", 'vb_ble_notify_status();'),
+        ("scripts/runtime_transport.py", "next_status_notification"),
+    )
+    for rel, token in required:
+        if token not in read(rel):
+            fail("codex_pet_mcp", f"{rel} does not contain {token!r}")
+    mcp = read(mcp_rel)
+    tool_names = set(re.findall(r'"name": "([a-z0-9_]+)"', mcp))
+    forbidden = {"raw_gpio", "read_file", "write_file", "flash_firmware", "capture_microphone"}
+    exposed = sorted(tool_names & forbidden)
+    if exposed:
+        fail("codex_pet_mcp", "dangerous MCP tools are exposed: " + ", ".join(exposed))
+    if "BLETransport(" in mcp or "BleakClient" in mcp:
+        fail("codex_pet_mcp", "MCP server bypasses the single-owner Bridge")
+    if not any(item[0] == "fail" and item[1].startswith("codex_pet_mcp") for item in CHECKS):
+        ok("codex_pet_mcp", "MCP tools, audit boundary, and one-shot physical approvals are present")
+
+
+def audit_codex_pet_audio() -> None:
+    required_files = (
+        "scripts/codex_pet_audio.py",
+        "scripts/generate_codex_pet_cues.py",
+        "docs/codex-pet-audio-evaluation.md",
+        "scripts/runtime_apps/codex_pet/assets/listening.wav",
+        "scripts/runtime_apps/codex_pet/assets/submitted.wav",
+        "scripts/runtime_apps/codex_pet/assets/needs_input.wav",
+        "scripts/runtime_apps/codex_pet/assets/done.wav",
+        "scripts/runtime_apps/codex_pet/assets/error.wav",
+    )
+    for rel in required_files:
+        require_file("codex_pet_audio", rel)
+    required = (
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c", "vb_runtime_audio_prepare_capture"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c", "g_vb_audio.capture_reserved"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c", "result == -RT_EINTR ? RT_EOK : result"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_runtime_audio_finish_capture();"),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_codex_pet_cue_play"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c", 'g_pet.ops.cue_play("listening")'),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c", "vb_pet_local_voice_active"),
+        ("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c", "vb_pet_reset_voice_capture"),
+        ("scripts/codex_pet_mcp.py", '"name": "huangshan_play_cue"'),
+        ("scripts/codex_pet_mcp.py", '"name": "huangshan_stop_audio"'),
+        ("scripts/codex_pet_audio.py", "TTS_MAX_WAV_BYTES = 512 * 1024"),
+        ("scripts/codex_pet_audio.py", "def wake_word_gate("),
+    )
+    for rel, token in required:
+        if token not in read(rel):
+            fail("codex_pet_audio", f"{rel} does not contain {token!r}")
+    if "g_vb_audio.last_error = 1;" in read("src/gui_apps/VibeBoard_Runtime/vb_runtime_audio.c"):
+        fail("codex_pet_audio", "audio in-progress state is exposed as a false error")
+    if not any(item[0] == "fail" and item[1].startswith("codex_pet_audio") for item in CHECKS):
+        ok("codex_pet_audio", "optional cues, capture arbitration, TTS policy, and KWS gates are present")
+
+
 def audit_direct_transport_usage() -> None:
     allowed_direct_serial = {
         "scripts/runtime_transport.py",
@@ -309,6 +558,11 @@ def run_audit() -> int:
     audit_voice_memory_lifecycle()
     audit_msh_stack_usage()
     audit_high_risk_capability_evaluation()
+    audit_voice_stop_contract()
+    audit_codex_pet_bridge()
+    audit_codex_pet_voice_app()
+    audit_codex_pet_mcp()
+    audit_codex_pet_audio()
     audit_direct_transport_usage()
     failures = [message for status, message in CHECKS if status == "fail"]
     for status, message in CHECKS:

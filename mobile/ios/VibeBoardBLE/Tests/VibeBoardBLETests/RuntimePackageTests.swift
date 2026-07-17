@@ -73,6 +73,7 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
     #expect(!RuntimePackage.isSafeAppId("a_very_long_app_id"))
 
     #expect(RuntimePackage.isSafePath("assets/icon.png"))
+    #expect(RuntimePackage.isSafePath("assets/rocky/idle0.rle"))
     #expect(RuntimePackage.isSafePath("main.lua"))
     #expect(!RuntimePackage.isSafePath("../main.lua"))
     #expect(!RuntimePackage.isSafePath("/main.lua"))

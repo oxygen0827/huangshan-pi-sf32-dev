@@ -33,6 +33,7 @@ def serial_transport_options(args: argparse.Namespace) -> SerialTransportOptions
         final_wait=args.final_wait,
         ready_timeout=args.ready_timeout,
         echo=not args.no_echo,
+        write_chunk_pause=args.write_chunk_pause,
     )
 
 
@@ -234,6 +235,8 @@ def main() -> int:
     parser.add_argument("--command-wait", type=float, default=0.22)
     parser.add_argument("--final-wait", type=float, default=2.0)
     parser.add_argument("--ready-timeout", type=float, default=24.0)
+    parser.add_argument("--write-chunk-pause", type=float, default=0.012,
+                        help="Pause between 24-byte UART writes; lower only with per-command ACK checks enabled")
     parser.add_argument("--stop-before-end", action="store_true", help="Write package chunks but do not commit; used to verify staging safety")
     parser.add_argument("--no-echo", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="Run offline CLI routing checks and exit")

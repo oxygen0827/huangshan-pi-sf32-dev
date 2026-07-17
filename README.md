@@ -83,6 +83,7 @@ GUI 应用。
 | 屏幕 Display JSON / Lua helper / display_stage 示例 | 已可用；首版开放 CO5300 面板尺寸/状态/亮度快照和 0-100 亮度设置，暂不开放熄屏/开屏控制，串口 / BLE / iOS 均已接入同一 API |
 | RGB JSON / Lua helper `vb_runtime_rgb` / `vibe_rgb(...)` | 已可用；串口 / BLE 自动回归已覆盖设色、读回与恢复 |
 | 信息流 `flow_send` / `pc.voice` / flow_stage 示例 | 已跑通；已修复 Lua 清屏后 `flow_label` 悬空导致的回写崩溃，电脑或手机端文本可以稳定回写到板子；App 可用 manifest `flow.*` 或 `vibe_flow_label(...)` 只读展示最新信息流，最近一条会保存到 `/sdcard/apps/.flow` 以便跨复位/跨 BLE 重连恢复，串口 / BLE 独立回归已覆盖 clear/send/status/clear/persist |
+| Codex Companion / Codex Pet | 已跑通；板端显示 Codex Desktop 多任务状态、Rocky 宠物动画和额度信息，任务执行、完成、卡住或等待审批时同步更新屏幕与 RGB；左右键切换任务，审批出现时变为 `Allow / Deny`。板端页面不再提供 Talk 入口，语音底层 API 仅为后续兼容保留 |
 | 语音桥 `voice_start/stop/status/read/clear` | 已跑通；串口 / BLE 都已完成 16 kHz PCM 短录音、按住说话松手保留、WAV 落盘、回复回写与证据校验 |
 | 语音状态 / 受控录音 App API / voice_stage 示例 | 已可用；`vb_runtime_voice` / BLE `voice` / `--voice-only` 提供只读状态，App 可通过 `voice.start` / `voice.clear` action 或 `vibe_voice_start(...)` / `vibe_voice_clear()` 请求 Runtime 限时录音和清空录音，但仍不能直接读取 PCM |
 | Runtime manifest + Lua 5.5 VM | 已可用；支持函数、闭包、表、循环、模块和 UTF-8 等完整 Lua 语言能力；标准库、LVGL binding、384 KiB 内存和 50 万指令预算仍由 Runtime 控制 |
@@ -109,6 +110,121 @@ GUI 应用。
 
 当前这条线最核心的工作，已经不是“能不能点亮屏幕”或“能不能装 App”，而是把
 这些板级能力继续收敛成一套稳定、可复用、可给 App 直接调用的 Runtime API。
+
+## Codex Companion
+
+`scripts/runtime_apps/codex_pet/` 是运行在黄山派上的 Codex Desktop 状态伴侣。电脑端
+Bridge 独占 BLE 连接，Codex Hooks 把任务生命周期事件送入 Bridge，Bridge 再把当前任务
+列表、状态、额度和受限审批请求同步到板子。
+
+当前产品边界：
+
+- 板子只负责显示宠物、任务状态、提醒和简单审批；任务输入继续在电脑端 Codex 完成。
+- 左右按钮用于切换当前监控到的任务；出现受支持的审批请求时，按钮自动变为
+  `Allow / Deny`。
+- 命令执行和文件修改审批可以在板端处理；API Key、密码、普通问题和其他敏感输入仍必须
+  在电脑端处理。
+- 板端页面没有 Talk 按钮。录音、ASR 和语音提交 API 仍保留在 Runtime 中，但不属于当前
+  默认交互路径。
+- RGB 会随 `connected / running / ready / blocked / needs_input` 状态变化；Bridge 心跳中断
+  后会自动回到离线状态，不把旧任务继续显示为运行中。
+
+数据路径如下：
+
+```text
+Codex Desktop Hooks
+  -> codex_pet_hook.py
+  -> codex_pet_bridge.py (single BLE owner)
+  -> pet/v1 Flow messages
+  -> Huangshan Runtime / codex_pet
+  -> Rocky animation + task status + Allow/Deny
+```
+
+### 准备 Rocky 宠物资源
+
+仓库不提交从 Codex Desktop 提取的 Rocky 图片资源。`extract_codex_rocky.js` 会在本机读取
+已安装的 `/Applications/ChatGPT.app`，校验 ASAR 内资源完整性，并生成 10 帧 VRLE 文件：
+
+```bash
+node scripts/extract_codex_rocky.js
+node scripts/extract_codex_rocky.js --check
+```
+
+VRLE 文件保存在 `scripts/runtime_apps/codex_pet/assets/rocky/`，安装 App 时写入 SD 卡；
+运行时一次性解压到 PSRAM。SD 卡只提供资源存储，不会增加 LVGL 运行内存。若资源缺失或
+任意一帧校验失败，固件会释放全部动画帧并显示内置矢量宠物，不应出现空圆环。
+
+### 安装到黄山派
+
+先构建并刷入包含原生 Codex Pet helper 的 Runtime 固件：
+
+```bash
+./scripts/build.sh
+./scripts/flash.sh /dev/cu.usbserial-XXXX
+```
+
+首次使用电脑端 BLE Bridge 时准备 Python 环境：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install bleak
+```
+
+然后将 App 和 Rocky 资源安装到 SD 卡。黄山派 FinSH 命令行较短，Codex Pet 资源包应使用
+64 字节安装块和逐段 UART 节流：
+
+```bash
+.venv/bin/python scripts/runtime_install_serial.py /dev/cu.usbserial-XXXX \
+  --package-dir scripts/runtime_apps/codex_pet \
+  --chunk-bytes 64 \
+  --no-echo \
+  --command-wait 0.03 \
+  --write-chunk-pause 0.003 \
+  --final-wait 3 \
+  --ready-timeout 90
+```
+
+安装过程使用 staging 目录；任一命令失败都会中止提交，不会用半包覆盖当前可运行版本。
+安装完成后重新启动板子，串口日志应包含：
+
+```text
+[vb_runtime][codex_pet] Rocky loaded: 10 RLE frames in PSRAM
+[vb_runtime][lua] codex.pet rc=0
+```
+
+### 启动桌面监控
+
+将 [`docs/codex-pet-hooks.json`](docs/codex-pet-hooks.json) 中的项目绝对路径改为当前 clone
+路径，并把其中的 Hooks 合并到 Codex 配置。然后启动唯一的 BLE Bridge：
+
+```bash
+CODEX_PET_BOARD=<CoreBluetooth peripheral identifier> \
+  ./scripts/codex_pet_monitor.command
+```
+
+首次使用板端桌面审批时，macOS 会请求辅助功能权限。审批 helper 只接收任务 session ID 和
+`approve / deny`，不读取或转发命令参数、文件路径、密码与 API Key。Bridge 运行期间不要再
+启动 App Store、语音 Bridge 或其他会直接占用同一黄山派 BLE 连接的服务。
+
+协议、状态归并、安全边界和 MCP 硬件工具详见
+[`docs/codex-pet-bridge.md`](docs/codex-pet-bridge.md)。
+
+### 验证与排障
+
+完整本机回归：
+
+```bash
+.venv/bin/python scripts/runtime_deep_check.py
+```
+
+若屏幕只显示圆环，依次确认：
+
+1. `node scripts/extract_codex_rocky.js --check` 能验证全部 10 帧。
+2. SD 卡中存在 `/sdcard/apps/codex_pet/assets/rocky/*.rle`。
+3. 冷启动日志出现 `Rocky loaded: 10 RLE frames in PSRAM`；若没有，读取此前的
+   `Rocky frame load failed path=...` 日志，不要把 SD 容量误判为运行内存。
+4. `codex.pet rc=0` 表示 App 已成功启动；Bridge 连接问题只影响任务状态同步，不会让已经
+   加载的宠物图像消失。
 
 
 
@@ -158,6 +274,7 @@ staging 提交、abort 和冷启动恢复机制，工程可靠性比单纯“能
 project/                 SCons 工程文件
 src/gui_apps/            当前启动器里的应用模块
 src/gui_apps/VibeBoard_Runtime/ 一次烧录后的串口 App 更新 Runtime
+scripts/runtime_apps/codex_pet/ Codex Companion 的 Lua 入口、提示音和本地生成资源
 src/gui_apps/Huangshan_UI_Lab/ AI/LVGL 组件化 UI 示例
 src/huangshan_ui/         built-in 与 Runtime 共用的受限 LVGL 主题/组件库
 src/gui_apps/Codex_Test/ 第一个已验证的自定义应用
@@ -184,6 +301,8 @@ docs/                    开发板、上游来源和 bring-up 记录
 - [黄山派 Runtime 高阶能力评估](docs/runtime-high-risk-capabilities-evaluation.md)
 - [黄山派 Runtime App Plan Writer](docs/runtime-app-plan-writer.md)
 - [Runtime App 开发经验记录](docs/runtime-app-development-notes.md)
+- [Codex Pet Bridge、任务状态与审批协议](docs/codex-pet-bridge.md)
+- [Codex Pet 音频、TTS 与唤醒词评估](docs/codex-pet-audio-evaluation.md)
 - [黄山派 LVGL AI 生成约束](docs/ai-ui/lvgl-system-contract.md)
 - [上游仓库记录](docs/upstream.md)
 - [开发板 bring-up 记录](docs/board-bringup.md)

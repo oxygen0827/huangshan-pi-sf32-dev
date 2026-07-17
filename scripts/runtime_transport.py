@@ -42,6 +42,8 @@ SERIAL_MSH_VOICE_CHUNK_BYTES = 30
 INSTALL_CHUNK_BYTES = 48
 SERIAL_JSON_CHUNK_BYTES = SERIAL_MSH_VOICE_CHUNK_BYTES
 MAX_INSTALL_CHUNK_BYTES = 240
+BLE_AUTHENTICATION_TIMEOUT_SECONDS = 20.0
+BLE_STATUS_NOTIFICATION_LIMIT = 64
 
 
 class JSONResponsePending(RuntimeError):
@@ -58,6 +60,11 @@ class RuntimeTransportError(RuntimeError):
 
 def transport_fail(message: str, exit_code: int | None = None) -> None:
     raise RuntimeTransportError(message)
+
+
+def _ble_authentication_pending(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "insufficient authentication" in message or "gatt protocol error: 5" in message
 
 
 def _validate_audio_target(app_id: str, path: str) -> None:
@@ -158,6 +165,7 @@ class SyncRuntimeTransport(Protocol):
 
 class AsyncRuntimeTransport(Protocol):
     async def status(self) -> str: ...
+    async def next_status_notification(self, *, timeout: float = 0.5) -> str: ...
     async def verify_connection(self, *, timeout: float | None = None) -> str: ...
     async def hold_connection(self, seconds: float, *, keepalive_period: float = 5.0) -> None: ...
     async def capabilities(self) -> str: ...
@@ -737,6 +745,8 @@ class SerialTransportOptions:
     final_wait: float = 2.0
     ready_timeout: float = 24.0
     echo: bool = False
+    connect_settle: float = 1.2
+    write_chunk_pause: float = 0.012
 
 
 class SerialTransport:
@@ -783,6 +793,10 @@ class SerialTransport:
         ser.dtr = False
         ser.rts = False
         self._serial = ser
+        # Some USB-UART bridges reset the board shortly after open. Discard any
+        # pre-reset Ready response so commands cannot race the ensuing boot.
+        time.sleep(max(0.0, self.options.connect_settle))
+        ser.reset_input_buffer()
         self.wait_until_ready()
 
     def close(self) -> None:
@@ -804,7 +818,7 @@ class SerialTransport:
         for index in range(0, len(data), 24):
             self._serial.write(data[index:index + 24])
             self._serial.flush()
-            time.sleep(0.012)
+            time.sleep(max(0.0, self.options.write_chunk_pause))
 
     def command(self, command: str, *, wait: float | None = None, echo: bool | None = None) -> str:
         do_echo = self.options.echo if echo is None else echo
@@ -1256,6 +1270,10 @@ class BLETransport:
         self._connection_label = ""
         self._status_notify_started = False
         self._voice_notify_started = False
+        self._voice_callback: Callable[[bytes], None] | None = None
+        self._status_notifications: asyncio.Queue[str] = asyncio.Queue(
+            maxsize=BLE_STATUS_NOTIFICATION_LIMIT
+        )
 
     async def __aenter__(self) -> "BLETransport":
         await self.connect()
@@ -1265,6 +1283,7 @@ class BLETransport:
         await self.close()
 
     async def connect(self) -> None:
+        self._clear_status_notifications()
         BleakClient, _ = ensure_bleak()
         device = self._cached_device() or await self._scan_device()
         self._connection_label = self._describe_device(device)
@@ -1289,10 +1308,11 @@ class BLETransport:
         await self._wait_for_services()
         if self.options.subscribe_status_notifications:
             try:
-                await self._client.start_notify(STATUS_UUID, lambda _sender, _data: None)
+                await self._client.start_notify(STATUS_UUID, self._handle_status_notification)
                 self._status_notify_started = True
             except Exception:
                 pass
+        await self._subscribe_voice_stream()
 
     async def close(self) -> None:
         if self._client is not None:
@@ -1314,10 +1334,34 @@ class BLETransport:
             await self._client_context.__aexit__(None, None, None)
         self._client_context = None
         self._client = None
+        self._clear_status_notifications()
 
     @property
     def connection_label(self) -> str:
         return self._connection_label
+
+    def _handle_status_notification(self, _sender, data: bytearray) -> None:
+        status = decode_status(data)
+        if not status:
+            return
+        if self._status_notifications.full():
+            try:
+                self._status_notifications.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._status_notifications.put_nowait(status)
+
+    def _clear_status_notifications(self) -> None:
+        while True:
+            try:
+                self._status_notifications.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+    async def next_status_notification(self, *, timeout: float = 0.5) -> str:
+        if timeout <= 0:
+            raise ValueError("status notification timeout must be positive")
+        return await asyncio.wait_for(self._status_notifications.get(), timeout=timeout)
 
     @staticmethod
     def _describe_device(device) -> str:
@@ -1385,14 +1429,22 @@ class BLETransport:
             return f"read_status_failed: {exc}"
 
     async def start_voice_stream(self, callback: Callable[[bytes], None]) -> None:
+        self._voice_callback = callback
+        await self._subscribe_voice_stream()
+
+    async def _subscribe_voice_stream(self) -> None:
         if self._voice_notify_started:
+            return
+        if self._voice_callback is None:
             return
         services = self._client.services
         if not services.get_characteristic(VOICE_STREAM_UUID):
             transport_fail("Board firmware has no BLE voice stream characteristic")
 
         def notify(_sender, data: bytearray) -> None:
-            callback(bytes(data))
+            callback = self._voice_callback
+            if callback is not None:
+                callback(bytes(data))
 
         await self._client.start_notify(VOICE_STREAM_UUID, notify)
         self._voice_notify_started = True
@@ -1428,6 +1480,7 @@ class BLETransport:
         payload = (command + "\n").encode("utf-8")
         last_error: Exception | None = None
         deadline = time.monotonic() + max(2.0, wait * 10)
+        authentication_pending = False
         while time.monotonic() < deadline:
             try:
                 await self._wait_for_services_retrying(wait)
@@ -1445,9 +1498,21 @@ class BLETransport:
                 return status
             except Exception as exc:  # pragma: no cover - depends on platform BLE stack
                 last_error = exc
+                if _ble_authentication_pending(exc):
+                    if not authentication_pending:
+                        authentication_pending = True
+                        deadline = max(deadline, time.monotonic() + BLE_AUTHENTICATION_TIMEOUT_SECONDS)
+                        if do_echo:
+                            print("BLE authentication pending; waiting for the encrypted link")
+                    if time.monotonic() < deadline:
+                        await asyncio.sleep(min(1.0, max(0.25, wait * 4)))
+                        continue
+                    transport_fail("BLE pairing did not complete before the authentication timeout")
                 if "Service Discovery has not been performed yet" not in str(exc):
                     raise
                 await asyncio.sleep(min(0.2, max(0.05, wait)))
+        if authentication_pending:
+            transport_fail("BLE pairing did not complete before the authentication timeout")
         transport_fail(f"BLE command failed: {last_error}" if last_error else "BLE command timed out")
 
     async def read_matching(
@@ -1545,12 +1610,16 @@ class BLETransport:
         return await self.command("status")
 
     async def verify_connection(self, *, timeout: float | None = None) -> str:
-        return await self.read_matching(
+        status = await self.read_matching(
             "status",
             lambda status: status.startswith("ok status "),
             timeout=timeout or max(4.0, self.options.final_wait + 3.0),
             response_wait=max(self.options.response_wait, 0.12),
         )
+        values = parse_key_values(status)
+        if "secure" in values and values["secure"] != "1":
+            transport_fail("BLE Runtime link is not encrypted")
+        return status
 
     async def hold_connection(self, seconds: float, *, keepalive_period: float = 5.0) -> None:
         if seconds == 0:
@@ -1860,6 +1929,12 @@ def run_self_test() -> None:
     assert INSTALL_CHUNK_BYTES == 48
     assert SERIAL_JSON_CHUNK_BYTES == SERIAL_MSH_VOICE_CHUNK_BYTES
     assert MAX_INSTALL_CHUNK_BYTES == 240
+    assert SerialTransportOptions(port="test").connect_settle >= 1.0
+    assert SerialTransportOptions(port="test").write_chunk_pause > 0
+    assert BLE_AUTHENTICATION_TIMEOUT_SECONDS >= 10.0
+    assert _ble_authentication_pending(RuntimeError("GATT Protocol Error: Insufficient Authentication"))
+    assert _ble_authentication_pending(RuntimeError("GATT Protocol Error: 5"))
+    assert not _ble_authentication_pending(RuntimeError("Insufficient authorization"))
     assert SERIAL_APP_PAGE_LIMIT >= BLE_APP_PAGE_LIMIT > 0
     assert hasattr(BLETransport, "verify_connection")
     assert hasattr(BLETransport, "hold_connection")
@@ -2064,6 +2139,13 @@ def run_self_test() -> None:
         except FileNotFoundError:
             pass
 
+    notifications = BLETransport(BLETransportOptions())
+    notifications._handle_status_notification(None, bytearray(b"pet_action action=approve request=req.1"))
+    assert notifications._status_notifications.get_nowait().endswith("request=req.1")
+    notifications._handle_status_notification(None, bytearray(b"stale"))
+    notifications._clear_status_notifications()
+    assert notifications._status_notifications.empty()
+
     class FakeSerialTransport(SerialTransport):
         def __init__(self) -> None:
             self.options = SerialTransportOptions(port="fake")
@@ -2237,6 +2319,40 @@ def run_self_test() -> None:
         ]
 
     asyncio.run(check_ble_command_matrix())
+
+    class FakeBLEServices:
+        @staticmethod
+        def get_characteristic(uuid: str):
+            return object() if uuid == VOICE_STREAM_UUID else None
+
+    class FakeNotifyClient:
+        def __init__(self) -> None:
+            self.services = FakeBLEServices()
+            self.notifications: dict[str, Callable] = {}
+
+        async def start_notify(self, uuid: str, callback: Callable) -> None:
+            self.notifications[uuid] = callback
+
+    async def check_ble_voice_notify_reconnect() -> None:
+        received: list[bytes] = []
+        callback = received.append
+        transport = BLETransport(BLETransportOptions(disconnect_pause=0))
+        first_client = FakeNotifyClient()
+        transport._client = first_client
+
+        await transport.start_voice_stream(callback)
+        first_client.notifications[VOICE_STREAM_UUID](None, bytearray(b"first"))
+        assert received == [b"first"]
+        assert transport._voice_callback is callback
+
+        transport._voice_notify_started = False
+        second_client = FakeNotifyClient()
+        transport._client = second_client
+        await transport._subscribe_voice_stream()
+        second_client.notifications[VOICE_STREAM_UUID](None, bytearray(b"second"))
+        assert received == [b"first", b"second"]
+
+    asyncio.run(check_ble_voice_notify_reconnect())
 
     fake_serial = FakeSerialTransport()
     pcm, voice_info = fake_serial.capture_voice(600, chunk_bytes=3)

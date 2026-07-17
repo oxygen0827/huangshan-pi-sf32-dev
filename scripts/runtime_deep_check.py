@@ -118,6 +118,19 @@ def python_compile_targets() -> list[str]:
         "scripts/runtime_reliability_ble.py",
         "scripts/runtime_full_reliability.py",
         "scripts/runtime_cold_recovery.py",
+        "scripts/codex_pet_appserver.py",
+        "scripts/codex_pet_audio.py",
+        "scripts/codex_pet_protocol.py",
+        "scripts/codex_pet_bridge.py",
+        "scripts/codex_pet_monitor.py",
+        "scripts/codex_pet_voice.py",
+        "scripts/codex_pet_status.py",
+        "scripts/codex_pet_hook.py",
+        "scripts/codex_pet_mcp.py",
+        "scripts/generate_codex_pet_cues.py",
+        "scripts/pager_voice_bridge.py",
+        "scripts/peer_protocol_test.py",
+        "scripts/peer_reliability.py",
         "scripts/voice_bridge_common.py",
         "scripts/voice_bridge_serial.py",
         "scripts/voice_bridge_ble.py",
@@ -164,6 +177,21 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
         Check("pass1-architecture", "runtime architecture audit", [PYTHON, "scripts/runtime_architecture_audit.py", "--self-test"]),
         Check("pass1-architecture", "app store bridge self-test", [PYTHON, "scripts/app_store_server.py", "--self-test"]),
         Check("pass1-architecture", "runtime transport self-test", [PYTHON, "scripts/runtime_transport.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet app-server self-test", [PYTHON, "scripts/codex_pet_appserver.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet protocol self-test", [PYTHON, "scripts/codex_pet_protocol.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet Bridge self-test", [PYTHON, "scripts/codex_pet_bridge.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet desktop monitor self-test", [PYTHON, "scripts/codex_pet_monitor.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet monitor launcher self-test", ["./scripts/codex_pet_monitor.command", "--self-test"]),
+        Check("pass1-architecture", "Codex pet live console launcher self-test", ["./scripts/codex_pet_test_backend.command", "--self-test"]),
+        Check("pass1-architecture", "Codex pet voice self-test", [PYTHON, "scripts/codex_pet_voice.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet status self-test", [PYTHON, "scripts/codex_pet_status.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet hook self-test", [PYTHON, "scripts/codex_pet_hook.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet MCP self-test", [PYTHON, "scripts/codex_pet_mcp.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet audio policy self-test", [PYTHON, "scripts/codex_pet_audio.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet cue assets", [PYTHON, "scripts/generate_codex_pet_cues.py", "--check"]),
+        Check("pass1-architecture", "Codex Rocky pet assets", ["node", "scripts/extract_codex_rocky.js", "--check"]),
+        Check("pass1-architecture", "Pager voice bridge self-test", [PYTHON, "scripts/pager_voice_bridge.py", "--self-test"]),
+        Check("pass1-architecture", "Peer protocol offline tests", [PYTHON, "scripts/peer_protocol_test.py"]),
         Check("pass2-packages", "runtime package validator self-test", [PYTHON, "scripts/runtime_package.py", "--self-test"]),
         Check("pass2-packages", "runtime app plan writer self-test", [PYTHON, "scripts/runtime_app_plan_writer.py", "--self-test"]),
         Check("pass2-packages", "runtime package corpus", [PYTHON, "scripts/runtime_package.py", "--all"]),
@@ -267,7 +295,33 @@ def build_hardware_config(args: argparse.Namespace, parser: argparse.ArgumentPar
 
 def run_self_test() -> None:
     assert "scripts/runtime_deep_check.py" in python_compile_targets()
+    assert "scripts/codex_pet_appserver.py" in python_compile_targets()
+    assert "scripts/codex_pet_protocol.py" in python_compile_targets()
+    assert "scripts/codex_pet_bridge.py" in python_compile_targets()
+    assert "scripts/codex_pet_monitor.py" in python_compile_targets()
+    assert "scripts/codex_pet_voice.py" in python_compile_targets()
+    assert "scripts/codex_pet_mcp.py" in python_compile_targets()
+    assert "scripts/codex_pet_audio.py" in python_compile_targets()
+    assert "scripts/generate_codex_pet_cues.py" in python_compile_targets()
+    assert "scripts/pager_voice_bridge.py" in python_compile_targets()
+    assert "scripts/peer_protocol_test.py" in python_compile_targets()
+    assert "scripts/peer_reliability.py" in python_compile_targets()
     assert any(check.label == "runtime deep check self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet app-server self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet protocol self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet Bridge self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet desktop monitor self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet monitor launcher self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet live console launcher self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet voice self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex Rocky pet assets" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet status self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet hook self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet MCP self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet audio policy self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet cue assets" for check in build_checks(include_swift=False))
+    assert any(check.label == "Pager voice bridge self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Peer protocol offline tests" for check in build_checks(include_swift=False))
     gate = HardwareGate(
         port="/dev/cu.test",
         runs=2,
