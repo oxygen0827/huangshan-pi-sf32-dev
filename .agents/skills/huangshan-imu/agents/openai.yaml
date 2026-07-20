@@ -1,0 +1,4 @@
+interface:
+  display_name: "Huangshan Pi IMU"
+  short_description: "Build apps with the verified LSM6DSL IMU"
+  default_prompt: "Use $huangshan-imu to build a motion-aware Huangshan Pi app."

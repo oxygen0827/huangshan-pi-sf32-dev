@@ -235,7 +235,9 @@ class BridgeCaller:
             raise MCPError("Codex Pet Bridge returned an invalid response") from exc
         payload = dict(response.payload or {})
         if payload.get("status") != "accepted":
-            raise MCPError("The board rejected the hardware request")
+            error = payload.get("error")
+            suffix = f" ({error})" if isinstance(error, str) and error else ""
+            raise MCPError(f"The board rejected the hardware request{suffix}")
         result = payload.get("result")
         if not isinstance(result, str):
             raise MCPError("Codex Pet Bridge omitted the hardware result")

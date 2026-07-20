@@ -237,6 +237,44 @@ Lua 函数/表/循环和 WAV 播放，是这一边界的最小回归包。
 无限资源；Python、Swift、板端 helper 与 capability JSON 必须同步；新音频格式需先
 增加解析和坏文件测试；App 停止或 Lua 启动失败时必须停止音频 worker。
 
+## 2026-07-20：长期 Bridge 不能依赖临时命令会话的日志 pipe
+
+### 日期 / App
+
+2026-07-20，Codex Companion / Codex Pet Monitor / BLE Bridge。
+
+### 现象
+
+板端显示未连接，但串口仍能确认 Runtime 和 `codex_pet` 正常运行，电脑上也能看到 Bridge
+进程。IPC 请求最终收到 `internal_error:BrokenPipeError`，而不是板端状态。
+
+### 真正原因
+
+Bridge 被直接留在临时 Codex 命令执行会话中。父会话结束后 Python 进程变成无监督孤儿，
+stdout/stderr pipe 的读取端已经消失。BLE 重连代码在真正连接前输出日志，日志 flush 抛出的
+`BrokenPipeError` 阻止了每一次重连；错误处理再次写坏 stderr，又把协议 ACK 变成裸错误 JSON。
+
+这不是板子、宠物资源、BLE 地址或 GATT 缓存故障。完整因果链和现场证据见
+[Codex Pet Bridge 事故复盘](codex-pet-bridge.md#2026-07-20-事故复盘bridge-进程存在但板端显示未连接)。
+
+### 后续规则
+
+1. 长期 Bridge 只能通过正式 monitor 启动器或明确的系统 supervisor 运行，不能遗留在临时
+   agent shell、一次性 PTY 或工具执行会话中。
+2. 日志输出永远不能参与连接、心跳、任务同步或 IPC 的成功条件；关闭的 stdout/stderr 必须
+   被降级为“丢日志”，不能让控制路径失败。
+3. IPC 已解析请求后的错误必须继续使用协议 ACK；不要用另一套裸 JSON 错误格式掩盖根因。
+4. `ps` 看到进程不代表服务健康。至少同时验证进程父子关系、socket、`connected=1` 和
+   `uiTicks` 前进。
+5. 当串口显示 `running=1` 而 Companion 未连接时，先查电脑端 Bridge 生命周期和日志 FD，
+   不要先重刷固件。
+
+### 验证方式
+
+Bridge 与 MCP 自测必须覆盖坏日志 pipe 和协议内拒绝 ACK；真机使用一轮 storage stress
+复现脚本验证 `passed=true`、0 新增丢包和 UI 心跳前进。正常 monitor 进程结构应为
+`zsh monitor.command -> Python Bridge + tee`。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：

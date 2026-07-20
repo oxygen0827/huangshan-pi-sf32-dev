@@ -1,0 +1,4 @@
+interface:
+  display_name: "Huangshan Sensor Availability"
+  short_description: "Handle detected and missing board sensors safely"
+  default_prompt: "Use $huangshan-sensor-availability to design a sensor-aware Huangshan Pi app."

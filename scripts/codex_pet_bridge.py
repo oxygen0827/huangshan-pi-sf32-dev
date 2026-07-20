@@ -15,7 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Mapping, Protocol, TextIO
 
 from codex_pet_appserver import CodexAppServerClient, CodexAppServerError, codex_thread_url, public_error
 from codex_pet_protocol import (
@@ -64,6 +64,36 @@ class BridgeError(RuntimeError):
 
 class BridgeAlreadyRunning(BridgeError):
     pass
+
+
+class NonFatalTextStream:
+    """Keep daemon control paths alive when a terminal or log reader disappears."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+
+    def write(self, value: str) -> int:
+        try:
+            written = self.stream.write(value)
+        except (BrokenPipeError, OSError, ValueError):
+            return len(value)
+        return len(value) if written is None else written
+
+    def flush(self) -> None:
+        try:
+            self.stream.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.stream, name)
+
+
+def install_nonfatal_standard_streams() -> None:
+    if not isinstance(sys.stdout, NonFatalTextStream):
+        sys.stdout = NonFatalTextStream(sys.stdout)  # type: ignore[assignment]
+    if not isinstance(sys.stderr, NonFatalTextStream):
+        sys.stderr = NonFatalTextStream(sys.stderr)  # type: ignore[assignment]
 
 
 async def wait_for_shutdown_signal() -> None:
@@ -1058,6 +1088,7 @@ class LocalIPCServer:
         self.path = path
         self.handler = handler
         self.server: asyncio.AbstractServer | None = None
+        self.error_outbound = PetSequencer()
 
     async def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1108,14 +1139,26 @@ class LocalIPCServer:
                     break
                 try:
                     request = PetEnvelope.decode(line.decode("utf-8").strip(), max_bytes=MAX_IPC_LINE_BYTES)
-                    response = await self.handler(request)
-                    encoded = response.encode(max_bytes=MAX_IPC_LINE_BYTES)
                 except (UnicodeDecodeError, PetProtocolError, BridgeError) as exc:
                     await self._write_error(writer, str(exc)[:160])
                     continue
+                try:
+                    response = await self.handler(request)
+                except (PetProtocolError, BridgeError) as exc:
+                    response = make_ack(
+                        request,
+                        sequence=self.error_outbound.next(),
+                        status="rejected",
+                        error=f"bridge_error:{type(exc).__name__}",
+                    )
                 except Exception as exc:
-                    await self._write_error(writer, f"internal_error:{type(exc).__name__}")
-                    continue
+                    response = make_ack(
+                        request,
+                        sequence=self.error_outbound.next(),
+                        status="rejected",
+                        error=f"internal_error:{type(exc).__name__}",
+                    )
+                encoded = response.encode(max_bytes=MAX_IPC_LINE_BYTES)
                 writer.write(encoded.encode("utf-8") + b"\n")
                 await writer.drain()
         except ConnectionError:
@@ -1509,6 +1552,24 @@ async def self_test_async() -> None:
     clock = 1_900_000_000_000
     assert PetSequencer(0xFFFFFFFF).next() == 1
 
+    class BrokenLogStream:
+        def write(self, _value: str) -> int:
+            raise BrokenPipeError("log reader closed")
+
+        def flush(self) -> None:
+            raise BrokenPipeError("log reader closed")
+
+    broken_log_device = FakeDeviceTransport()
+    broken_log_session = DeviceSession(TransportCommandQueue(broken_log_device))
+    previous_stdout = sys.stdout
+    sys.stdout = NonFatalTextStream(BrokenLogStream())  # type: ignore[arg-type,assignment]
+    try:
+        await broken_log_session.start(run_heartbeat=False)
+        assert broken_log_session.connected
+    finally:
+        sys.stdout = previous_stdout
+        await broken_log_session.close()
+
     class HangingOnceTransport(FakeDeviceTransport):
         def __init__(self) -> None:
             super().__init__()
@@ -1586,6 +1647,22 @@ async def self_test_async() -> None:
         await slow_ipc.close()
         loop.set_exception_handler(previous_exception_handler)
         assert not disconnect_errors
+
+        async def broken_handler(_request: PetEnvelope, **_: object) -> PetEnvelope:
+            raise BrokenPipeError("simulated orphaned log pipe")
+
+        error_path = root / "error.sock"
+        error_ipc = LocalIPCServer(error_path, broken_handler)
+        await error_ipc.start()
+        try:
+            error_ack = await _ipc_request(error_path, _action(1, "voice:error", clock))
+            assert error_ack.payload == {
+                "for": "voice:error",
+                "status": "rejected",
+                "error": "internal_error:BrokenPipeError",
+            }
+        finally:
+            await error_ipc.close()
 
         competing_ipc = LocalIPCServer(socket_path, bridge.handle)
         try:
@@ -2069,6 +2146,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    install_nonfatal_standard_streams()
     args = parse_args()
     if args.self_test:
         asyncio.run(self_test_async())

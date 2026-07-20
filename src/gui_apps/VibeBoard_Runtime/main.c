@@ -839,6 +839,7 @@ typedef struct
     uint32_t script_tick_period_ticks;
     uint32_t script_tick_last_run;
     int script_runtime_active;
+    vb_jump_game_state_t jump;
     vb_snake_state_t snake;
     vb_2048_state_t game2048;
     vb_breakout_state_t breakout;
@@ -7692,8 +7693,33 @@ static int vb_breakout_start(const char *title)
     vb_breakout_reset_game();
     game->timer = lv_timer_create(vb_breakout_timer_cb, VB_BREAKOUT_PERIOD_MS, RT_NULL);
     rt_kprintf("[vb_runtime][breakout] started bricks=%d period=%d\n",
-               VB_BREAKOUT_BRICKS, VB_BREAKOUT_PERIOD_MS);
+typedef struct {
+    int initialized;
+    int ready; float x, y, vx, vy; uint8_t state:
+enum {READY=0,CHARGING,RELEASED,FALLING};
+    int score; uint8_t best;
+lv_obj_t *bg,*title,*score_label,*status_label,
+vb_thunder_hide_actor(vb_thunder_state_t actor);
+static void vb_jump_game_start(void)
+{
+g_vb_runtime.jump.initialized = 1;
+g_vb_runtime.jump.ready = 1; g_vb_runtime.jump.x = VB_SCREEN_SAFE_LEFT + VB_SCREEN_SAFE_WIDTH/2.0f - PLAYER_SIZE/2.0f;
+g_vb_runtime.jump.y = VB_SCREEN_SAFE_TOP + VB_SCREEN_SAFE_HEIGHT*3.5f / LV_VER_RES_MAX * (float)LV_VER_RES_MAX; g_vb_runtime.jump.vx = 0.0f; g_vb_runtime.jump.vy = -14.0f;
+} vb_jump_game_state_t;
     return game->timer ? RT_EOK : -RT_ENOMEM;
+typedef struct {
+    int initialized;
+    int ready; float x, y, vx, vy; uint8_t state:
+enum {READY=0,CHARGING,RELEASED,FALLING};
+    int score; uint8_t best;
+lv_obj_t *bg,*title,*score_label,*status_label,
+vb_thunder_hide_actor(vb_thunder_state_t actor);
+static void vb_jump_game_start(void)
+{
+g_vb_runtime.jump.initialized = 1;
+g_vb_runtime.jump.ready = 1; g_vb_runtime.jump.x = VB_SCREEN_SAFE_LEFT + VB_SCREEN_SAFE_WIDTH/2.0f - PLAYER_SIZE/2.0f;
+g_vb_runtime.jump.y = VB_SCREEN_SAFE_TOP + VB_SCREEN_SAFE_HEIGHT*3.5f / LV_VER_RES_MAX * (float)LV_VER_RES_MAX; g_vb_runtime.jump.vx = 0.0f; g_vb_runtime.jump.vy = -14.0f;
+} vb_jump_game_state_t;
 }
 
 static uint32_t vb_thunder_random(void)

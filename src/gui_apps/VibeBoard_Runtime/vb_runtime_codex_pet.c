@@ -57,6 +57,17 @@
 #define VB_PET_RUNTIME_FRAME_LIMIT 2
 #define VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)
 #define VB_PET_MIN_FRAME_MS 600
+#define VB_PET_IMAGE_X 105
+#define VB_PET_IMAGE_Y 82
+#define VB_PET_IMAGE_RUNNING_RAISED_Y 78
+#define VB_PET_IMAGE_RUNNING_LOWERED_Y 84
+#define VB_PET_IMAGE_ZOOM 312
+#define VB_PET_IMAGE_RUNNING_ZOOM 324
+#define VB_PET_ACTION_Y 370
+#define VB_PET_ACTION_WIDTH 150
+#define VB_PET_ACTION_HEIGHT 44
+#define VB_PET_ACTION_LEFT_X 35
+#define VB_PET_ACTION_RIGHT_X 205
 
 static const char *const g_vb_pet_rocky_paths[5][2] = {
     {VB_PET_ROCKY_DIR "/idle0.rle", VB_PET_ROCKY_DIR "/idle1.rle"},
@@ -140,7 +151,6 @@ typedef struct
     char pet_slugs[VB_PET_MAX_ASSETS][VB_PET_ASSET_SLUG_MAX];
     char pet_names[VB_PET_MAX_ASSETS][VB_PET_ASSET_NAME_MAX];
     lv_obj_t *root;
-    lv_obj_t *project_label;
     lv_obj_t *connection_label;
     lv_obj_t *pet_face;
     lv_obj_t *pet_body;
@@ -679,13 +689,15 @@ static void vb_pet_update_custom_frame(void)
     lv_img_set_src(g_pet.pet_image, image);
     if (g_pet.state == VB_PET_RUNNING)
     {
-        lv_obj_set_y(g_pet.pet_image, g_pet.custom_frame_index ? 68 : 74);
-        lv_img_set_zoom(g_pet.pet_image, g_pet.custom_frame_index ? 300 : 288);
+        lv_obj_set_y(g_pet.pet_image, g_pet.custom_frame_index ?
+                     VB_PET_IMAGE_RUNNING_RAISED_Y : VB_PET_IMAGE_RUNNING_LOWERED_Y);
+        lv_img_set_zoom(g_pet.pet_image, g_pet.custom_frame_index ?
+                        VB_PET_IMAGE_RUNNING_ZOOM : VB_PET_IMAGE_ZOOM);
     }
     else
     {
-        lv_obj_set_y(g_pet.pet_image, 72);
-        lv_img_set_zoom(g_pet.pet_image, 288);
+        lv_obj_set_y(g_pet.pet_image, VB_PET_IMAGE_Y);
+        lv_img_set_zoom(g_pet.pet_image, VB_PET_IMAGE_ZOOM);
     }
     lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);
     g_pet.custom_displayed_frame = g_pet.custom_frame_index;
@@ -1042,7 +1054,6 @@ static void vb_pet_render(void)
     now = rt_tick_get();
     sync_age_ms = g_pet.host_seen_at ? vb_pet_ticks_to_ms(now - g_pet.host_seen_at) : 0;
     color = vb_pet_state_color();
-    lv_label_set_text(g_pet.project_label, g_pet.project[0] ? g_pet.project : "Project unavailable");
     if (g_pet.state == VB_PET_DISCONNECTED)
         lv_label_set_text(g_pet.connection_label, "Bridge offline");
     else if (sync_age_ms >= VB_PET_RECONNECT_AFTER_MS)
@@ -1123,13 +1134,13 @@ static void vb_pet_render(void)
             lv_label_set_text(g_pet.mouth, "-");
         if (g_pet.state == VB_PET_RUNNING)
         {
-            lv_obj_set_height(g_pet.left_eye, 24);
-            lv_obj_set_height(g_pet.right_eye, 24);
+            lv_obj_set_height(g_pet.left_eye, 27);
+            lv_obj_set_height(g_pet.right_eye, 27);
         }
         else
         {
-            lv_obj_set_height(g_pet.left_eye, 18);
-            lv_obj_set_height(g_pet.right_eye, 18);
+            lv_obj_set_height(g_pet.left_eye, 20);
+            lv_obj_set_height(g_pet.right_eye, 20);
         }
     }
     g_pet.dirty = 0;
@@ -1519,65 +1530,62 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
 
     label = vb_pet_label(root, "Codex Companion", 0xf9fafb);
     lv_obj_set_pos(label, 30, 24);
-    g_pet.project_label = vb_pet_label(root, "Project unavailable", 0xd1d5db);
-    lv_obj_set_width(g_pet.project_label, 185);
-    lv_obj_set_pos(g_pet.project_label, 30, 52);
     g_pet.connection_label = vb_pet_label(root, "Bridge offline", 0x94a3b8);
     lv_obj_set_width(g_pet.connection_label, 150);
     lv_obj_set_style_text_align(g_pet.connection_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(g_pet.connection_label, 220, 52);
 
     g_pet.pet_tail = lv_obj_create(root);
-    lv_obj_set_size(g_pet.pet_tail, 58, 22);
-    lv_obj_set_pos(g_pet.pet_tail, 232, 178);
-    lv_obj_set_style_radius(g_pet.pet_tail, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_size(g_pet.pet_tail, 64, 24);
+    lv_obj_set_pos(g_pet.pet_tail, 240, 195);
+    lv_obj_set_style_radius(g_pet.pet_tail, 12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.pet_tail, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(g_pet.pet_tail, LV_OBJ_FLAG_SCROLLABLE);
 
     g_pet.pet_body = lv_obj_create(root);
-    lv_obj_set_size(g_pet.pet_body, 104, 80);
-    lv_obj_set_pos(g_pet.pet_body, 143, 158);
-    lv_obj_set_style_radius(g_pet.pet_body, 38, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_size(g_pet.pet_body, 118, 90);
+    lv_obj_set_pos(g_pet.pet_body, 136, 172);
+    lv_obj_set_style_radius(g_pet.pet_body, 43, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.pet_body, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(g_pet.pet_body, LV_OBJ_FLAG_SCROLLABLE);
 
     g_pet.left_ear = lv_obj_create(root);
-    lv_obj_set_size(g_pet.left_ear, 41, 48);
-    lv_obj_set_pos(g_pet.left_ear, 132, 95);
-    lv_obj_set_style_radius(g_pet.left_ear, 18, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_size(g_pet.left_ear, 46, 54);
+    lv_obj_set_pos(g_pet.left_ear, 119, 103);
+    lv_obj_set_style_radius(g_pet.left_ear, 20, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(g_pet.left_ear, lv_color_hex(0xb8cbd3), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.left_ear, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(g_pet.left_ear, LV_OBJ_FLAG_SCROLLABLE);
     g_pet.right_ear = lv_obj_create(root);
-    lv_obj_set_size(g_pet.right_ear, 41, 48);
-    lv_obj_set_pos(g_pet.right_ear, 217, 95);
-    lv_obj_set_style_radius(g_pet.right_ear, 18, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_size(g_pet.right_ear, 46, 54);
+    lv_obj_set_pos(g_pet.right_ear, 225, 103);
+    lv_obj_set_style_radius(g_pet.right_ear, 20, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(g_pet.right_ear, lv_color_hex(0xb8cbd3), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.right_ear, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(g_pet.right_ear, LV_OBJ_FLAG_SCROLLABLE);
 
     g_pet.pet_face = lv_obj_create(root);
-    lv_obj_set_size(g_pet.pet_face, 120, 110);
-    lv_obj_set_pos(g_pet.pet_face, 135, 103);
-    lv_obj_set_style_radius(g_pet.pet_face, 42, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_size(g_pet.pet_face, 136, 124);
+    lv_obj_set_pos(g_pet.pet_face, 127, 112);
+    lv_obj_set_style_radius(g_pet.pet_face, 48, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.pet_face, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_clear_flag(g_pet.pet_face, LV_OBJ_FLAG_SCROLLABLE);
     g_pet.left_eye = lv_obj_create(g_pet.pet_face);
-    lv_obj_set_size(g_pet.left_eye, 11, 18);
-    lv_obj_set_pos(g_pet.left_eye, 32, 38);
+    lv_obj_set_size(g_pet.left_eye, 12, 20);
+    lv_obj_set_pos(g_pet.left_eye, 36, 43);
     lv_obj_set_style_radius(g_pet.left_eye, 7, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(g_pet.left_eye, lv_color_hex(0x111827), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.left_eye, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     g_pet.right_eye = lv_obj_create(g_pet.pet_face);
-    lv_obj_set_size(g_pet.right_eye, 11, 18);
-    lv_obj_set_pos(g_pet.right_eye, 76, 38);
+    lv_obj_set_size(g_pet.right_eye, 12, 20);
+    lv_obj_set_pos(g_pet.right_eye, 88, 43);
     lv_obj_set_style_radius(g_pet.right_eye, 7, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(g_pet.right_eye, lv_color_hex(0x111827), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(g_pet.right_eye, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     g_pet.mouth = vb_pet_label(g_pet.pet_face, "-", 0x111827);
-    lv_obj_set_width(g_pet.mouth, 28);
+    lv_obj_set_width(g_pet.mouth, 32);
     lv_obj_set_style_text_align(g_pet.mouth, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(g_pet.mouth, 46, 70);
+    lv_obj_set_pos(g_pet.mouth, 52, 82);
 
     g_pet.custom_available = vb_pet_load_catalog();
     if (!g_pet.custom_available)
@@ -1590,9 +1598,9 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     if (g_pet.custom_available || g_pet.rocky_available)
     {
         g_pet.pet_image = lv_img_create(root);
-        lv_obj_set_pos(g_pet.pet_image, 105, 72);
+        lv_obj_set_pos(g_pet.pet_image, VB_PET_IMAGE_X, VB_PET_IMAGE_Y);
         lv_img_set_pivot(g_pet.pet_image, 80, 86);
-        lv_img_set_zoom(g_pet.pet_image, 288);
+        lv_img_set_zoom(g_pet.pet_image, VB_PET_IMAGE_ZOOM);
         lv_img_set_antialias(g_pet.pet_image, false);
         lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_SCROLLABLE);
         if (g_pet.pet_count > 1)
@@ -1622,21 +1630,25 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     g_pet.status_label = vb_pet_label(root, "Disconnected", 0x94a3b8);
     lv_obj_set_width(g_pet.status_label, 330);
     lv_obj_set_style_text_align(g_pet.status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(g_pet.status_label, 30, 251);
+    lv_obj_set_pos(g_pet.status_label, 30, 268);
     g_pet.transcript_label = vb_pet_label(root, "No active Codex tasks", 0xf9fafb);
-    lv_obj_set_size(g_pet.transcript_label, 330, 58);
-    lv_obj_set_pos(g_pet.transcript_label, 30, 280);
+    lv_obj_set_size(g_pet.transcript_label, 330, 48);
+    lv_obj_set_pos(g_pet.transcript_label, 30, 292);
     lv_obj_set_style_text_align(g_pet.transcript_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(g_pet.transcript_label, LV_LABEL_LONG_WRAP);
     g_pet.task_label = vb_pet_label(root, "No active tasks", 0x94a3b8);
     lv_obj_set_width(g_pet.task_label, 330);
     lv_obj_set_style_text_align(g_pet.task_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(g_pet.task_label, 30, 338);
+    lv_obj_set_pos(g_pet.task_label, 30, 342);
 
-    g_pet.new_button = vb_pet_button(root, "<", 30, 376, 160, 54,
+    g_pet.new_button = vb_pet_button(root, "<", VB_PET_ACTION_LEFT_X,
+                                     VB_PET_ACTION_Y, VB_PET_ACTION_WIDTH,
+                                     VB_PET_ACTION_HEIGHT,
                                      0x243244, vb_pet_new_event);
     g_pet.new_label = lv_obj_get_child(g_pet.new_button, 0);
-    g_pet.continue_button = vb_pet_button(root, ">", 200, 376, 160, 54,
+    g_pet.continue_button = vb_pet_button(root, ">", VB_PET_ACTION_RIGHT_X,
+                                          VB_PET_ACTION_Y, VB_PET_ACTION_WIDTH,
+                                          VB_PET_ACTION_HEIGHT,
                                           0x243244, vb_pet_continue_event);
     g_pet.continue_label = lv_obj_get_child(g_pet.continue_button, 0);
     vb_pet_render();
@@ -1872,10 +1884,10 @@ void vb_codex_pet_tick(uint32_t now)
             else
             {
                 if (g_pet.pet_face)
-                    lv_obj_set_y(g_pet.pet_face, animation_phase ? 100 : 103);
+                    lv_obj_set_y(g_pet.pet_face, animation_phase ? 109 : 112);
                 if (g_pet.pet_tail)
-                    lv_obj_set_pos(g_pet.pet_tail, animation_phase ? 237 : 232,
-                                   animation_phase ? 173 : 178);
+                    lv_obj_set_pos(g_pet.pet_tail, animation_phase ? 245 : 240,
+                                   animation_phase ? 189 : 195);
             }
         }
     }
