@@ -14,6 +14,8 @@
 #include <board.h>
 #include <string.h>
 #include <stdbool.h>
+
+#define VB_TF_SPI_MAX_HZ (6u * 1000u * 1000u)
 #ifdef RT_USING_MODULE
     #include "dlmodule.h"
     #include "dlfcn.h"
@@ -65,7 +67,8 @@ const struct dfs_mount_tbl mount_table[] =
 
 int auto_mnt_init(void)
 {
-    char *name[2];
+    char *root_name = RT_NULL;
+    const char *sd_name = RT_NULL;
 
 #if defined(RT_USING_DFS_ELMFAT)
     const char *type = "elm";
@@ -86,56 +89,78 @@ int auto_mnt_init(void)
 
     rt_kprintf("===auto_mnt_init===\n");
 
-    memset(name, 0, sizeof(name));
-
-#ifdef RT_USING_SDIO
-    //Waitting for SD Card detection done.
-    int sd_state = mmcsd_wait_cd_changed(3000);
-    if (MMCSD_HOST_PLUGED == sd_state)
-    {
-        rt_kprintf("SD-Card plug in\n");
-        name[0] = "sd0";
-    }
-    else
-    {
-        rt_kprintf("No SD-Card detected, state: %d\n", sd_state);
-    }
-#endif /* RT_USING_SDIO */
-
-
 #ifdef FS_ROOT_START_ADDR
-    name[1] = "flash0";
-    register_mtd_device(FS_ROOT_START_ADDR, FS_ROOT_SIZE, name[1]);
+    root_name = "flash0";
+    register_mtd_device(FS_ROOT_START_ADDR, FS_ROOT_SIZE, root_name);
 #elif defined(FS_REGION_START_ADDR)
-    name[1] = "flash0";
-    register_mtd_device(FS_REGION_START_ADDR, FS_REGION_SIZE, name[1]);
+    root_name = "flash0";
+    register_mtd_device(FS_REGION_START_ADDR, FS_REGION_SIZE, root_name);
 #endif /* FS_ROOT_START_ADDR */
 
-
-
-    for (uint32_t i = 0; i < sizeof(name) / sizeof(name[0]); i++)
+    if (root_name != RT_NULL)
     {
-        if (NULL == name[i]) continue;
-
-        if (dfs_mount(name[i], "/", type, 0, 0) == 0) // fs exist
+        if (dfs_mount(root_name, "/", type, 0, 0) == 0)
         {
-            rt_kprintf("mount fs on %s to root success\n", name[i]);
-            break;
+            rt_kprintf("[storage] internal %s mounted on /\n", root_name);
         }
         else
         {
-            rt_kprintf("mount fs on %s to root fail\n", name[i]);
+            rt_kprintf("[storage] internal %s mount on / failed\n", root_name);
 #if defined(RT_USING_DFS_ELMFAT) && (defined(FS_ROOT_START_ADDR) || defined(FS_REGION_START_ADDR))
-            if (i == 1 && dfs_mkfs(type, name[i]) == 0)
+            if (dfs_mkfs(type, root_name) == 0)
             {
-                rt_kprintf("mkfs on %s success, mount again\n", name[i]);
-                if (dfs_mount(name[i], "/", type, 0, 0) == 0)
+                rt_kprintf("[storage] formatted internal %s; mounting again\n", root_name);
+                if (dfs_mount(root_name, "/", type, 0, 0) == 0)
                 {
-                    rt_kprintf("mount fs on %s to root success\n", name[i]);
-                    break;
+                    rt_kprintf("[storage] internal %s mounted on /\n", root_name);
                 }
             }
 #endif
+        }
+    }
+
+#ifdef RT_USING_SPI_MSD
+    {
+        rt_device_t spi_device = rt_device_find("sdcard");
+        if (spi_device != RT_NULL)
+        {
+            struct rt_spi_configuration cfg;
+            cfg.data_width = 8;
+            cfg.mode = RT_SPI_MASTER | RT_SPI_MODE_3 | RT_SPI_MSB;
+            cfg.max_hz = VB_TF_SPI_MAX_HZ;
+            cfg.frameMode = RT_SPI_MOTO;
+            if (rt_spi_configure((struct rt_spi_device *)spi_device, &cfg) == RT_EOK)
+            {
+                rt_kprintf("[storage] TF SPI capped at %u Hz\n", (unsigned int)cfg.max_hz);
+            }
+        }
+    }
+    sd_name = "sd0";
+#elif defined(RT_USING_SDIO)
+    // Wait for the SDIO card-detect worker before looking up the block device.
+    if (MMCSD_HOST_PLUGED == mmcsd_wait_cd_changed(3000))
+    {
+        sd_name = "sd0";
+    }
+#endif
+
+    if (sd_name != RT_NULL)
+    {
+        if (rt_device_find(sd_name) == RT_NULL)
+        {
+            rt_kprintf("[storage] TF card device %s unavailable\n", sd_name);
+        }
+        else
+        {
+            mkdir("/sdcard", 0777);
+            if (dfs_mount(sd_name, "/sdcard", "elm", 0, 0) == 0)
+            {
+                rt_kprintf("[storage] TF card %s mounted on /sdcard\n", sd_name);
+            }
+            else
+            {
+                rt_kprintf("[storage] TF card %s mount failed; insert a FAT-formatted card\n", sd_name);
+            }
         }
     }
 

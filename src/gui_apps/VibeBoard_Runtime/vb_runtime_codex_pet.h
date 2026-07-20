@@ -33,5 +33,6 @@ void vb_codex_pet_tick(uint32_t now);
 void vb_codex_pet_receive_flow(const char *channel, uint32_t sequence,
                                const char *payload);
 int vb_codex_pet_active(void);
+int vb_codex_pet_status_json(char *dst, rt_size_t cap);
 
 #endif

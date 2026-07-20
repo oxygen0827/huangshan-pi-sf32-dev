@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "pets": [
+    {
+      "slug": "boba",
+      "name": "Boba",
+      "author": "railly",
+      "petJsonUrl": "https://assets.petdex.dev/curated/boba/petjson-v2.json",
+      "spritesheetUrl": "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+      "sourceUrl": "https://petdex.dev/pets/boba"
+    },
+    {
+      "slug": "boxcat",
+      "name": "Boxcat",
+      "author": "railly",
+      "petJsonUrl": "https://assets.petdex.dev/curated/boxcat/pet.json",
+      "spritesheetUrl": "https://assets.petdex.dev/curated/boxcat/spritesheet.webp",
+      "sourceUrl": "https://petdex.dev/pets/boxcat"
+    },
+    {
+      "slug": "shinchan",
+      "name": "Shinchan",
+      "author": "adamholter",
+      "petJsonUrl": "https://assets.petdex.dev/pets/shinchan-154a84d8ff3c/petjson.json",
+      "spritesheetUrl": "https://assets.petdex.dev/pets/shinchan-154a84d8ff3c/sprite.webp",
+      "sourceUrl": "https://petdex.dev/pets/shinchan"
+    }
+  ]
+}

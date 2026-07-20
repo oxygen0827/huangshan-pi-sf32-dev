@@ -31,6 +31,7 @@ def package_errors_as_exceptions():
 
 
 SAFE_APP_ID = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
+INSTALL_COMMAND_MAX_CHARS = 250
 SAFE_PATH = re.compile(
     r"^(manifest\.json|app\.info|main\.lua|files\.txt|README\.md|"
     r"(?:assets|images|fonts|lib)/[A-Za-z0-9_./-]+\."
@@ -678,9 +679,15 @@ def build_install_commands(package_id: str, files: dict[str, bytes], chunk_bytes
         if not data:
             commands.append(f"vb_runtime_install_file {package_id} {path} 0 -")
             continue
-        for offset in range(0, len(data), chunk_bytes):
-            chunk = data[offset : offset + chunk_bytes]
-            commands.append(f"vb_runtime_install_file {package_id} {path} {offset} {chunk.hex()}")
+        offset = 0
+        while offset < len(data):
+            prefix = f"vb_runtime_install_file {package_id} {path} {offset} "
+            safe_chunk_bytes = min(chunk_bytes, (INSTALL_COMMAND_MAX_CHARS - len(prefix)) // 2)
+            if safe_chunk_bytes <= 0:
+                raise RuntimePackageError(f"Runtime package path is too long for serial install: {path!r}")
+            chunk = data[offset : offset + safe_chunk_bytes]
+            commands.append(prefix + chunk.hex())
+            offset += len(chunk)
     commands.append(f"vb_runtime_install_end {package_id}")
     return commands
 
@@ -933,6 +940,19 @@ def run_self_test() -> int:
             load_package_from_dir(package_dir, None)
 
     expect_fail("package dir duplicate path", duplicate_dir_package, "Duplicate package path")
+
+    def bounded_install_commands() -> None:
+        path = "assets/pets/long_pet_name/blocked.bin"
+        original = bytes(range(256)) * 3
+        commands = build_install_commands("test_app", {path: original}, 240)
+        file_commands = commands[1:-1]
+        if not file_commands or max(map(len, file_commands)) > INSTALL_COMMAND_MAX_CHARS:
+            raise RuntimePackageError("install command exceeded FinSH input limit")
+        rebuilt = b"".join(bytes.fromhex(command.rsplit(" ", 1)[1]) for command in file_commands)
+        if rebuilt != original:
+            raise RuntimePackageError("bounded install commands changed file contents")
+
+    expect_ok("install commands fit FinSH line", bounded_install_commands)
 
     def package_error_mode_is_thread_local() -> None:
         entered = threading.Event()

@@ -77,6 +77,12 @@ TOOLS: list[dict[str, object]] = [
         "annotations": _annotations("Read RGB state", read_only=True),
     },
     {
+        "name": "huangshan_pet_status",
+        "description": "Read the exact task, alert, animation, and selected-pet state shown by Codex Pet.",
+        "inputSchema": _schema(),
+        "annotations": _annotations("Read Codex Pet state", read_only=True),
+    },
+    {
         "name": "huangshan_display",
         "description": "Read the current display state and brightness.",
         "inputSchema": _schema(),
@@ -142,6 +148,15 @@ TOOLS: list[dict[str, object]] = [
         "annotations": _annotations("Launch installed App", read_only=False, idempotent=False),
     },
     {
+        "name": "huangshan_select_pet",
+        "description": "Select the animated companion shown on the Huangshan Codex Pet display.",
+        "inputSchema": _schema(
+            {"slug": {"type": "string", "enum": ["boba", "boxcat", "shinchan"]}},
+            ["slug"],
+        ),
+        "annotations": _annotations("Select board pet", read_only=False),
+    },
+    {
         "name": "huangshan_play_cue",
         "description": "Play one bundled Codex Pet cue when an external speaker is attached.",
         "inputSchema": _schema(
@@ -164,6 +179,7 @@ TOOL_OPERATIONS = {
     "huangshan_sensors": "sensors",
     "huangshan_power": "power",
     "huangshan_rgb": "rgb_status",
+    "huangshan_pet_status": "pet_status",
     "huangshan_display": "display_status",
     "huangshan_app_status": "app_status",
     "huangshan_apps": "apps",
@@ -172,6 +188,7 @@ TOOL_OPERATIONS = {
     "huangshan_set_brightness": "set_brightness",
     "huangshan_show_message": "show_message",
     "huangshan_launch_app": "launch_app",
+    "huangshan_select_pet": "select_pet",
     "huangshan_play_cue": "play_cue",
     "huangshan_stop_audio": "stop_audio",
 }
@@ -358,12 +375,24 @@ async def self_test_async() -> None:
     })
     assert called and called["result"]["isError"] is False  # type: ignore[index]
     assert calls[-1] == ("set_rgb", {"color": "green"})
+    pet_status = await server.handle({
+        "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+        "params": {"name": "huangshan_pet_status", "arguments": {}},
+    })
+    assert pet_status and pet_status["result"]["isError"] is False  # type: ignore[index]
+    assert calls[-1] == ("pet_status", {})
     cue = await server.handle({
         "jsonrpc": "2.0", "id": 31, "method": "tools/call",
         "params": {"name": "huangshan_play_cue", "arguments": {"cue": "done"}},
     })
     assert cue and cue["result"]["isError"] is False  # type: ignore[index]
     assert calls[-1] == ("play_cue", {"cue": "done"})
+    selected = await server.handle({
+        "jsonrpc": "2.0", "id": 32, "method": "tools/call",
+        "params": {"name": "huangshan_select_pet", "arguments": {"slug": "shinchan"}},
+    })
+    assert selected and selected["result"]["isError"] is False  # type: ignore[index]
+    assert calls[-1] == ("select_pet", {"slug": "shinchan"})
     rejected = await server.handle({
         "jsonrpc": "2.0", "id": 4, "method": "tools/call",
         "params": {"name": "huangshan_power", "arguments": {}},

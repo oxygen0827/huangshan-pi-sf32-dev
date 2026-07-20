@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from dataclasses import dataclass
@@ -29,9 +30,11 @@ DISPLAY_API = "vibeboard-huangshan-display/v1"
 GPIO_API = "vibeboard-huangshan-gpio/v1"
 TOUCH_API = "vibeboard-huangshan-touch/v1"
 RGB_API = "vibeboard-huangshan-rgb/v1"
+CODEX_PET_API = "vibeboard-huangshan-codex-pet/v1"
 VOICE_API = "vibeboard-huangshan-voice-bridge/v1"
 AUDIO_API = "vibeboard-huangshan-audio-playback/v1"
 APP_MANAGER_API = "vibeboard-huangshan-app-manager/v1"
+BLE_RUNTIME_STATUS_API = "vibeboard-huangshan-ble-install/v1"
 
 SERIAL_APP_PAGE_LIMIT = 5
 # Keep BLE app pages below the status characteristic buffer/MTU comfort zone.
@@ -42,8 +45,11 @@ SERIAL_MSH_VOICE_CHUNK_BYTES = 30
 INSTALL_CHUNK_BYTES = 48
 SERIAL_JSON_CHUNK_BYTES = SERIAL_MSH_VOICE_CHUNK_BYTES
 MAX_INSTALL_CHUNK_BYTES = 240
+SERIAL_BLOB_CHUNK_BYTES = 3072
+SERIAL_BLOB_WRITE_BYTES = 256
 BLE_AUTHENTICATION_TIMEOUT_SECONDS = 20.0
 BLE_STATUS_NOTIFICATION_LIMIT = 64
+BLE_GATT_IO_TIMEOUT_SECONDS = 5.0
 
 
 class JSONResponsePending(RuntimeError):
@@ -116,6 +122,7 @@ class SyncRuntimeTransport(Protocol):
     def gpio(self) -> str: ...
     def touch(self) -> str: ...
     def rgb(self, color: str | None = None) -> str: ...
+    def codex_pet(self) -> str: ...
     def voice(self) -> str: ...
     def audio(self) -> str: ...
     def audio_play(self, app_id: str, path: str) -> str: ...
@@ -175,6 +182,7 @@ class AsyncRuntimeTransport(Protocol):
     async def gpio(self) -> str: ...
     async def touch(self) -> str: ...
     async def rgb(self, color: str | None = None) -> str: ...
+    async def codex_pet(self) -> str: ...
     async def voice(self) -> str: ...
     async def audio(self) -> str: ...
     async def audio_play(self, app_id: str, path: str) -> str: ...
@@ -411,6 +419,18 @@ def install_ack_matches(status: str, command: str) -> bool:
         app_id = parts[1]
         return f"install_end app={app_id} " in status or f"install_end {app_id} rc=" in status
     return False
+
+
+def serial_install_ack_matches(status: str, command: str) -> bool:
+    # The ACK is printed inside the command handler. Do not send the next line
+    # until FinSH has returned to its input loop and emitted a fresh prompt.
+    return install_ack_matches(status, command) and "msh />" in status
+
+
+def serial_install_response_complete(status: str, command: str) -> bool:
+    return serial_install_ack_matches(status, command) or (
+        "command not found" in status and "msh />" in status
+    )
 
 
 def app_launch_matches(status: str, app_id: str) -> bool:
@@ -692,6 +712,14 @@ def parse_key_values(text: str) -> dict[str, str]:
     return values
 
 
+def validate_ble_runtime_status(status: str) -> None:
+    values = parse_key_values(status)
+    if values.get("api") != BLE_RUNTIME_STATUS_API:
+        transport_fail("BLE Runtime status identity mismatch")
+    if values.get("secure") != "1":
+        transport_fail("BLE Runtime link is not encrypted")
+
+
 def load_ble_cache(path: Path) -> dict[str, str]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -745,7 +773,9 @@ class SerialTransportOptions:
     final_wait: float = 2.0
     ready_timeout: float = 24.0
     echo: bool = False
-    connect_settle: float = 1.2
+    # The Huangshan Pi CH340 reset pulse can arrive more than two seconds after
+    # opening the port. Wait it out before discarding boot output and probing.
+    connect_settle: float = 3.5
     write_chunk_pause: float = 0.012
 
 
@@ -777,13 +807,14 @@ class SerialTransport:
         self.close()
 
     def connect(self) -> None:
+        serial_timeout = min(0.05, max(0.005, self.options.command_wait / 2))
         ser = serial.Serial(
             port=None,
             baudrate=self.options.baud,
             bytesize=8,
             parity="N",
             stopbits=1,
-            timeout=0.05,
+            timeout=serial_timeout,
             write_timeout=2,
         )
         ser.dtr = False
@@ -813,8 +844,22 @@ class SerialTransport:
                 chunks.extend(data)
         return bytes((b & 0x7F) for b in chunks).decode("utf-8", "replace")
 
-    def write_line_slow(self, line: str) -> None:
-        data = line.encode("utf-8") + b"\r\n"
+    def _read_until_marker(self, marker: str, timeout: float) -> str:
+        deadline = time.monotonic() + timeout
+        chunks = bytearray()
+        marker_bytes = marker.encode("ascii")
+        while time.monotonic() < deadline:
+            data = self._serial.read(4096)
+            if data:
+                chunks.extend(data)
+                normalized = bytes((byte & 0x7F) for byte in chunks)
+                if marker_bytes in normalized:
+                    return normalized.decode("utf-8", "replace")
+        normalized = bytes((byte & 0x7F) for byte in chunks).decode("utf-8", "replace")
+        transport_fail(f"Timed out waiting for serial marker {marker!r}. Last output:\n" + normalized[-2000:])
+
+    def write_line_slow(self, line: str, *, terminator: bytes = b"\r\n") -> None:
+        data = line.encode("utf-8") + terminator
         for index in range(0, len(data), 24):
             self._serial.write(data[index:index + 24])
             self._serial.flush()
@@ -966,6 +1011,9 @@ class SerialTransport:
     def rgb(self, color: str | None = None) -> str:
         command = "vb_runtime_rgb" if color is None else f"vb_runtime_rgb {color}"
         return self.read_json(command, "rgb", RGB_API)
+
+    def codex_pet(self) -> str:
+        return self.read_json("vb_runtime_codex_pet_status", "codex_pet", CODEX_PET_API)
 
     def voice(self) -> str:
         return self.read_json("vb_runtime_voice", "voice", VOICE_API)
@@ -1188,7 +1236,7 @@ class SerialTransport:
         abort_command = f"vb_runtime_install_abort {app_id}"
         response = self.read_matching(
             abort_command,
-            lambda text, command=abort_command: install_ack_matches(text, command),
+            lambda text, command=abort_command: serial_install_ack_matches(text, command),
             timeout=max(6.0, self.options.final_wait + 4.0),
             wait=max(self.options.command_wait, 0.2),
         )
@@ -1216,12 +1264,21 @@ class SerialTransport:
                     install_started = True
                 if progress:
                     progress(command, index, len(commands))
-                response = self.read_matching(
-                    command,
-                    lambda text, command=command: install_ack_matches(text, command),
-                    timeout=max(6.0, self.options.final_wait + 4.0),
-                    wait=self.options.command_wait,
-                )
+                response = ""
+                for attempt in range(1, 4):
+                    response = self.read_matching(
+                        command,
+                        lambda text, command=command: serial_install_response_complete(text, command),
+                        timeout=max(6.0, self.options.final_wait + 4.0),
+                        wait=self.options.command_wait,
+                    )
+                    if serial_install_ack_matches(response, command):
+                        break
+                    if attempt < 3:
+                        print(f"warning: retrying serial install command {index}/{len(commands)} ({attempt}/3)")
+                        self.read_text(max(self.options.command_wait, 0.02))
+                else:
+                    transport_fail("Serial install command failed after 3 attempts. Last output:\n" + response[-2000:])
                 output += response
                 if "err install_" in response or " rc=-" in response:
                     transport_fail("Serial install command failed. Last output:\n" + response[-2000:])
@@ -1234,6 +1291,95 @@ class SerialTransport:
                 and f"active app: {package_id}" not in output
             ):
                 transport_fail("Serial install did not confirm active app. Last output:\n" + output[-2000:])
+            return output
+        except BaseException:
+            if install_started:
+                try:
+                    self.abort_install(package_id)
+                except BaseException as abort_exc:
+                    print(f"warning: install abort failed for {package_id}: {abort_exc}")
+            raise
+
+    def install_package_binary(
+        self,
+        package_id: str,
+        files: dict[str, bytes],
+        *,
+        progress: Callable[[str, int, int], None] | None = None,
+        commit: bool = True,
+    ) -> str:
+        file_items = sorted(files.items())
+        total = len(file_items) + 1 + (1 if commit else 0)
+        output = ""
+        install_started = False
+        try:
+            self.stop_app()
+            time.sleep(2.0)
+            begin = f"vb_runtime_install_begin {package_id}"
+            if progress:
+                progress(begin, 1, total)
+            response = self.read_matching(
+                begin,
+                lambda text, command=begin: serial_install_ack_matches(text, command),
+                timeout=max(6.0, self.options.final_wait + 4.0),
+                wait=max(self.options.command_wait, 0.2),
+            )
+            output += response
+            if not serial_install_ack_matches(response, begin):
+                transport_fail("Binary serial install did not start. Last output:\n" + response[-2000:])
+            install_started = True
+
+            for index, (path, data) in enumerate(file_items, start=2):
+                command = f"vb_runtime_install_blob {package_id} {path} {len(data)}"
+                if progress:
+                    progress(command, index, total)
+                self.write_line_slow(command, terminator=b"\r")
+                ready = f"ready install_blob app={package_id} path={path} bytes={len(data)}"
+                response = self._read_until_marker(ready, 12.0)
+                output += response
+                sent = 0
+                while sent < len(data):
+                    chunk = data[sent:sent + SERIAL_BLOB_CHUNK_BYTES]
+                    encoded = base64.b64encode(chunk)
+                    written = 0
+                    for offset in range(0, len(encoded), SERIAL_BLOB_WRITE_BYTES):
+                        part = encoded[offset:offset + SERIAL_BLOB_WRITE_BYTES]
+                        count = self._serial.write(part)
+                        self._serial.flush()
+                        if count != len(part):
+                            transport_fail(f"Short serial blob write for {path}: {count}/{len(part)}")
+                        written += count
+                        time.sleep(max(0.0, self.options.write_chunk_pause))
+                    if written != len(encoded):
+                        transport_fail(f"Incomplete serial blob write for {path}: {written}/{len(encoded)}")
+                    sent += len(chunk)
+                    marker = f"ok install_blob_chunk app={package_id} path={path} offset={sent}"
+                    response = self._read_until_marker(marker, 12.0)
+                    output += response
+                    if "err install_blob" in response:
+                        transport_fail("Binary serial install failed. Last output:\n" + response[-2000:])
+
+            if not commit:
+                return output
+            end = f"vb_runtime_install_end {package_id}"
+            if progress:
+                progress(end, total, total)
+            response = self.read_matching(
+                end,
+                lambda text, command=end: serial_install_ack_matches(text, command),
+                timeout=max(12.0, self.options.final_wait + 10.0),
+                wait=max(self.options.final_wait, 2.0),
+            )
+            output += response
+            if not serial_install_ack_matches(response, end):
+                transport_fail("Binary serial install did not commit. Last output:\n" + response[-2000:])
+            status_output = self.command("vb_runtime_status", wait=self.options.final_wait)
+            output += status_output
+            if (
+                f"active={package_id}" not in output
+                and f"active app: {package_id}" not in output
+            ):
+                transport_fail("Binary serial install did not confirm active app. Last output:\n" + output[-2000:])
             return output
         except BaseException:
             if install_started:
@@ -1274,6 +1420,9 @@ class BLETransport:
         self._status_notifications: asyncio.Queue[str] = asyncio.Queue(
             maxsize=BLE_STATUS_NOTIFICATION_LIMIT
         )
+        self._action_notifications: asyncio.Queue[str] = asyncio.Queue(
+            maxsize=BLE_STATUS_NOTIFICATION_LIMIT
+        )
 
     async def __aenter__(self) -> "BLETransport":
         await self.connect()
@@ -1285,34 +1434,56 @@ class BLETransport:
     async def connect(self) -> None:
         self._clear_status_notifications()
         BleakClient, _ = ensure_bleak()
-        device = self._cached_device() or await self._scan_device()
+        if self.options.address:
+            # On macOS, connecting from a bare CoreBluetooth UUID can reuse an
+            # obsolete GATT table after the board reboots. Resolve the pinned
+            # UUID through a fresh advertisement while preserving identity.
+            device = await self._scan_device(expected_address=self.options.address)
+        else:
+            device = self._cached_device() or await self._scan_device()
+        used_cached_device = isinstance(device, str) and not self.options.no_cache
         self._connection_label = self._describe_device(device)
-        try:
-            self._client_context = BleakClient(device, timeout=self.options.connect_timeout, services=[SERVICE_UUID])
+
+        async def open_device(target) -> None:
+            self._client_context = BleakClient(
+                target,
+                timeout=self.options.connect_timeout,
+                services=[SERVICE_UUID],
+            )
             self._client = await self._client_context.__aenter__()
+            if not self._client.is_connected:
+                transport_fail("BLE connection failed")
+            if self.options.connect_settle > 0:
+                await asyncio.sleep(self.options.connect_settle)
+            await self._wait_for_services()
+            await self._subscribe_status_notifications()
+            await self._subscribe_voice_stream()
+
+        try:
+            await open_device(device)
         except Exception as exc:
-            if self.options.address:
+            await self.close()
+            # CoreBluetooth can retain a peripheral identifier while its cached
+            # GATT table is stale after a board reboot. A fresh scan repairs that
+            # state; pinned addresses still fail closed as requested.
+            refresh_cache = used_cached_device and isinstance(exc, RuntimeTransportError) and (
+                "service discovery" in str(exc).lower()
+            )
+            if self.options.address and not refresh_cache:
                 transport_fail(f"Pinned BLE peripheral {self.options.address} failed: {exc}")
-            if self.options.no_cache or not isinstance(device, str):
+            if not refresh_cache:
                 raise
             if self.options.echo:
-                print(f"cached BLE peripheral failed: {exc}; scanning again...")
-            device = await self._scan_device()
+                print(f"cached BLE peripheral service discovery failed: {exc}; scanning again...")
+            device = await self._scan_device(expected_address=self.options.address)
+            if self.options.address and self._describe_device(device).split(" ", 1)[0].lower() != self.options.address.lower():
+                transport_fail(f"BLE scan found an unexpected peripheral for pinned address {self.options.address}")
             self._connection_label = self._describe_device(device)
-            self._client_context = BleakClient(device, timeout=self.options.connect_timeout, services=[SERVICE_UUID])
-            self._client = await self._client_context.__aenter__()
-        if not self._client.is_connected:
-            transport_fail("BLE connection failed")
-        if self.options.connect_settle > 0:
-            await asyncio.sleep(self.options.connect_settle)
-        await self._wait_for_services()
-        if self.options.subscribe_status_notifications:
             try:
-                await self._client.start_notify(STATUS_UUID, self._handle_status_notification)
-                self._status_notify_started = True
-            except Exception:
-                pass
-        await self._subscribe_voice_stream()
+                await open_device(device)
+            except BaseException:
+                await self.close()
+                raise
 
     async def close(self) -> None:
         if self._client is not None:
@@ -1344,14 +1515,27 @@ class BLETransport:
         status = decode_status(data)
         if not status:
             return
-        if self._status_notifications.full():
+        queue = (
+            self._action_notifications
+            if status.startswith("pet_action action=")
+            else self._status_notifications
+        )
+        if queue.full():
             try:
-                self._status_notifications.get_nowait()
+                queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
-        self._status_notifications.put_nowait(status)
+        queue.put_nowait(status)
 
     def _clear_status_notifications(self) -> None:
+        for queue in (self._status_notifications, self._action_notifications):
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+    def _clear_response_notifications(self) -> None:
         while True:
             try:
                 self._status_notifications.get_nowait()
@@ -1361,7 +1545,7 @@ class BLETransport:
     async def next_status_notification(self, *, timeout: float = 0.5) -> str:
         if timeout <= 0:
             raise ValueError("status notification timeout must be positive")
-        return await asyncio.wait_for(self._status_notifications.get(), timeout=timeout)
+        return await asyncio.wait_for(self._action_notifications.get(), timeout=timeout)
 
     @staticmethod
     def _describe_device(device) -> str:
@@ -1390,15 +1574,26 @@ class BLETransport:
             print(f"reusing cached BLE peripheral: {cached_address}")
         return cached_address
 
-    async def _scan_device(self):
+    async def _scan_device(self, expected_address: str | None = None):
         _, BleakScanner = ensure_bleak()
         if self.options.echo:
             print(f"scanning for BLE device named {self.options.name!r}...")
         device = await BleakScanner.find_device_by_filter(
-            lambda d, adv: (d.name or adv.local_name or "") == self.options.name,
+            lambda d, adv: (
+                (d.name or adv.local_name or "") == self.options.name
+                and (
+                    expected_address is None
+                    or str(getattr(d, "address", "")).lower() == expected_address.lower()
+                )
+            ),
             timeout=self.options.scan_timeout,
         )
         if not device:
+            if expected_address:
+                transport_fail(
+                    f"Could not find BLE device named {self.options.name!r} "
+                    f"at pinned address {expected_address}"
+                )
             transport_fail(f"Could not find BLE device named {self.options.name!r}")
         save_ble_cache(self.options.cache, {"name": self.options.name, "address": getattr(device, "address", "")})
         return device
@@ -1424,13 +1619,23 @@ class BLETransport:
 
     async def read_status(self) -> str:
         try:
-            return decode_status(await self._client.read_gatt_char(STATUS_UUID))
+            value = await asyncio.wait_for(
+                self._client.read_gatt_char(STATUS_UUID),
+                timeout=BLE_GATT_IO_TIMEOUT_SECONDS,
+            )
+            return decode_status(value)
         except Exception as exc:
             return f"read_status_failed: {exc}"
 
     async def start_voice_stream(self, callback: Callable[[bytes], None]) -> None:
         self._voice_callback = callback
         await self._subscribe_voice_stream()
+
+    async def _subscribe_status_notifications(self) -> None:
+        if not self.options.subscribe_status_notifications or self._status_notify_started:
+            return
+        await self._client.start_notify(STATUS_UUID, self._handle_status_notification)
+        self._status_notify_started = True
 
     async def _subscribe_voice_stream(self) -> None:
         if self._voice_notify_started:
@@ -1484,13 +1689,23 @@ class BLETransport:
         while time.monotonic() < deadline:
             try:
                 await self._wait_for_services_retrying(wait)
-                await self._client.write_gatt_char(
-                    COMMAND_UUID,
-                    payload,
-                    response=self.options.write_with_response,
+                self._clear_response_notifications()
+                await asyncio.wait_for(
+                    self._client.write_gatt_char(
+                        COMMAND_UUID,
+                        payload,
+                        response=self.options.write_with_response,
+                    ),
+                    timeout=BLE_GATT_IO_TIMEOUT_SECONDS,
                 )
-                await asyncio.sleep(wait)
-                status = await self.read_status_retrying(wait)
+                try:
+                    status = await asyncio.wait_for(
+                        self._status_notifications.get(),
+                        timeout=max(0.75, wait * 4),
+                    )
+                except asyncio.TimeoutError:
+                    await asyncio.sleep(wait)
+                    status = await self.read_status_retrying(wait)
                 if status_is_transport_failure(status):
                     transport_fail(status)
                 if do_echo and status:
@@ -1616,9 +1831,7 @@ class BLETransport:
             timeout=timeout or max(4.0, self.options.final_wait + 3.0),
             response_wait=max(self.options.response_wait, 0.12),
         )
-        values = parse_key_values(status)
-        if "secure" in values and values["secure"] != "1":
-            transport_fail("BLE Runtime link is not encrypted")
+        validate_ble_runtime_status(status)
         return status
 
     async def hold_connection(self, seconds: float, *, keepalive_period: float = 5.0) -> None:
@@ -1658,6 +1871,9 @@ class BLETransport:
     async def rgb(self, color: str | None = None) -> str:
         command = "rgb" if color is None else f"rgb {color}"
         return await self.read_json(command, "rgb", RGB_API)
+
+    async def codex_pet(self) -> str:
+        return await self.read_json("codex_pet_status", "codex_pet", CODEX_PET_API)
 
     async def voice(self) -> str:
         return await self.read_json("voice", "voice", VOICE_API)
@@ -1923,6 +2139,19 @@ class BLETransport:
 
 
 def run_self_test() -> None:
+    validate_ble_runtime_status(
+        "ok status api=vibeboard-huangshan-ble-install/v1 active=codex_pet secure=1"
+    )
+    _assert_raises(
+        RuntimeTransportError,
+        validate_ble_runtime_status,
+        "ok status api=vibeboard-huangshan-ble-install/v1 active=codex_pet",
+    )
+    _assert_raises(
+        RuntimeTransportError,
+        validate_ble_runtime_status,
+        "ok status api=unexpected/v1 active=codex_pet secure=1",
+    )
     assert RUNTIME_DATA_CHUNK_BYTES == 160
     assert VOICE_CHUNK_BYTES > RUNTIME_DATA_CHUNK_BYTES
     assert 0 < SERIAL_MSH_VOICE_CHUNK_BYTES <= VOICE_CHUNK_BYTES
@@ -2062,6 +2291,9 @@ def run_self_test() -> None:
     abort = "vb_runtime_install_abort demo"
     assert install_ack_matches("ok install_end app=demo rc=0 active=demo", end)
     assert install_ack_matches("ok install_abort app=demo rc=0", abort)
+    assert not serial_install_ack_matches("ok install_file app=demo path=main.lua offset=0 rc=0", file_cmd)
+    assert serial_install_ack_matches("ok install_file app=demo path=main.lua offset=0 rc=0\nmsh />", file_cmd)
+    assert serial_install_response_complete("0b_runtime_install_file: command not found.\nmsh />", file_cmd)
 
     assert app_launch_matches("ok launch app=demo rc=0", "demo")
     assert app_stop_matches("ok stop rc=0")
@@ -2074,6 +2306,11 @@ def run_self_test() -> None:
     assert not flow_clear_matches("vb_runtime_flow_clear")
     assert not flow_send_matches("vb_runtime_flow_send pc.voice 7 6f6b", "pc.voice", 7)
     assert parse_key_values("api=x active=demo rc=0") == {"api": "x", "active": "demo", "rc": "0"}
+    pet_status_json = (
+        f'{{"api":"{CODEX_PET_API}","active":1,"connected":1,'
+        '"state":"running","tasks":3,"activeTasks":2}}'
+    )
+    assert json.loads(extract_json_line(pet_status_json, CODEX_PET_API))["activeTasks"] == 2
     assert voice_status_matches("[vb_runtime] ok voice api=v1 seq=3 ready=1", 3)
     assert voice_status_matches("[vb_runtime][voice] ok voice api=v1 built=1 ready=0 recording=0 seq=3 bytes=0 bits=\x00msh />msh />[vb_runtime][lua] timer Runtime Tick 2", 3)
     assert voice_start_matches("ok voice_start seq=4 ms=800 rc=0", 4, 800)
@@ -2141,10 +2378,11 @@ def run_self_test() -> None:
 
     notifications = BLETransport(BLETransportOptions())
     notifications._handle_status_notification(None, bytearray(b"pet_action action=approve request=req.1"))
-    assert notifications._status_notifications.get_nowait().endswith("request=req.1")
+    assert notifications._action_notifications.get_nowait().endswith("request=req.1")
     notifications._handle_status_notification(None, bytearray(b"stale"))
     notifications._clear_status_notifications()
     assert notifications._status_notifications.empty()
+    assert notifications._action_notifications.empty()
 
     class FakeSerialTransport(SerialTransport):
         def __init__(self) -> None:
@@ -2193,6 +2431,8 @@ def run_self_test() -> None:
                 response = "ok delete app=demo rc=0"
             else:
                 response = "ok status api=v1 active=demo"
+            if command.startswith("vb_runtime_install_"):
+                response += "\nmsh />"
             assert matcher(response)
             return response + "\n"
 
@@ -2323,7 +2563,7 @@ def run_self_test() -> None:
     class FakeBLEServices:
         @staticmethod
         def get_characteristic(uuid: str):
-            return object() if uuid == VOICE_STREAM_UUID else None
+            return object() if uuid in {STATUS_UUID, VOICE_STREAM_UUID} else None
 
     class FakeNotifyClient:
         def __init__(self) -> None:
@@ -2353,6 +2593,67 @@ def run_self_test() -> None:
         assert received == [b"first", b"second"]
 
     asyncio.run(check_ble_voice_notify_reconnect())
+
+    async def check_ble_status_notify_reconnect() -> None:
+        transport = BLETransport(BLETransportOptions(disconnect_pause=0))
+        first_client = FakeNotifyClient()
+        transport._client = first_client
+        await transport._subscribe_status_notifications()
+        first_client.notifications[STATUS_UUID](
+            None, bytearray(b"pet_action action=next request=first")
+        )
+        assert await transport.next_status_notification(timeout=0.1) == (
+            "pet_action action=next request=first"
+        )
+
+        transport._status_notify_started = False
+        second_client = FakeNotifyClient()
+        transport._client = second_client
+        await transport._subscribe_status_notifications()
+        second_client.notifications[STATUS_UUID](
+            None, bytearray(b"pet_action action=next request=second")
+        )
+        assert await transport.next_status_notification(timeout=0.1) == (
+            "pet_action action=next request=second"
+        )
+
+    asyncio.run(check_ble_status_notify_reconnect())
+
+    class FakeCommandNotifyClient:
+        def __init__(self, transport: BLETransport) -> None:
+            self.transport = transport
+            self.reads = 0
+
+        async def write_gatt_char(self, _uuid: str, _payload: bytes, *, response: bool) -> None:
+            assert response is True
+            self.transport._handle_status_notification(
+                None, bytearray(b"ok status api=v1 active=codex_pet")
+            )
+
+        async def read_gatt_char(self, _uuid: str) -> bytearray:
+            self.reads += 1
+            raise AssertionError("notification response should avoid a GATT read")
+
+    async def check_ble_command_notification_routing() -> None:
+        transport = BLETransport(BLETransportOptions(disconnect_pause=0))
+        client = FakeCommandNotifyClient(transport)
+        transport._client = client
+
+        async def services_ready(_wait: float) -> None:
+            return None
+
+        transport._wait_for_services_retrying = services_ready  # type: ignore[method-assign]
+        transport._handle_status_notification(
+            None, bytearray(b"pet_action action=next request=task.1")
+        )
+        response = await transport.command("status")
+        assert response.startswith("ok status ")
+        assert client.reads == 0
+        assert await transport.next_status_notification(timeout=0.1) == (
+            "pet_action action=next request=task.1"
+        )
+
+    asyncio.run(check_ble_command_notification_routing())
 
     fake_serial = FakeSerialTransport()
     pcm, voice_info = fake_serial.capture_voice(600, chunk_bytes=3)

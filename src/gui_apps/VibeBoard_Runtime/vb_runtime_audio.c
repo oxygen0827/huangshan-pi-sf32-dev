@@ -3,8 +3,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dfs_posix.h>
 
 #include "vb_runtime_audio.h"
+#include "vb_runtime_storage.h"
+#include "app_mem.h"
 
 #if defined(AUDIO) && defined(AUDIO_USING_MANAGER)
 #include "audio_server.h"
@@ -15,13 +18,15 @@
 
 #define VB_AUDIO_PATH_MAX 192
 #define VB_AUDIO_JSON_MAX 512
-#define VB_AUDIO_IO_CHUNK 1024
+#define VB_AUDIO_IO_CHUNK VB_RUNTIME_STORAGE_IO_CHUNK_BYTES
 #define VB_AUDIO_CACHE_SIZE 4096
 #define VB_AUDIO_THREAD_STACK 4096
 #define VB_AUDIO_DRAIN_TIMEOUT_MS 3000
 #define VB_AUDIO_DEFAULT_VOLUME 8
 #define VB_AUDIO_TONE_SAMPLE_RATE 16000
 #define VB_AUDIO_TONE_DURATION_SECONDS 1
+#define VB_AUDIO_CODEX_CUE_COUNT 5
+#define VB_AUDIO_CODEX_CUE_MAX_BYTES (64u * 1024u)
 
 typedef struct
 {
@@ -56,10 +61,25 @@ typedef struct
     uint32_t data_size;
 } vb_wav_info_t;
 
+typedef struct
+{
+    const char *path;
+    uint8_t *data;
+    uint32_t size;
+} vb_audio_cached_wav_t;
+
 static vb_audio_state_t g_vb_audio = {
     .volume = VB_AUDIO_DEFAULT_VOLUME,
 };
 static char g_vb_audio_msh_json[VB_AUDIO_JSON_MAX];
+static uint8_t *g_vb_audio_codex_cue_data;
+static vb_audio_cached_wav_t g_vb_audio_codex_cues[VB_AUDIO_CODEX_CUE_COUNT] = {
+    {"/sdcard/apps/codex_pet/assets/listening.wav", RT_NULL, 0},
+    {"/sdcard/apps/codex_pet/assets/submitted.wav", RT_NULL, 0},
+    {"/sdcard/apps/codex_pet/assets/needs_input.wav", RT_NULL, 0},
+    {"/sdcard/apps/codex_pet/assets/done.wav", RT_NULL, 0},
+    {"/sdcard/apps/codex_pet/assets/error.wav", RT_NULL, 0},
+};
 
 static uint16_t vb_audio_le16(const uint8_t *data)
 {
@@ -139,6 +159,66 @@ static int vb_audio_parse_wav(int fd, vb_wav_info_t *info)
     return RT_EOK;
 }
 
+static int vb_audio_parse_wav_memory(const uint8_t *data, uint32_t size,
+                                     vb_wav_info_t *info)
+{
+    uint32_t offset = 12;
+    int have_format = 0;
+    if (!data || !info || size < 20 || rt_memcmp(data, "RIFF", 4) != 0 ||
+        rt_memcmp(data + 8, "WAVE", 4) != 0) return -RT_EINVAL;
+    rt_memset(info, 0, sizeof(*info));
+    while (offset <= size - 8u)
+    {
+        const uint8_t *chunk = data + offset;
+        uint32_t chunk_size = vb_audio_le32(chunk + 4);
+        uint32_t payload = offset + 8u;
+        if (chunk_size > size - payload) return -RT_EINVAL;
+        if (rt_memcmp(chunk, "fmt ", 4) == 0)
+        {
+            if (chunk_size < 16 || vb_audio_le16(data + payload) != 1) return -RT_ENOSYS;
+            info->channels = vb_audio_le16(data + payload + 2);
+            info->sample_rate = vb_audio_le32(data + payload + 4);
+            info->bits_per_sample = vb_audio_le16(data + payload + 14);
+            have_format = 1;
+        }
+        else if (rt_memcmp(chunk, "data", 4) == 0)
+        {
+            info->data_offset = payload;
+            info->data_size = chunk_size;
+            break;
+        }
+        if (chunk_size + (chunk_size & 1u) > size - payload) return -RT_EINVAL;
+        offset = payload + chunk_size + (chunk_size & 1u);
+    }
+    if (!have_format || info->data_size == 0 ||
+        (info->channels != 1 && info->channels != 2) ||
+        info->bits_per_sample != 16 || info->sample_rate < 8000 || info->sample_rate > 48000)
+        return -RT_ENOSYS;
+    return RT_EOK;
+}
+
+static const vb_audio_cached_wav_t *vb_audio_find_cached_wav(const char *path)
+{
+    int index;
+    if (!path || !g_vb_audio_codex_cue_data) return RT_NULL;
+    for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+    {
+        if (g_vb_audio_codex_cues[index].data &&
+            rt_strcmp(path, g_vb_audio_codex_cues[index].path) == 0)
+            return &g_vb_audio_codex_cues[index];
+    }
+    return RT_NULL;
+}
+
+static int vb_audio_is_codex_cue_path(const char *path)
+{
+    int index;
+    if (!path) return 0;
+    for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+        if (rt_strcmp(path, g_vb_audio_codex_cues[index].path) == 0) return 1;
+    return 0;
+}
+
 #if VB_AUDIO_BUILT
 static int vb_audio_callback(audio_server_callback_cmt_t command,
                              void *callback_userdata, uint32_t reserved)
@@ -164,6 +244,7 @@ static int vb_audio_write_all(const uint8_t *data, uint32_t length)
             offset += (uint32_t)wrote;
             g_vb_audio.played_bytes += (uint32_t)wrote;
             idle_retries = 0;
+            rt_thread_mdelay(1);
         }
         else
         {
@@ -196,8 +277,11 @@ static void vb_audio_worker(void *parameter)
     int result = -RT_ERROR;
     vb_wav_info_t wav;
     uint8_t *buffer = RT_NULL;
+    const vb_audio_cached_wav_t *cached = RT_NULL;
+    const uint8_t *cached_cursor = RT_NULL;
     uint32_t remaining;
     uint32_t tone_sample = 0;
+    int storage_locked = 0;
     (void)parameter;
 
     if (g_vb_audio.tone_requested)
@@ -211,14 +295,30 @@ static void vb_audio_worker(void *parameter)
     }
     else
     {
-        fd = open(g_vb_audio.path, O_RDONLY);
-        if (fd < 0)
+        cached = vb_audio_find_cached_wav(g_vb_audio.path);
+        if (cached)
         {
-            result = -RT_ERROR;
-            goto done;
+            result = vb_audio_parse_wav_memory(cached->data, cached->size, &wav);
+            if (result != RT_EOK) goto done;
+            cached_cursor = cached->data + wav.data_offset;
         }
-        result = vb_audio_parse_wav(fd, &wav);
-        if (result != RT_EOK) goto done;
+        else
+        {
+            if (vb_runtime_storage_take(15000) != RT_EOK)
+            {
+                result = -RT_ETIMEOUT;
+                goto done;
+            }
+            storage_locked = 1;
+            fd = open(g_vb_audio.path, O_RDONLY);
+            if (fd < 0)
+            {
+                result = -RT_ERROR;
+                goto done;
+            }
+            result = vb_audio_parse_wav(fd, &wav);
+            if (result != RT_EOK) goto done;
+        }
     }
     g_vb_audio.sample_rate = wav.sample_rate;
     g_vb_audio.channels = wav.channels;
@@ -270,6 +370,12 @@ static void vb_audio_worker(void *parameter)
             }
             got = (int)wanted;
         }
+        else if (cached_cursor)
+        {
+            rt_memcpy(buffer, cached_cursor, wanted);
+            cached_cursor += wanted;
+            got = (int)wanted;
+        }
         else
         {
             got = read(fd, buffer, wanted);
@@ -283,7 +389,20 @@ static void vb_audio_worker(void *parameter)
         if (result != RT_EOK) break;
         if (!g_vb_audio.tone_continuous) remaining -= (uint32_t)got;
     }
-    if (result == RT_EOK) vb_audio_drain();
+    if (result == RT_EOK)
+    {
+        if (fd >= 0)
+        {
+            close(fd);
+            fd = -1;
+        }
+        if (storage_locked)
+        {
+            vb_runtime_storage_release();
+            storage_locked = 0;
+        }
+        vb_audio_drain();
+    }
 #else
     remaining = 0;
     result = -RT_ENOSYS;
@@ -299,6 +418,7 @@ done:
 #endif
     if (buffer) rt_free(buffer);
     if (fd >= 0) close(fd);
+    if (storage_locked) vb_runtime_storage_release();
     g_vb_audio.playing = 0;
     g_vb_audio.ready = result == RT_EOK ? 1 : 0;
     /* A requested stop is a successful control action, not a playback fault. */
@@ -336,12 +456,84 @@ void vb_runtime_audio_finish_capture(void)
     g_vb_audio.capture_reserved = 0;
 }
 
+int vb_runtime_audio_preload_codex_cues(void)
+{
+    uint32_t sizes[VB_AUDIO_CODEX_CUE_COUNT];
+    uint32_t total = 0;
+    uint8_t *data = RT_NULL;
+    uint8_t *cursor;
+    int index;
+    int result = -RT_ERROR;
+    if (g_vb_audio_codex_cue_data) return RT_EOK;
+    if (g_vb_audio.worker || g_vb_audio.playing) return -RT_EBUSY;
+    if (vb_runtime_storage_take(3000) != RT_EOK) return -RT_ETIMEOUT;
+    for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+    {
+        struct stat st;
+        if (stat(g_vb_audio_codex_cues[index].path, &st) != 0 || st.st_size <= 0 ||
+            st.st_size > (off_t)(VB_AUDIO_CODEX_CUE_MAX_BYTES - total))
+            goto finish;
+        sizes[index] = (uint32_t)st.st_size;
+        total += sizes[index];
+    }
+    data = (uint8_t *)app_cache_alloc(total, IMAGE_CACHE_PSRAM);
+    if (!data) goto finish;
+    cursor = data;
+    for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+    {
+        vb_wav_info_t wav;
+        int fd = open(g_vb_audio_codex_cues[index].path, O_RDONLY);
+        if (fd < 0 || vb_audio_read_exact(fd, cursor, sizes[index]) != RT_EOK)
+        {
+            if (fd >= 0) close(fd);
+            goto finish;
+        }
+        close(fd);
+        if (vb_audio_parse_wav_memory(cursor, sizes[index], &wav) != RT_EOK) goto finish;
+        g_vb_audio_codex_cues[index].data = cursor;
+        g_vb_audio_codex_cues[index].size = sizes[index];
+        cursor += sizes[index];
+        rt_thread_yield();
+    }
+    g_vb_audio_codex_cue_data = data;
+    data = RT_NULL;
+    rt_kprintf("[vb_runtime][audio] preloaded Codex cues=%d bytes=%lu\n",
+               VB_AUDIO_CODEX_CUE_COUNT, (unsigned long)total);
+    result = RT_EOK;
+finish:
+    vb_runtime_storage_release();
+    if (data) app_cache_free(data);
+    if (result != RT_EOK)
+    {
+        for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+        {
+            g_vb_audio_codex_cues[index].data = RT_NULL;
+            g_vb_audio_codex_cues[index].size = 0;
+        }
+    }
+    return result;
+}
+
+void vb_runtime_audio_release_codex_cues(void)
+{
+    int index;
+    (void)vb_runtime_audio_stop();
+    if (g_vb_audio_codex_cue_data) app_cache_free(g_vb_audio_codex_cue_data);
+    g_vb_audio_codex_cue_data = RT_NULL;
+    for (index = 0; index < VB_AUDIO_CODEX_CUE_COUNT; index++)
+    {
+        g_vb_audio_codex_cues[index].data = RT_NULL;
+        g_vb_audio_codex_cues[index].size = 0;
+    }
+}
+
 int vb_runtime_audio_play_wav(const char *path)
 {
     rt_thread_t worker;
     if (!VB_AUDIO_BUILT) return -RT_ENOSYS;
     if (g_vb_audio.capture_reserved) return -RT_EBUSY;
     if (!path || rt_strncmp(path, "/sdcard/apps/", 13) != 0 || strstr(path, "..")) return -RT_EINVAL;
+    if (vb_audio_is_codex_cue_path(path) && !vb_audio_find_cached_wav(path)) return -RT_EIO;
     if (g_vb_audio.worker || g_vb_audio.playing) return -RT_EBUSY;
     g_vb_audio.sequence++;
     g_vb_audio.played_bytes = 0;
@@ -359,7 +551,7 @@ int vb_runtime_audio_play_wav(const char *path)
     g_vb_audio.path[sizeof(g_vb_audio.path) - 1] = '\0';
     worker = rt_thread_create("vbaudio", vb_audio_worker, RT_NULL,
                               VB_AUDIO_THREAD_STACK,
-                              RT_THREAD_PRIORITY_MIDDLE + 3,
+                              RT_THREAD_PRIORITY_MIDDLE + 8,
                               RT_THREAD_TICK_DEFAULT);
     if (!worker)
     {
@@ -397,7 +589,7 @@ int vb_runtime_audio_play_tone(int continuous)
     g_vb_audio.path[sizeof(g_vb_audio.path) - 1] = '\0';
     worker = rt_thread_create("vbaudio", vb_audio_worker, RT_NULL,
                               VB_AUDIO_THREAD_STACK,
-                              RT_THREAD_PRIORITY_MIDDLE + 3,
+                              RT_THREAD_PRIORITY_MIDDLE + 8,
                               RT_THREAD_TICK_DEFAULT);
     if (!worker)
     {
@@ -448,7 +640,8 @@ int vb_runtime_audio_read_json(char *dst, rt_size_t cap)
                        "{\"api\":\"%s\",\"available\":%d,\"playing\":%d,\"ready\":%d,"
                        "\"suspended\":%d,\"seq\":%lu,\"rate\":%lu,\"channels\":%lu,"
                        "\"bits\":%lu,\"bytes\":%lu,\"total\":%lu,\"volume\":%d,"
-                       "\"err\":%d,\"capture_reserved\":%d,\"path\":\"%s\"}",
+                       "\"err\":%d,\"capture_reserved\":%d,\"cachedCues\":%d,"
+                       "\"path\":\"%s\"}",
                        VB_RUNTIME_AUDIO_API_VERSION, VB_AUDIO_BUILT,
                        g_vb_audio.playing, g_vb_audio.ready, g_vb_audio.suspended,
                        (unsigned long)g_vb_audio.sequence,
@@ -458,7 +651,9 @@ int vb_runtime_audio_read_json(char *dst, rt_size_t cap)
                        (unsigned long)g_vb_audio.played_bytes,
                        (unsigned long)g_vb_audio.data_bytes,
                        g_vb_audio.volume, g_vb_audio.last_error,
-                       g_vb_audio.capture_reserved, g_vb_audio.path);
+                       g_vb_audio.capture_reserved,
+                       g_vb_audio_codex_cue_data ? VB_AUDIO_CODEX_CUE_COUNT : 0,
+                       g_vb_audio.path);
     dst[cap - 1] = '\0';
     return used >= 0 && used < (int)cap ? RT_EOK : -RT_EFULL;
 }
@@ -498,7 +693,7 @@ int vb_runtime_audio_format_text(const char *selector, char *dst, rt_size_t cap)
 
 void vb_runtime_audio_shutdown(void)
 {
-    (void)vb_runtime_audio_stop();
+    vb_runtime_audio_release_codex_cues();
 }
 
 static int vb_runtime_audio_msh(int argc, char **argv)

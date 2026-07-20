@@ -129,6 +129,10 @@
 #define VB_BLE_MAX_COMMAND 896
 #define VB_BLE_STATUS_MAX 1024
 #define VB_RUNTIME_INSTALL_MAX_CHUNK_BYTES 240
+#define VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES 4096u
+#define VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES 3072u
+#define VB_RUNTIME_INSTALL_BLOB_MAX_BYTES (1024u * 1024u)
+#define VB_RUNTIME_INSTALL_BLOB_TIMEOUT_MS 10000u
 #define VB_BLE_EVT_RESTART_ADV 0x56524201u
 #define VB_BLE_ADV_RESTART_DELAY_MS 600
 #define VB_BLE_ADV_RESTART_INTERVAL_MS 700
@@ -141,6 +145,7 @@
 #define VB_DISPLAY_JSON_MAX 384
 #define VB_VOICE_JSON_MAX 384
 #define VB_RGB_JSON_MAX 256
+#define VB_CODEX_PET_JSON_MAX 512
 #define VB_TOUCH_JSON_MAX 384
 #define VB_GPIO_JSON_MAX 448
 #define VB_APP_JSON_MAX 4096
@@ -718,6 +723,7 @@ typedef struct
     int service_ready;
     int adv_configured;
     int advertising;
+    int link_active;
     int connected;
     int encrypted;
     uint8_t last_adv_start_rc;
@@ -842,6 +848,7 @@ typedef struct
     vb_weather_state_t weather;
     vb_pager_state_t pager;
     volatile int pending_reload;
+    volatile int reload_in_progress;
     volatile int pending_stop;
     volatile int pending_manager_refresh;
     int running;
@@ -901,6 +908,7 @@ static void vb_runtime_state_bootstrap(void)
 static vb_info_flow_state_t g_vb_flow;
 static vb_voice_state_t g_vb_voice;
 static char g_vb_msh_text[VB_APP_JSON_MAX];
+static uint8_t g_vb_install_blob_buffer[VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES];
 #if VB_RUNTIME_HAS_BT_PAN
 static vb_pan_state_t g_vb_pan;
 #endif
@@ -925,6 +933,8 @@ static int vb_pan_forget(void);
 static int vb_runtime_install_begin_app(const char *app_id);
 static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
                                          const char *offset_text, const char *hex);
+static int vb_runtime_install_blob_file(const char *app_id, const char *path,
+                                        const char *size_text);
 static int vb_runtime_install_end_app(const char *app_id);
 static int vb_runtime_install_abort_app(const char *app_id);
 static int vb_runtime_staging_clear_all(int *removed);
@@ -986,8 +996,8 @@ static void vb_json_copy_string_array_csv(const char *begin, const char *end, co
                                           char *dst, rt_size_t cap, const char *fallback);
 static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, const char *hex);
 static int vb_runtime_flow_latest_index(void);
-static int vb_runtime_flow_save_latest(void);
 static int vb_runtime_flow_load_state(void);
+static int vb_runtime_flow_save_latest(void);
 static void vb_runtime_flow_clear_state(void);
 static int vb_runtime_flow_status_command(void);
 static int vb_runtime_voice_start(uint32_t duration_ms);
@@ -2958,6 +2968,14 @@ static int vb_ble_execute_line(char *line)
         rt_kprintf("[vb_runtime][ble] rgb rc=%d %s\n", result, g_vb_ble.status);
         return result;
     }
+    if (rt_strcmp(argv[0], "codex_pet_status") == 0 ||
+        rt_strcmp(argv[0], "vb_runtime_codex_pet_status") == 0)
+    {
+        int result = vb_codex_pet_status_json(g_vb_ble.status, sizeof(g_vb_ble.status));
+        g_vb_ble.status[sizeof(g_vb_ble.status) - 1] = '\0';
+        rt_kprintf("[vb_runtime][ble] codex_pet rc=%d %s\n", result, g_vb_ble.status);
+        return result;
+    }
     if ((rt_strcmp(argv[0], "rgb_set") == 0 || rt_strcmp(argv[0], "vb_runtime_rgb_set") == 0) && argc >= 2)
     {
         int result = vb_runtime_rgb_set_text(argv[1], g_vb_ble.status, sizeof(g_vb_ble.status));
@@ -3503,7 +3521,7 @@ static void vb_ble_worker_entry(void *parameter)
             rt_thread_mdelay(VB_BLE_ADV_RESTART_DELAY_MS);
             for (attempt = 0; attempt < VB_BLE_ADV_RESTART_ATTEMPTS; attempt++)
             {
-                if (!g_vb_ble.power_on || !g_vb_ble.service_ready)
+                if (!g_vb_ble.power_on || !g_vb_ble.service_ready || g_vb_ble.link_active)
                 {
                     break;
                 }
@@ -3592,8 +3610,8 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
             }
             if (ind->role == 1)
             {
+                g_vb_ble.link_active = 1;
                 g_vb_ble.advertising = 0;
-                if (g_vb_ble.mailbox) rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
             }
         }
         break;
@@ -3615,6 +3633,7 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
     {
         ble_gap_disconnected_ind_t *ind = (ble_gap_disconnected_ind_t *)data;
         if (!ind) break;
+        g_vb_ble.link_active = 0;
         if (ind->conn_idx < VB_BLE_TRACKED_CONNECTIONS)
             g_vb_ble.mtu_by_conn[ind->conn_idx] = 0;
         if (ind->conn_idx == g_vb_ble.conn_idx)
@@ -4868,10 +4887,11 @@ static int vb_runtime_app_status_json(char *dst, rt_size_t cap)
                               g_vb_runtime.app_last_status);
     result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.app_last_error, 0);
     result |= vb_json_appendf(dst, cap, &used,
-                              ",\"launches\":%lu,\"stops\":%lu,\"pending_reload\":%d,\"pending_stop\":%d,\"launcher_page\":%d,\"launcher_total\":%d,\"launcher_count\":%d,\"pending_delete\":",
+                              ",\"launches\":%lu,\"stops\":%lu,\"pending_reload\":%d,\"reloading\":%d,\"pending_stop\":%d,\"launcher_page\":%d,\"launcher_total\":%d,\"launcher_count\":%d,\"pending_delete\":",
                               (unsigned long)g_vb_runtime.app_launch_count,
                               (unsigned long)g_vb_runtime.app_stop_count,
                               g_vb_runtime.pending_reload ? 1 : 0,
+                              g_vb_runtime.reload_in_progress ? 1 : 0,
                               g_vb_runtime.pending_stop ? 1 : 0,
                               g_vb_runtime.launcher_page,
                               g_vb_runtime.launcher_total,
@@ -5047,6 +5067,12 @@ static int vb_runtime_app_launch(const char *app_id)
     {
         vb_runtime_set_app_result(-RT_ERROR, "app not found or incompatible");
         return -RT_ERROR;
+    }
+    if (g_vb_runtime.app_running && rt_strcmp(g_vb_runtime.active_app, app_id) == 0)
+    {
+        vb_runtime_set_app_result(RT_EOK, "already running");
+        rt_kprintf("[vb_runtime] app already running: %s\n", app_id);
+        return RT_EOK;
     }
     result = vb_runtime_select_app(app_id);
     if (result == RT_EOK)
@@ -5262,6 +5288,10 @@ static int vb_runtime_ble_json_read(const char *kind, uint32_t offset, uint32_t 
     else if (rt_strcmp(kind, "rgb") == 0)
     {
         result = vb_runtime_rgb_read_json(json, VB_JSON_READ_MAX);
+    }
+    else if (rt_strcmp(kind, "codex_pet") == 0 || rt_strcmp(kind, "pet") == 0)
+    {
+        result = vb_codex_pet_status_json(json, VB_JSON_READ_MAX);
     }
     else if (rt_strcmp(kind, "peer") == 0)
     {
@@ -5972,7 +6002,8 @@ static int vb_codex_pet_send_action(const char *action, const char *request_id)
     const char *cursor;
     if (!action || !request_id ||
         (rt_strcmp(action, "approve") != 0 && rt_strcmp(action, "deny") != 0 &&
-         rt_strcmp(action, "prev") != 0 && rt_strcmp(action, "next") != 0))
+         rt_strcmp(action, "prev") != 0 && rt_strcmp(action, "next") != 0 &&
+         rt_strcmp(action, "pet_select") != 0))
         return -RT_EINVAL;
     if (!request_id[0] || rt_strlen(request_id) > 24) return -RT_EINVAL;
     for (cursor = request_id; *cursor; cursor++)
@@ -5993,7 +6024,6 @@ static int vb_codex_pet_send_action(const char *action, const char *request_id)
 
 static int vb_codex_pet_cue_play(const char *cue)
 {
-    char path[VB_MAX_PATH];
     if (!cue ||
         (rt_strcmp(cue, "listening") != 0 &&
          rt_strcmp(cue, "submitted") != 0 &&
@@ -6001,10 +6031,9 @@ static int vb_codex_pet_cue_play(const char *cue)
          rt_strcmp(cue, "done") != 0 &&
          rt_strcmp(cue, "error") != 0))
         return -RT_EINVAL;
-    (void)vb_runtime_audio_stop();
-    rt_snprintf(path, sizeof(path), "/sdcard/apps/codex_pet/assets/%s.wav", cue);
-    path[sizeof(path) - 1] = '\0';
-    return vb_runtime_audio_play_wav(path);
+    /* State changes must never block the LVGL thread on the slow audio service.
+     * Explicit user-requested WAV/tone playback remains available. */
+    return RT_EOK;
 }
 
 static void vb_codex_pet_cue_stop(void)
@@ -6067,6 +6096,34 @@ static void vb_runtime_flow_escape_text(const char *src, char *dst, rt_size_t ca
         }
     }
     dst[used] = '\0';
+}
+
+static int vb_runtime_flow_save_latest(void)
+{
+    int index = vb_runtime_flow_latest_index();
+    vb_info_flow_item_t *item;
+    char channel[VB_FLOW_MAX_CHANNEL * 2];
+    char payload[VB_FLOW_MAX_PAYLOAD * 2 + 8];
+    char json[VB_FLOW_MAX_PAYLOAD * 2 + VB_FLOW_MAX_CHANNEL * 2 + 128];
+    if (index < 0)
+    {
+        if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+        unlink(VIBEBOARD_FLOW_STATE_FILE);
+        return RT_EOK;
+    }
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    item = &g_vb_flow.items[index];
+    vb_runtime_flow_escape_text(item->channel, channel, sizeof(channel));
+    vb_runtime_flow_escape_text(item->payload, payload, sizeof(payload));
+    rt_snprintf(json, sizeof(json),
+                "{\"api\":\"%s\",\"seq\":%lu,\"channel\":\"%s\",\"bytes\":%lu,\"payload\":\"%s\"}\n",
+                VIBEBOARD_RUNTIME_FLOW_API_VERSION,
+                (unsigned long)item->sequence,
+                channel,
+                (unsigned long)item->bytes,
+                payload);
+    json[sizeof(json) - 1] = '\0';
+    return vb_write_text_file(VIBEBOARD_FLOW_STATE_FILE, json);
 }
 
 static void vb_runtime_flow_copy_json_string(const char *json, const char *key, char *dst, rt_size_t cap)
@@ -6182,34 +6239,6 @@ static void vb_runtime_flow_update_label(void)
     g_vb_runtime.flow_seen_total = g_vb_flow.total_count;
 }
 
-static int vb_runtime_flow_save_latest(void)
-{
-    int index = vb_runtime_flow_latest_index();
-    vb_info_flow_item_t *item;
-    char channel[VB_FLOW_MAX_CHANNEL * 2];
-    char payload[VB_FLOW_MAX_PAYLOAD * 2 + 8];
-    char json[VB_FLOW_MAX_PAYLOAD * 2 + VB_FLOW_MAX_CHANNEL * 2 + 128];
-    if (index < 0)
-    {
-        if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
-        unlink(VIBEBOARD_FLOW_STATE_FILE);
-        return RT_EOK;
-    }
-    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
-    item = &g_vb_flow.items[index];
-    vb_runtime_flow_escape_text(item->channel, channel, sizeof(channel));
-    vb_runtime_flow_escape_text(item->payload, payload, sizeof(payload));
-    rt_snprintf(json, sizeof(json),
-                "{\"api\":\"%s\",\"seq\":%lu,\"channel\":\"%s\",\"bytes\":%lu,\"payload\":\"%s\"}\n",
-                VIBEBOARD_RUNTIME_FLOW_API_VERSION,
-                (unsigned long)item->sequence,
-                channel,
-                (unsigned long)item->bytes,
-                payload);
-    json[sizeof(json) - 1] = '\0';
-    return vb_write_text_file(VIBEBOARD_FLOW_STATE_FILE, json);
-}
-
 static int vb_runtime_flow_load_state(void)
 {
     char json[VB_FLOW_MAX_PAYLOAD * 2 + VB_FLOW_MAX_CHANNEL * 2 + 128];
@@ -6288,7 +6317,10 @@ static int vb_runtime_flow_send_hex(const char *channel, uint32_t sequence, cons
                (unsigned long)item->bytes,
                item->payload);
     vb_codex_pet_receive_flow(item->channel, item->sequence, item->payload);
-    vb_runtime_flow_save_latest();
+    /* Codex Pet snapshots are replayed by the desktop Bridge. Persisting them
+     * from the BLE event thread races SD/LCD SPI and can wedge the board. */
+    if (rt_strncmp(item->channel, "pet.", 4) != 0)
+        vb_runtime_flow_save_latest();
     return (int)bytes;
 }
 
@@ -10929,8 +10961,12 @@ static int vb_script_execute_helper_call(const char *line)
     }
     if (vb_extract_call_args(line, "vibe_codex_pet", args, &argc))
     {
+        int cue_result;
         vb_runtime_clear_root_children();
         vb_runtime_init_image_decoders();
+        cue_result = vb_runtime_audio_preload_codex_cues();
+        if (cue_result != RT_EOK)
+            rt_kprintf("[vb_runtime][audio] Codex cue preload rc=%d\n", cue_result);
         int result = vb_codex_pet_start(g_vb_runtime.root, &g_vb_codex_pet_ops,
                                         argc >= 1 ? args[0] : "Codex workspace");
         int index = vb_runtime_flow_latest_index();
@@ -11005,6 +11041,7 @@ int vibeboard_lua_host_reset(void)
     if (!g_vb_runtime.root) return -RT_ERROR;
     vb_pager_stop();
     vb_codex_pet_stop();
+    vb_runtime_audio_release_codex_cues();
     rt_memset(g_vb_runtime.script_objects, 0, sizeof(g_vb_runtime.script_objects));
     g_vb_runtime.script_object_count = 1;
     g_vb_runtime.script_ui_component_count = 0;
@@ -11108,6 +11145,7 @@ static void vb_builtin_script_stop(void)
 {
     vb_pager_stop();
     vb_codex_pet_stop();
+    vb_runtime_audio_release_codex_cues();
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_last_label = RT_NULL;
     g_vb_runtime.script_tick_label = RT_NULL;
@@ -11886,10 +11924,13 @@ static void vb_runtime_stop_current_app(void)
 
 static int vb_runtime_reload_current(void)
 {
+    int result;
     if (!g_vb_runtime.running)
     {
         return gui_app_run(APP_ID);
     }
+    if (g_vb_runtime.reload_in_progress) return -RT_EBUSY;
+    g_vb_runtime.reload_in_progress = 1;
     vb_runtime_clear_overlay_controls();
     vibeboard_lua_stop_app();
     if (g_vb_runtime.root)
@@ -11901,7 +11942,9 @@ static int vb_runtime_reload_current(void)
     g_vb_runtime.status_label = RT_NULL;
     g_vb_runtime.clock_label = RT_NULL;
     g_vb_runtime.flow_label = RT_NULL;
-    return vb_load_active_package();
+    result = vb_load_active_package();
+    g_vb_runtime.reload_in_progress = 0;
+    return result;
 }
 
 static void vb_runtime_request_reload(void)
@@ -11924,6 +11967,11 @@ static int vb_runtime_select_app(const char *app_id)
     {
         rt_kprintf("usage: vb_runtime_select <app_id>\n");
         return -RT_EINVAL;
+    }
+    if (g_vb_runtime.reload_in_progress && rt_strcmp(g_vb_runtime.active_app, app_id) == 0)
+    {
+        rt_kprintf("[vb_runtime] reload already in progress: %s\n", app_id);
+        return RT_EOK;
     }
     result = vb_write_active_app(app_id);
     if (result != RT_EOK)
@@ -12071,19 +12119,137 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
         rt_kprintf("[vb_runtime] install file write failed: %s (%d)\n", path, result);
         return result;
     }
-    if (fsync(g_vb_runtime.install_fd) != 0)
-    {
-        vb_runtime_install_close_file();
-        rt_kprintf("[vb_runtime] install file sync failed: %s\n", path);
-        return -RT_ERROR;
-    }
     g_vb_runtime.install_offset = offset + written;
-    vb_runtime_install_close_file();
     if (!g_vb_runtime.quiet_logs)
     {
         rt_kprintf("[vb_runtime] install chunk: %s %ld %u\n", path, offset,
                    (unsigned int)(rt_strcmp(hex, "-") == 0 ? 0 : rt_strlen(hex) / 2));
     }
+    return RT_EOK;
+}
+
+static int vb_runtime_install_blob_read(rt_device_t console, uint8_t *dst, rt_size_t size)
+{
+    rt_size_t received = 0;
+    uint32_t deadline = rt_tick_get() + rt_tick_from_millisecond(VB_RUNTIME_INSTALL_BLOB_TIMEOUT_MS);
+    while (received < size)
+    {
+        rt_size_t count = rt_device_read(console, 0, dst + received, size - received);
+        if (count > 0)
+        {
+            received += count;
+            deadline = rt_tick_get() + rt_tick_from_millisecond(VB_RUNTIME_INSTALL_BLOB_TIMEOUT_MS);
+            continue;
+        }
+        if ((int32_t)(rt_tick_get() - deadline) >= 0) return -RT_ETIMEOUT;
+        rt_thread_mdelay(1);
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_base64_value(uint8_t value)
+{
+    if (value >= 'A' && value <= 'Z') return value - 'A';
+    if (value >= 'a' && value <= 'z') return value - 'a' + 26;
+    if (value >= '0' && value <= '9') return value - '0' + 52;
+    if (value == '+') return 62;
+    if (value == '/') return 63;
+    return -1;
+}
+
+static int vb_runtime_base64_decode_in_place(uint8_t *data, rt_size_t encoded,
+                                             rt_size_t expected)
+{
+    rt_size_t source = 0;
+    rt_size_t target = 0;
+    if (!data || encoded == 0 || (encoded % 4u) != 0) return -RT_EINVAL;
+    while (source < encoded)
+    {
+        int a = vb_runtime_base64_value(data[source]);
+        int b = vb_runtime_base64_value(data[source + 1u]);
+        int c = data[source + 2u] == '=' ? -2 : vb_runtime_base64_value(data[source + 2u]);
+        int d = data[source + 3u] == '=' ? -2 : vb_runtime_base64_value(data[source + 3u]);
+        if (a < 0 || b < 0 || c == -1 || d == -1 || (c == -2 && d != -2)) return -RT_EINVAL;
+        data[target++] = (uint8_t)((a << 2) | (b >> 4));
+        if (c >= 0)
+        {
+            data[target++] = (uint8_t)((b << 4) | (c >> 2));
+            if (d >= 0) data[target++] = (uint8_t)((c << 6) | d);
+        }
+        source += 4u;
+    }
+    return target == expected ? RT_EOK : -RT_EINVAL;
+}
+
+static int vb_runtime_install_blob_file(const char *app_id, const char *path,
+                                        const char *size_text)
+{
+    char file_path[VB_MAX_PATH];
+    char dir_path[VB_MAX_PATH];
+    char *slash;
+    char *end = RT_NULL;
+    unsigned long size;
+    unsigned long offset = 0;
+    rt_device_t console;
+    int fd;
+    int result = RT_EOK;
+
+    if (!vb_is_safe_app_id(app_id) || !vb_is_runtime_package_path(path) || !size_text)
+        return -RT_EINVAL;
+    if (!vb_runtime_install_session_matches(app_id)) return -RT_EBUSY;
+    size = strtoul(size_text, &end, 10);
+    if (!end || *end || size > VB_RUNTIME_INSTALL_BLOB_MAX_BYTES) return -RT_EINVAL;
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+
+    rt_snprintf(file_path, sizeof(file_path), "%s/%s%s/%s", VIBEBOARD_APP_ROOT,
+                VIBEBOARD_STAGING_PREFIX, app_id, path);
+    file_path[sizeof(file_path) - 1] = '\0';
+    vb_safe_copy(dir_path, sizeof(dir_path), file_path);
+    slash = strrchr(dir_path, '/');
+    if (slash)
+    {
+        *slash = '\0';
+        if (vb_mkdir_recursive(dir_path) != RT_EOK) return -RT_ERROR;
+    }
+    vb_runtime_install_close_file();
+    fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    if (fd < 0) return -RT_ERROR;
+    console = rt_console_get_device();
+    if (!console)
+    {
+        close(fd);
+        return -RT_ERROR;
+    }
+
+    rt_kprintf("ready install_blob app=%s path=%s bytes=%lu encoding=base64 rawChunk=%u\n",
+               app_id, path, size, (unsigned int)VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES);
+    while (offset < size)
+    {
+        rt_size_t raw_chunk = (rt_size_t)(size - offset);
+        rt_size_t encoded_chunk;
+        if (raw_chunk > VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES)
+            raw_chunk = VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES;
+        encoded_chunk = ((raw_chunk + 2u) / 3u) * 4u;
+        result = vb_runtime_install_blob_read(console, g_vb_install_blob_buffer, encoded_chunk);
+        if (result == RT_EOK)
+            result = vb_runtime_base64_decode_in_place(g_vb_install_blob_buffer,
+                                                       encoded_chunk, raw_chunk);
+        if (result != RT_EOK || write(fd, g_vb_install_blob_buffer, raw_chunk) != (int)raw_chunk)
+        {
+            if (result == RT_EOK) result = -RT_ERROR;
+            break;
+        }
+        offset += raw_chunk;
+        rt_kprintf("ok install_blob_chunk app=%s path=%s offset=%lu\n", app_id, path, offset);
+    }
+    close(fd);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("err install_blob app=%s path=%s offset=%lu rc=%d\n",
+                   app_id, path, offset, result);
+        return result;
+    }
+    rt_kprintf("ok install_blob app=%s path=%s bytes=%lu rc=0\n", app_id, path, size);
     return RT_EOK;
 }
 
@@ -12569,6 +12735,13 @@ static int vb_runtime_pan_status_command(void)
 static int vb_runtime_rgb_status_command(void)
 {
     int result = vb_runtime_rgb_read_json(g_vb_msh_text, VB_RGB_JSON_MAX);
+    vb_runtime_print_json_line(g_vb_msh_text);
+    return result;
+}
+
+static int vb_runtime_codex_pet_status_command(void)
+{
+    int result = vb_codex_pet_status_json(g_vb_msh_text, VB_CODEX_PET_JSON_MAX);
     vb_runtime_print_json_line(g_vb_msh_text);
     return result;
 }
@@ -13291,6 +13464,15 @@ static int vb_runtime_rgb(int argc, char **argv)
     return vb_runtime_rgb_status_command();
 }
 MSH_CMD_EXPORT(vb_runtime_rgb, read or set VibeBoard RGB LED color);
+
+static int vb_runtime_codex_pet_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return vb_runtime_codex_pet_status_command();
+}
+MSH_CMD_EXPORT(vb_runtime_codex_pet_status, read Codex Pet display state as JSON);
+
 static int vb_runtime_json_read_msh(int argc, char **argv)
 {
     uint32_t offset;
@@ -13568,6 +13750,21 @@ static int vb_runtime_install_file(int argc, char **argv)
     return result;
 }
 MSH_CMD_EXPORT(vb_runtime_install_file, write hex chunk to VibeBoard runtime app file);
+
+static int vb_runtime_install_blob(int argc, char **argv)
+{
+    int result;
+    if (argc < 4)
+    {
+        rt_kprintf("usage: vb_runtime_install_blob <app_id> <path> <size>\n");
+        return -RT_EINVAL;
+    }
+    result = vb_runtime_install_blob_file(argv[1], argv[2], argv[3]);
+    if (result != RT_EOK)
+        rt_kprintf("err install_blob app=%s path=%s rc=%d\n", argv[1], argv[2], result);
+    return result;
+}
+MSH_CMD_EXPORT(vb_runtime_install_blob, receive binary Runtime app file with chunk acknowledgements);
 
 static int vb_runtime_install_abort(int argc, char **argv)
 {

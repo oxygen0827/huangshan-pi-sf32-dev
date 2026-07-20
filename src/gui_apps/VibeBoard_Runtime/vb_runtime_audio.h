@@ -9,6 +9,8 @@ int vb_runtime_audio_available(void);
 int vb_runtime_audio_is_playing(void);
 int vb_runtime_audio_prepare_capture(void);
 void vb_runtime_audio_finish_capture(void);
+int vb_runtime_audio_preload_codex_cues(void);
+void vb_runtime_audio_release_codex_cues(void);
 int vb_runtime_audio_play_wav(const char *path);
 int vb_runtime_audio_play_tone(int continuous);
 int vb_runtime_audio_stop(void);

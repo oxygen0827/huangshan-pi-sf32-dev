@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import sys
 import tempfile
@@ -34,18 +35,27 @@ from voice_bridge_common import truncate_utf8
 
 DEFAULT_SOCKET = Path(tempfile.gettempdir()) / f"huangshan-codex-pet-{os.getuid()}.sock"
 DEFAULT_JOURNAL = Path.home() / ".vibeboard" / "codex_pet_tasks.json"
+DEFAULT_DESKTOP_STATE = Path.home() / ".vibeboard" / "codex_pet_desktop_state.json"
 DEFAULT_HARDWARE_AUDIT = Path.home() / ".vibeboard" / "codex_pet_hardware_audit.jsonl"
 STATE_CHANNEL = "pet.state"
 HEARTBEAT_CHANNEL = "pet.heartbeat"
 APPROVAL_CHANNEL = "pet.approval"
 TASKS_CHANNEL = "pet.tasks"
+PET_SELECTION_CHANNEL = "pet.select"
 MCP_MESSAGE_CHANNEL = "codex.mcp"
 HEARTBEAT_INTERVAL_SECONDS = 10.0
+PET_READY_TIMEOUT_SECONDS = 30.0
+TRANSPORT_COMMAND_TIMEOUT_SECONDS = 15.0
+TRANSPORT_CONNECT_TIMEOUT_SECONDS = 40.0
+TRANSPORT_CLOSE_TIMEOUT_SECONDS = 8.0
 MAX_PROMPT_CHARS = 8_000
 MAX_IPC_LINE_BYTES = 16_384
 MAX_HARDWARE_RESULT_BYTES = 12_000
 _SAFE_APP_ID = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
-_DEVICE_ACTION = re.compile(r"^pet_action action=(approve|deny|prev|next) request=([A-Za-z0-9_.:-]{1,24})$")
+_SAFE_PET_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
+_DEVICE_ACTION = re.compile(
+    r"^pet_action action=(approve|deny|prev|next|pet_select) request=([A-Za-z0-9_.:-]{1,24})$"
+)
 
 
 class BridgeError(RuntimeError):
@@ -54,6 +64,24 @@ class BridgeError(RuntimeError):
 
 class BridgeAlreadyRunning(BridgeError):
     pass
+
+
+async def wait_for_shutdown_signal() -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stop.set)
+        except (NotImplementedError, RuntimeError):
+            continue
+        installed.append(signum)
+    try:
+        await stop.wait()
+    finally:
+        for signum in installed:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(signum)
 
 
 class DeviceTransport(Protocol):
@@ -102,29 +130,61 @@ class _TransportCommand:
 class TransportCommandQueue:
     """The only object allowed to invoke the process-owned Runtime transport."""
 
-    def __init__(self, transport: DeviceTransport) -> None:
+    def __init__(
+        self,
+        transport: DeviceTransport,
+        *,
+        command_timeout: float = TRANSPORT_COMMAND_TIMEOUT_SECONDS,
+    ) -> None:
+        if command_timeout <= 0:
+            raise ValueError("Runtime command timeout must be positive")
         self.transport = transport
+        self.command_timeout = command_timeout
         self._commands: asyncio.Queue[_TransportCommand | None] = asyncio.Queue()
         self._worker: asyncio.Task[None] | None = None
+        self._transport_failed = False
+        self._closing = False
 
     async def start(self) -> None:
         if self._worker is None:
             self._worker = asyncio.create_task(self._run(), name="codex-pet-runtime-owner")
 
     async def call(self, method: str, *args: object, **kwargs: object) -> object:
+        if self._closing:
+            raise BridgeError("Runtime command queue is closing")
         if self._worker is None or self._worker.done():
             raise BridgeError("Runtime command queue is not running")
+        if self._transport_failed and method not in {"close", "connect"}:
+            raise RuntimeTransportError("Runtime transport requires close/connect recovery")
         future: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         await self._commands.put(_TransportCommand(method, args, dict(kwargs), future))
         return await future
+
+    async def next_status_notification(self, *, timeout: float) -> str:
+        """Poll the callback-fed action queue without occupying the GATT command worker."""
+        method = getattr(self.transport, "next_status_notification", None)
+        if method is None or not callable(method):
+            raise BridgeError("Runtime transport has no status notification source")
+        value = await method(timeout=timeout)
+        if not isinstance(value, str):
+            raise BridgeError("Runtime transport returned an invalid status notification")
+        return value
 
     async def close(self) -> None:
         worker = self._worker
         if worker is None:
             return
+        self._closing = True
+        self._fail_pending("Runtime command queue is closing")
         await self._commands.put(None)
-        await worker
-        self._worker = None
+        try:
+            await asyncio.wait_for(worker, timeout=max(1.0, self.command_timeout + 1.0))
+        except asyncio.TimeoutError:
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
+        finally:
+            self._worker = None
 
     async def _run(self) -> None:
         while True:
@@ -135,13 +195,57 @@ class TransportCommandQueue:
                 method = getattr(self.transport, command.method, None)
                 if method is None or not callable(method):
                     raise BridgeError(f"Runtime transport has no method {command.method!r}")
-                result = await method(*command.args, **command.kwargs)
+                result = await asyncio.wait_for(
+                    method(*command.args, **command.kwargs),
+                    timeout=self._timeout_for(command.method),
+                )
+            except asyncio.CancelledError:
+                if not command.future.done():
+                    command.future.cancel()
+                raise
+            except asyncio.TimeoutError:
+                exc = RuntimeTransportError(
+                    f"Runtime transport method {command.method!r} exceeded its deadline"
+                )
+                self._transport_failed = True
+                self._fail_pending(str(exc))
+                if not command.future.done():
+                    command.future.set_exception(exc)
+            except RuntimeTransportError as exc:
+                self._transport_failed = True
+                self._fail_pending(str(exc))
+                if not command.future.done():
+                    command.future.set_exception(exc)
             except BaseException as exc:
                 if not command.future.done():
                     command.future.set_exception(exc)
             else:
+                if command.method == "connect":
+                    self._transport_failed = False
                 if not command.future.done():
                     command.future.set_result(result)
+
+    def _timeout_for(self, method: str) -> float:
+        if method in {"connect", "verify_connection"}:
+            return max(self.command_timeout, TRANSPORT_CONNECT_TIMEOUT_SECONDS)
+        if method == "close":
+            return min(self.command_timeout, TRANSPORT_CLOSE_TIMEOUT_SECONDS)
+        return self.command_timeout
+
+    def _fail_pending(self, message: str) -> None:
+        sentinel = False
+        while True:
+            try:
+                pending = self._commands.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if pending is None:
+                sentinel = True
+                continue
+            if not pending.future.done():
+                pending.future.set_exception(RuntimeTransportError(message))
+        if sentinel:
+            self._commands.put_nowait(None)
 
 
 class PetSequencer:
@@ -186,7 +290,10 @@ class TaskJournal:
     def is_managed_thread(self, thread_id: str | None) -> bool:
         if not thread_id:
             return False
-        return any(record.get("threadId") == thread_id for record in self._records.values())
+        return any(
+            record.get("status") == "submitted" and record.get("threadId") == thread_id
+            for record in self._records.values()
+        )
 
     def reserve(self, action_id: str, prompt: str) -> tuple[dict[str, object], bool]:
         existing = self.get(action_id)
@@ -292,12 +399,22 @@ class DeviceSession:
         self._transport_open = False
         self.project_name: str | None = None
         self.resume_available = False
+        self._state_snapshot: tuple[str, str | None, str | None, str | None, int] | None = None
+        self._tasks_snapshot: tuple[str, int] | None = None
+        self._approval_snapshot: tuple[str, int] | None = None
+        self._pet_selection: str | None = None
+        self._replay_pending = False
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._closed = False
 
     async def start(self, *, run_heartbeat: bool = True) -> None:
         await self.commands.start()
-        await self._connect()
+        try:
+            await self._connect()
+        except Exception:
+            if not run_heartbeat:
+                raise
+            self.connected = False
         if run_heartbeat:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="codex-pet-heartbeat")
 
@@ -315,6 +432,14 @@ class DeviceSession:
             self._transport_open = False
         self.connected = False
         await self.commands.close()
+
+    async def mark_transport_failure(self) -> None:
+        """Force the heartbeat loop to rebuild a half-open BLE session."""
+        self.connected = False
+        if self._transport_open:
+            with contextlib.suppress(Exception):
+                await self.commands.call("close")
+            self._transport_open = False
 
     async def publish_state(
         self,
@@ -340,41 +465,69 @@ class DeviceSession:
             ttl_ms=ttl_ms,
             payload=payload,
         )
-        await self._send(STATE_CHANNEL, envelope)
+        self._state_snapshot = (
+            status,
+            task_id,
+            subtype,
+            detail,
+            envelope.expires_at_ms,
+        )
+        if self.connected:
+            await self._send(STATE_CHANNEL, envelope)
         return envelope
 
     async def publish_project(self, project: str) -> None:
         self.project_name = truncate_utf8(project, 96) or "workspace"
+        if not self.connected:
+            return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", "pet.project", sequence, self.project_name)
 
     async def publish_resume_available(self) -> None:
         self.resume_available = True
+        if not self.connected:
+            return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", "pet.resume", sequence, "ready")
 
     async def publish_quota(self, payload: str) -> None:
+        if not self.connected:
+            return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", QUOTA_CHANNEL, sequence, payload)
 
     async def publish_approval(self, payload: str) -> None:
+        self._approval_snapshot = (payload, self.clock_ms())
+        if not self.connected:
+            return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", APPROVAL_CHANNEL, sequence, payload)
 
     async def publish_tasks(self, payload: str) -> None:
         if len(payload.encode("utf-8")) > 184:
             raise BridgeError("desktop task snapshot exceeds board transport limit")
+        self._tasks_snapshot = (payload, self.clock_ms())
+        if not self.connected:
+            return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", TASKS_CHANNEL, sequence, payload)
+
+    async def publish_pet_selection(self, slug: str) -> str:
+        if _SAFE_PET_SLUG.fullmatch(slug) is None:
+            raise BridgeError("invalid pet slug")
+        self._pet_selection = slug
+        if not self.connected:
+            return json.dumps({"pet": slug}, separators=(",", ":"))
+        sequence = self.sequencer.next()
+        await self.commands.call("flow_send", PET_SELECTION_CHANNEL, sequence, slug)
+        return json.dumps({"pet": slug}, separators=(",", ":"))
 
     async def publish_message(self, text: str) -> str:
         sequence = self.sequencer.next()
         return str(await self.commands.call("flow_send", MCP_MESSAGE_CHANNEL, sequence, text))
 
     async def next_device_action(self, *, timeout: float = 0.5) -> tuple[str, str] | None:
-        value = await self.commands.call("next_status_notification", timeout=timeout)
-        if not isinstance(value, str):
-            return None
+        value = await self.commands.next_status_notification(timeout=timeout)
         match = _DEVICE_ACTION.fullmatch(value.strip())
         if match is None:
             return None
@@ -384,7 +537,6 @@ class DeviceSession:
         return await self.commands.call(method, *args, **kwargs)
 
     async def heartbeat_once(self) -> PetEnvelope:
-        await self.commands.call("verify_connection", timeout=min(5.0, self.heartbeat_interval))
         sequence = self.sequencer.next()
         envelope = PetEnvelope(
             kind="heartbeat",
@@ -399,13 +551,99 @@ class DeviceSession:
             await self.publish_project(self.project_name)
         if self.resume_available:
             await self.publish_resume_available()
+        if self._replay_pending:
+            await self._replay_snapshot()
+            self._replay_pending = False
         return envelope
 
     async def _connect(self) -> None:
-        await self.commands.call("connect")
-        self._transport_open = True
-        await self.commands.call("verify_connection", timeout=6.0)
+        started = time.monotonic()
+        print("[codex_pet][ble] connect attempt", flush=True)
+        try:
+            await self.commands.call("connect")
+            self._transport_open = True
+            await self.commands.call("verify_connection", timeout=12.0)
+            await self._wait_until_pet_ready()
+        except BaseException as exc:
+            self.connected = False
+            with contextlib.suppress(Exception):
+                await self.commands.call("close")
+            self._transport_open = False
+            print(
+                f"[codex_pet][ble] connect failed after {int((time.monotonic() - started) * 1000)}ms: "
+                f"{type(exc).__name__}",
+                flush=True,
+            )
+            raise
         self.connected = True
+        self._replay_pending = True
+        print(
+            f"[codex_pet][ble] connected and ready after {int((time.monotonic() - started) * 1000)}ms",
+            flush=True,
+        )
+
+    async def _wait_until_pet_ready(self) -> None:
+        deadline = time.monotonic() + PET_READY_TIMEOUT_SECONDS
+        last_ui_ticks: int | None = None
+        while time.monotonic() < deadline:
+            try:
+                status = json.loads(str(await self.commands.call("codex_pet")))
+                ui_ticks = status.get("uiTicks")
+                if (
+                    status.get("active") == 1
+                    and isinstance(status.get("pets"), int)
+                    and status.get("pets", 0) > 0
+                    and isinstance(status.get("frames"), int)
+                    and status.get("frames", 0) > 0
+                    and isinstance(ui_ticks, int)
+                    and not isinstance(ui_ticks, bool)
+                    and status.get("queuedFlows") == 0
+                ):
+                    if last_ui_ticks is not None:
+                        delta = (ui_ticks - last_ui_ticks) & 0xFFFFFFFF
+                        if 0 < delta < 0x80000000:
+                            return
+                    last_ui_ticks = ui_ticks
+                else:
+                    last_ui_ticks = None
+            except (BridgeError, RuntimeError, ValueError, json.JSONDecodeError):
+                last_ui_ticks = None
+            await asyncio.sleep(0.5)
+        raise BridgeError("Codex Pet board UI did not advance before snapshot replay")
+
+    async def _replay_snapshot(self) -> None:
+        current = self.clock_ms()
+        if self._state_snapshot is not None:
+            status, task_id, subtype, detail, expires_at = self._state_snapshot
+            if expires_at > current:
+                payload: dict[str, object] = {"status": status}
+                if subtype:
+                    payload["subtype"] = subtype[:24]
+                if detail:
+                    payload["detail"] = detail[:24]
+                sequence = self.sequencer.next()
+                envelope = PetEnvelope(
+                    kind="state",
+                    sequence=sequence,
+                    message_id=f"s:{sequence}",
+                    task_id=task_id,
+                    timestamp_ms=current,
+                    ttl_ms=min(DEFAULT_TTL_MS, expires_at - current),
+                    payload=payload,
+                )
+                await self._send(STATE_CHANNEL, envelope)
+        if self._tasks_snapshot is not None:
+            payload, cached_at = self._tasks_snapshot
+            if current - cached_at < DEFAULT_TTL_MS:
+                await self.commands.call("flow_send", TASKS_CHANNEL, self.sequencer.next(), payload)
+        if self._approval_snapshot is not None:
+            payload, cached_at = self._approval_snapshot
+            if current - cached_at < DEFAULT_TTL_MS:
+                await self.commands.call("flow_send", APPROVAL_CHANNEL, self.sequencer.next(), payload)
+        if self._pet_selection is not None:
+            await self.commands.call(
+                "flow_send", PET_SELECTION_CHANNEL, self.sequencer.next(), self._pet_selection
+            )
 
     async def _send(self, channel: str, envelope: PetEnvelope) -> None:
         if not self.connected:
@@ -413,9 +651,12 @@ class DeviceSession:
         await self.commands.call("flow_send", channel, envelope.sequence, envelope.encode())
 
     async def _heartbeat_loop(self) -> None:
-        delay = self.heartbeat_interval
+        # The first heartbeat also replays durable snapshots. Send it immediately
+        # after startup/reconnect instead of adding one full heartbeat interval.
+        delay = 0.0
         while not self._closed:
-            await asyncio.sleep(delay)
+            if delay > 0:
+                await asyncio.sleep(delay)
             try:
                 if not self.connected:
                     await self._connect()
@@ -428,7 +669,10 @@ class DeviceSession:
                 with contextlib.suppress(Exception):
                     await self.commands.call("close")
                 self._transport_open = False
-                delay = min(max(self.heartbeat_interval, delay * 2), DEFAULT_TTL_MS / 1000)
+                if self.heartbeat_interval < 1.0:
+                    delay = self.heartbeat_interval
+                else:
+                    delay = min(5.0, max(1.0, delay * 2 if delay >= 1.0 else 1.0))
 
 
 class CodexPetBridge:
@@ -468,7 +712,8 @@ class CodexPetBridge:
         action = payload.get("action")
         if source == "ipc" and action in {"hook_event", "hardware_command"}:
             source = "hook" if action == "hook_event" else "mcp"
-        decision = self.inbound.setdefault(source, SequenceWindow()).accept(request)
+        window = self.inbound.setdefault(source, SequenceWindow())
+        decision = window.accept_unordered(request) if source in {"hook", "mcp"} else window.accept(request)
         if decision.status == "duplicate":
             record = self.journal.get(request.message_id)
             return make_ack(
@@ -541,7 +786,8 @@ class CodexPetBridge:
                 error="invalid_hardware_request",
             )
         mutating = operation in {
-            "set_rgb", "set_brightness", "show_message", "launch_app", "play_cue", "stop_audio"
+            "set_rgb", "set_brightness", "show_message", "launch_app", "play_cue", "stop_audio",
+            "select_pet",
         }
         if self.hardware_audit is not None:
             try:
@@ -561,7 +807,15 @@ class CodexPetBridge:
             )
             if len(encoded.encode("utf-8")) > MAX_HARDWARE_RESULT_BYTES:
                 raise BridgeError("hardware result exceeds IPC response limit")
-        except Exception:
+        except Exception as exc:
+            print(
+                f"Codex Pet hardware {operation} failed: "
+                f"{type(exc).__name__}: {_public_bridge_error(exc)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if isinstance(exc, (RuntimeTransportError, asyncio.TimeoutError)):
+                await self.device.mark_transport_failure()
             if self.hardware_audit is not None:
                 with contextlib.suppress(OSError):
                     self.hardware_audit.append(operation, arguments, mutating=mutating, outcome="failed")
@@ -590,6 +844,7 @@ class CodexPetBridge:
             "sensors": "sensors",
             "power": "power",
             "rgb_status": "rgb",
+            "pet_status": "codex_pet",
             "display_status": "display",
             "app_status": "app_status",
             "apps": "apps",
@@ -624,15 +879,54 @@ class CodexPetBridge:
             if not isinstance(app_id, str) or _SAFE_APP_ID.fullmatch(app_id) is None:
                 raise BridgeError("invalid app id")
             return await self.device.runtime_call("launch_app", app_id)
+        if operation == "select_pet":
+            _require_exact_arguments(arguments, {"slug"})
+            slug = arguments.get("slug")
+            if not isinstance(slug, str) or _SAFE_PET_SLUG.fullmatch(slug) is None:
+                raise BridgeError("invalid pet slug")
+            return await self.device.publish_pet_selection(slug)
         if operation == "play_cue":
             _require_exact_arguments(arguments, {"cue"})
             cue = arguments.get("cue")
             if cue not in {"listening", "submitted", "needs_input", "done", "error"}:
                 raise BridgeError("unsupported Codex Pet cue")
-            return await self.device.runtime_call("audio_play", "codex_pet", f"assets/{cue}.wav")
+            expected_path = f"/sdcard/apps/codex_pet/assets/{cue}.wav"
+            before = _runtime_json_object(
+                await self.device.runtime_call("audio"),
+                operation="audio status",
+            )
+            result = await self.device.runtime_call(
+                "audio_play", "codex_pet", f"assets/{cue}.wav"
+            )
+            after = _runtime_json_object(result, operation="audio playback")
+            before_sequence = _runtime_json_int(before, "seq")
+            after_sequence = _runtime_json_int(after, "seq")
+            if (
+                after_sequence == before_sequence
+                or after.get("path") != expected_path
+                or _runtime_json_int(after, "err") != 0
+                or not (
+                    _runtime_json_int(after, "playing") == 1
+                    or _runtime_json_int(after, "ready") == 1
+                )
+            ):
+                raise BridgeError("Codex Pet cue did not start")
+            return result
         if operation == "stop_audio":
             _require_exact_arguments(arguments, set())
-            return await self.device.runtime_call("audio_stop")
+            result = await self.device.runtime_call("audio_stop")
+            status = _runtime_json_object(result, operation="audio stop")
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while (
+                _runtime_json_int(status, "playing") != 0
+                and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.1)
+                result = await self.device.runtime_call("audio")
+                status = _runtime_json_object(result, operation="audio stop status")
+            if _runtime_json_int(status, "playing") != 0:
+                raise BridgeError("Codex Pet audio did not stop")
+            return result
         raise BridgeError("hardware operation is not allowed")
 
     async def submit_voice(self, action_id: str, transcript: str, thread_id: str | None) -> PetEnvelope:
@@ -730,6 +1024,25 @@ def _require_exact_arguments(arguments: Mapping[str, object], expected: set[str]
         )
 
 
+def _runtime_json_object(value: object, *, operation: str) -> dict[str, object]:
+    if not isinstance(value, str):
+        raise BridgeError(f"{operation} returned a non-text response")
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise BridgeError(f"{operation} returned malformed JSON") from exc
+    if not isinstance(decoded, dict):
+        raise BridgeError(f"{operation} returned a non-object response")
+    return decoded
+
+
+def _runtime_json_int(value: Mapping[str, object], key: str) -> int:
+    field = value.get(key)
+    if not isinstance(field, int) or isinstance(field, bool):
+        raise BridgeError(f"Runtime response omitted integer field {key!r}")
+    return field
+
+
 def safe_record_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -805,6 +1118,8 @@ class LocalIPCServer:
                     continue
                 writer.write(encoded.encode("utf-8") + b"\n")
                 await writer.drain()
+        except ConnectionError:
+            pass
         finally:
             writer.close()
             with contextlib.suppress(ConnectionError):
@@ -838,11 +1153,13 @@ class CodexPetService:
         self._device_action_task: asyncio.Task[None] | None = None
 
     async def start(self, *, run_heartbeat: bool = True) -> None:
-        await self.ipc.start()
         try:
             await self.codex.start()
             await self.device.start(run_heartbeat=run_heartbeat)
-            await self.device.publish_project(self.bridge.workspace.name)
+            # Monitor mode only mirrors Desktop state; it does not need a project
+            # frame during startup, and a transient BLE write must not kill the daemon.
+            if not isinstance(self.codex, MonitorOnlyCodexAdapter):
+                await self.device.publish_project(self.bridge.workspace.name)
             if self.status is not None:
                 await self.status.start()
                 self._device_action_task = asyncio.create_task(
@@ -852,6 +1169,10 @@ class CodexPetService:
                 if self.voice.current_thread_id:
                     await self.device.publish_resume_available()
                 await self.voice.start()
+            # Publish the local IPC endpoint only after the device/session ready
+            # path has completed. Callers must never observe a socket that can
+            # only return hardware_failed while BLE is still starting.
+            await self.ipc.start()
         except BaseException:
             await self._stop_device_actions()
             if self.status is not None:
@@ -916,6 +1237,8 @@ class CodexPetService:
                     await self.status.select(-1 if decision == "prev" else 1)
                 elif decision in {"approve", "deny"}:
                     await self.status.resolve_approval(request_id, decision == "approve")
+                elif decision == "pet_select":
+                    print(f"Codex Pet selected on board: {request_id}")
 
 
 class FakeDeviceTransport:
@@ -927,6 +1250,13 @@ class FakeDeviceTransport:
         self.max_active_calls = 0
         self.status_notifications: asyncio.Queue[str] = asyncio.Queue()
         self.hardware_calls: list[tuple[str, object]] = []
+        self.audio_sequence = 0
+        self.audio_playing = False
+        self.audio_ready = False
+        self.audio_path = ""
+        self.audio_stop_delay_reads = 0
+        self.audio_stop_pending_reads = 0
+        self.pet_ui_ticks = 0
 
     async def _enter(self) -> None:
         self.active_calls += 1
@@ -977,11 +1307,7 @@ class FakeDeviceTransport:
             self._exit()
 
     async def next_status_notification(self, *, timeout: float = 0.5) -> str:
-        await self._enter()
-        try:
-            return await asyncio.wait_for(self.status_notifications.get(), timeout=timeout)
-        finally:
-            self._exit()
+        return await asyncio.wait_for(self.status_notifications.get(), timeout=timeout)
 
     async def _hardware(self, operation: str, value: object = None) -> str:
         await self._enter()
@@ -1012,6 +1338,25 @@ class FakeDeviceTransport:
     async def rgb(self, color: str | None = None) -> str:
         return await self._hardware("rgb", color)
 
+    async def codex_pet(self) -> str:
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            self.hardware_calls.append(("codex-pet", None))
+            self.pet_ui_ticks += 1
+            return json.dumps({
+                "api": "vibeboard-huangshan-codex-pet/v1",
+                "active": 1,
+                "pets": 2,
+                "frames": 4,
+                "uiTicks": self.pet_ui_ticks,
+                "queuedFlows": 0,
+                "ok": True,
+            }, sort_keys=True, separators=(",", ":"))
+        finally:
+            self._exit()
+
     async def display(self, brightness: int | None = None) -> str:
         return await self._hardware("display", brightness)
 
@@ -1025,13 +1370,63 @@ class FakeDeviceTransport:
         return await self._hardware("launch-app", app_id)
 
     async def audio(self) -> str:
-        return await self._hardware("audio-status")
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            self.hardware_calls.append(("audio-status", None))
+            if self.audio_stop_pending_reads > 0:
+                self.audio_stop_pending_reads -= 1
+                if self.audio_stop_pending_reads == 0:
+                    self.audio_playing = False
+                    self.audio_ready = True
+            return self._audio_json()
+        finally:
+            self._exit()
 
     async def audio_play(self, app_id: str, path: str) -> str:
-        return await self._hardware("audio-play", {"app": app_id, "path": path})
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            self.hardware_calls.append(("audio-play", {"app": app_id, "path": path}))
+            if not self.audio_playing:
+                self.audio_sequence = (self.audio_sequence + 1) & 0xFFFFFFFF
+                self.audio_playing = True
+                self.audio_ready = False
+                self.audio_path = f"/sdcard/apps/{app_id}/{path}"
+            return self._audio_json()
+        finally:
+            self._exit()
 
     async def audio_stop(self) -> str:
-        return await self._hardware("audio-stop")
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            self.hardware_calls.append(("audio-stop", None))
+            self.audio_stop_pending_reads = self.audio_stop_delay_reads
+            self.audio_stop_delay_reads = 0
+            if self.audio_stop_pending_reads == 0:
+                self.audio_playing = False
+                self.audio_ready = True
+            return self._audio_json()
+        finally:
+            self._exit()
+
+    def _audio_json(self) -> str:
+        return json.dumps(
+            {
+                "api": "vibeboard-huangshan-audio-playback/v1",
+                "playing": int(self.audio_playing),
+                "ready": int(self.audio_ready),
+                "seq": self.audio_sequence,
+                "err": 0,
+                "path": self.audio_path,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
 
 class FakeCodexAdapter:
@@ -1113,6 +1508,34 @@ def _action(sequence: int, message_id: str, timestamp_ms: int, text: str = "æ£€æ
 async def self_test_async() -> None:
     clock = 1_900_000_000_000
     assert PetSequencer(0xFFFFFFFF).next() == 1
+
+    class HangingOnceTransport(FakeDeviceTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hang_once = True
+
+        async def codex_pet(self) -> str:
+            if self.hang_once:
+                self.hang_once = False
+                await asyncio.Event().wait()
+            return await super().codex_pet()
+
+    hanging_transport = HangingOnceTransport()
+    hanging_queue = TransportCommandQueue(hanging_transport, command_timeout=0.02)
+    await hanging_queue.start()
+    try:
+        hung = asyncio.create_task(hanging_queue.call("codex_pet"))
+        await asyncio.sleep(0)
+        queued = asyncio.create_task(hanging_queue.call("codex_pet"))
+        failures = await asyncio.gather(hung, queued, return_exceptions=True)
+        assert all(isinstance(value, RuntimeTransportError) for value in failures)
+        await hanging_queue.call("close")
+        await hanging_queue.call("connect")
+        recovered = json.loads(str(await hanging_queue.call("codex_pet")))
+        assert recovered["active"] == 1
+    finally:
+        await hanging_queue.close()
+
     with tempfile.TemporaryDirectory(prefix="codex-pet-bridge-") as temporary:
         root = Path(temporary)
         socket_path = root / "bridge.sock"
@@ -1141,6 +1564,28 @@ async def self_test_async() -> None:
             status=approval_status,  # type: ignore[arg-type]
         )
         await service.start(run_heartbeat=False)
+
+        disconnect_errors: list[dict[str, object]] = []
+        loop = asyncio.get_running_loop()
+        previous_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: disconnect_errors.append(dict(context)))
+        slow_path = root / "slow.sock"
+
+        async def slow_handler(request: PetEnvelope, **_: object) -> PetEnvelope:
+            await asyncio.sleep(0.05)
+            return make_ack(request, sequence=1, status="accepted", current_ms=clock)
+
+        slow_ipc = LocalIPCServer(slow_path, slow_handler)
+        await slow_ipc.start()
+        reader, writer = await asyncio.open_unix_connection(str(slow_path))
+        writer.write(_action(1, "voice:disconnect", clock).encode().encode("utf-8") + b"\n")
+        await writer.drain()
+        writer.transport.abort()
+        del reader
+        await asyncio.sleep(0.1)
+        await slow_ipc.close()
+        loop.set_exception_handler(previous_exception_handler)
+        assert not disconnect_errors
 
         competing_ipc = LocalIPCServer(socket_path, bridge.handle)
         try:
@@ -1230,6 +1675,15 @@ async def self_test_async() -> None:
         })
         assert mcp_result and mcp_result["result"]["isError"] is False  # type: ignore[index]
         assert mcp_result["result"]["structuredContent"]["ok"] is True  # type: ignore[index]
+        mcp_pet_status = await mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {"name": "huangshan_pet_status", "arguments": {}},
+        })
+        assert mcp_pet_status and mcp_pet_status["result"]["isError"] is False  # type: ignore[index]
+        assert mcp_pet_status["result"]["structuredContent"]["ok"] is True  # type: ignore[index]
+        assert fake_device.hardware_calls[-1] == ("codex-pet", None)
         mcp_cue = await mcp.handle({
             "jsonrpc": "2.0",
             "id": 3,
@@ -1240,10 +1694,35 @@ async def self_test_async() -> None:
         assert fake_device.hardware_calls[-1] == (
             "audio-play", {"app": "codex_pet", "path": "assets/done.wav"}
         )
+        busy_cue = await mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {"name": "huangshan_play_cue", "arguments": {"cue": "error"}},
+        })
+        assert busy_cue and busy_cue["result"]["isError"] is True  # type: ignore[index]
+        fake_device.audio_stop_delay_reads = 2
+        stop_cue = await mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {"name": "huangshan_stop_audio", "arguments": {}},
+        })
+        assert stop_cue and stop_cue["result"]["isError"] is False  # type: ignore[index]
+        mcp_pet = await mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "huangshan_select_pet", "arguments": {"slug": "boxcat"}},
+        })
+        assert mcp_pet and mcp_pet["result"]["isError"] is False  # type: ignore[index]
+        assert mcp_pet["result"]["structuredContent"] == {"pet": "boxcat"}  # type: ignore[index]
+        assert fake_device.frames[-1][0] == PET_SELECTION_CHANNEL
+        assert fake_device.frames[-1][2] == "boxcat"
 
         await fake_device.status_notifications.put("unrelated status update")
         await fake_device.status_notifications.put("pet_action action=approve request=req.1")
-        deadline = asyncio.get_running_loop().time() + 0.5
+        deadline = asyncio.get_running_loop().time() + 10.0
         while not approval_status.resolutions and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.01)
         assert approval_status.resolutions == [("req.1", True)]
@@ -1318,6 +1797,17 @@ async def self_test_async() -> None:
         await pending_device.close()
         await pending_codex.close()
 
+        immediate_transport = FakeDeviceTransport()
+        immediate_device = DeviceSession(
+            TransportCommandQueue(immediate_transport),
+            heartbeat_interval=10.0,
+            clock_ms=lambda: clock,
+        )
+        await immediate_device.start(run_heartbeat=True)
+        await asyncio.sleep(0.05)
+        assert [frame[0] for frame in immediate_transport.frames] == [HEARTBEAT_CHANNEL]
+        await immediate_device.close()
+
         reconnect_transport = FakeDeviceTransport()
         reconnect_device = DeviceSession(
             TransportCommandQueue(reconnect_transport),
@@ -1325,20 +1815,78 @@ async def self_test_async() -> None:
             clock_ms=lambda: clock,
         )
         await reconnect_device.start(run_heartbeat=True)
+        await reconnect_device.publish_state("running", task_id="thr-reconnect", detail="Thinking")
+        await reconnect_device.publish_tasks(
+            '{"v":1,"p":"reconnect","st":"running","d":"Thinking","i":1,"n":1,"ac":1,"a":0}'
+        )
+        await reconnect_device.publish_approval('{"v":1,"a":1,"r":"a:0123456789abcdefabcd"}')
+        await reconnect_device.publish_pet_selection("boba")
+        reconnect_transport.frames.clear()
         reconnect_transport.connected = False
-        deadline = asyncio.get_running_loop().time() + 0.5
+        deadline = asyncio.get_running_loop().time() + 2.0
         while asyncio.get_running_loop().time() < deadline:
-            heartbeat_published = bool(
-                reconnect_transport.frames and
-                reconnect_transport.frames[-1][0] == HEARTBEAT_CHANNEL
+            replayed_channels = [frame[0] for frame in reconnect_transport.frames]
+            replayed = all(
+                channel in replayed_channels
+                for channel in (
+                    HEARTBEAT_CHANNEL,
+                    STATE_CHANNEL,
+                    TASKS_CHANNEL,
+                    APPROVAL_CHANNEL,
+                    PET_SELECTION_CHANNEL,
+                )
             )
-            if reconnect_transport.connect_count >= 2 and reconnect_device.connected and heartbeat_published:
+            if reconnect_transport.connect_count >= 2 and reconnect_device.connected and replayed:
                 break
             await asyncio.sleep(0.01)
         assert reconnect_transport.connect_count >= 2 and reconnect_device.connected
-        assert reconnect_transport.frames
-        assert reconnect_transport.frames[-1][0] == HEARTBEAT_CHANNEL
+        replayed_channels = [frame[0] for frame in reconnect_transport.frames]
+        assert replayed_channels[:5] == [
+            HEARTBEAT_CHANNEL,
+            STATE_CHANNEL,
+            TASKS_CHANNEL,
+            APPROVAL_CHANNEL,
+            PET_SELECTION_CHANNEL,
+        ]
         await reconnect_device.close()
+
+        class InitiallyOfflineTransport(FakeDeviceTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self.connect_attempts = 0
+
+            async def connect(self) -> None:
+                await self._enter()
+                try:
+                    self.connect_attempts += 1
+                    if self.connect_attempts <= 2:
+                        raise BridgeError("fake board is rebooting")
+                    self.connected = True
+                    self.connect_count += 1
+                finally:
+                    self._exit()
+
+        offline_transport = InitiallyOfflineTransport()
+        offline_device = DeviceSession(
+            TransportCommandQueue(offline_transport),
+            heartbeat_interval=0.01,
+            clock_ms=lambda: clock,
+        )
+        try:
+            await offline_device.start(run_heartbeat=True)
+            await offline_device.publish_tasks(
+                '{"v":1,"p":"offline","st":"running","d":"Thinking","i":1,"n":1,"ac":1,"a":0}'
+            )
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while asyncio.get_running_loop().time() < deadline:
+                channels = [frame[0] for frame in offline_transport.frames]
+                if offline_device.connected and TASKS_CHANNEL in channels:
+                    break
+                await asyncio.sleep(0.01)
+            assert offline_transport.connect_attempts >= 3 and offline_device.connected
+            assert TASKS_CHANNEL in [frame[0] for frame in offline_transport.frames]
+        finally:
+            await offline_device.close()
 
         # Failed turns stay failed and require a new id instead of an implicit retry.
         failed_device = DeviceSession(TransportCommandQueue(FakeDeviceTransport()), clock_ms=lambda: clock)
@@ -1354,6 +1902,7 @@ async def self_test_async() -> None:
         )
         failure = await failed_bridge.handle(_action(1, "voice:failure", clock), current_ms=clock)
         assert failure.payload["status"] == "rejected" and failure.payload["error"] == "submit_failed"
+        assert not failed_journal.is_managed_thread(failure.task_id)
         again = await failed_bridge.handle(_action(2, "voice:failure", clock), current_ms=clock)
         assert again.payload["status"] == "duplicate" and failed_codex.turn_calls == 1
         await failed_device.close()
@@ -1371,6 +1920,8 @@ async def self_test_async() -> None:
 
 
 async def run_service(args: argparse.Namespace) -> None:
+    if args.mode == "monitor" and not args.address:
+        raise BridgeError("monitor mode requires a pinned BLE peripheral address")
     options = BLETransportOptions(
         name=args.name,
         address=args.address,
@@ -1396,6 +1947,8 @@ async def run_service(args: argparse.Namespace) -> None:
         monitor = CodexDesktopMonitor(
             device=device,
             approval_executor=SubprocessApprovalExecutor(args.approval_helper),
+            state_path=args.desktop_state,
+            managed_task=journal.is_managed_thread,
         )
 
         async def monitor_handler(request: PetEnvelope, **kwargs: object) -> PetEnvelope:
@@ -1417,7 +1970,7 @@ async def run_service(args: argparse.Namespace) -> None:
         print(f"Codex Pet monitor ready: {args.socket}")
         print("Watching Codex Desktop tasks through global Hooks; voice submission is disabled.")
         try:
-            await asyncio.Event().wait()
+            await wait_for_shutdown_signal()
         finally:
             await service.close()
         return
@@ -1476,7 +2029,7 @@ async def run_service(args: argparse.Namespace) -> None:
     print(f"Codex Pet Bridge ready: {args.socket}")
     print("Codex Pet live console ready: replies and approval requests stay on this Bridge connection.")
     try:
-        await asyncio.Event().wait()
+        await wait_for_shutdown_signal()
     finally:
         await service.close()
 
@@ -1486,6 +2039,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("monitor", "voice"), default="monitor")
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET)
     parser.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
+    parser.add_argument("--desktop-state", type=Path, default=DEFAULT_DESKTOP_STATE)
     parser.add_argument("--hardware-audit", type=Path, default=DEFAULT_HARDWARE_AUDIT)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--codex-bin")

@@ -127,6 +127,7 @@ def python_compile_targets() -> list[str]:
         "scripts/codex_pet_status.py",
         "scripts/codex_pet_hook.py",
         "scripts/codex_pet_mcp.py",
+        "scripts/codex_pet_soak.py",
         "scripts/generate_codex_pet_cues.py",
         "scripts/pager_voice_bridge.py",
         "scripts/peer_protocol_test.py",
@@ -187,8 +188,10 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
         Check("pass1-architecture", "Codex pet status self-test", [PYTHON, "scripts/codex_pet_status.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet hook self-test", [PYTHON, "scripts/codex_pet_hook.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet MCP self-test", [PYTHON, "scripts/codex_pet_mcp.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet soak self-test", [PYTHON, "scripts/codex_pet_soak.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet audio policy self-test", [PYTHON, "scripts/codex_pet_audio.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet cue assets", [PYTHON, "scripts/generate_codex_pet_cues.py", "--check"]),
+        Check("pass1-architecture", "Codex Petdex import configuration", ["node", "scripts/import_petdex_pets.js", "--check-config"]),
         Check("pass1-architecture", "Codex Rocky pet assets", ["node", "scripts/extract_codex_rocky.js", "--check"]),
         Check("pass1-architecture", "Pager voice bridge self-test", [PYTHON, "scripts/pager_voice_bridge.py", "--self-test"]),
         Check("pass1-architecture", "Peer protocol offline tests", [PYTHON, "scripts/peer_protocol_test.py"]),
@@ -315,6 +318,7 @@ def run_self_test() -> None:
     assert any(check.label == "Codex pet live console launcher self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet voice self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex Rocky pet assets" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex Petdex import configuration" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet status self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet hook self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet MCP self-test" for check in build_checks(include_swift=False))

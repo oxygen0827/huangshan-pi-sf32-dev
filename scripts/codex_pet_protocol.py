@@ -235,8 +235,20 @@ class SequenceWindow:
         known = self._seen.get(envelope.message_id)
         if known is not None:
             return SequenceDecision("duplicate", previous)
-        if envelope.sequence <= previous:
-            return SequenceDecision("out_of_order", previous)
+        if previous:
+            delta = (envelope.sequence - previous) & 0xFFFFFFFF
+            if delta == 0 or delta >= 0x80000000:
+                return SequenceDecision("out_of_order", previous)
+        self.last_sequence = envelope.sequence
+        self._seen[envelope.message_id] = envelope.sequence
+        while len(self._seen) > self.retained:
+            self._seen.popitem(last=False)
+        return SequenceDecision("accepted", previous)
+
+    def accept_unordered(self, envelope: PetEnvelope) -> SequenceDecision:
+        previous = self.last_sequence
+        if envelope.message_id in self._seen:
+            return SequenceDecision("duplicate", previous)
         self.last_sequence = envelope.sequence
         self._seen[envelope.message_id] = envelope.sequence
         while len(self._seen) > self.retained:
@@ -360,6 +372,18 @@ def run_self_test() -> None:
     assert window.accept(envelope).status == "duplicate"
     older = PetEnvelope("action", 6, "voice:6", base, payload={"action": "noop"})
     assert window.accept(older).status == "out_of_order"
+    assert window.accept_unordered(older).status == "accepted"
+    assert window.accept_unordered(older).status == "duplicate"
+
+    wrap_window = SequenceWindow()
+    near_wrap = PetEnvelope("action", 0xFFFFFFFE, "wrap:before", base, payload={"action": "noop"})
+    at_wrap = PetEnvelope("action", 0xFFFFFFFF, "wrap:last", base, payload={"action": "noop"})
+    after_wrap = PetEnvelope("action", 1, "wrap:first", base, payload={"action": "noop"})
+    stale_wrap = PetEnvelope("action", 0xFFFFFFFD, "wrap:stale", base, payload={"action": "noop"})
+    assert wrap_window.accept(near_wrap).status == "accepted"
+    assert wrap_window.accept(at_wrap).status == "accepted"
+    assert wrap_window.accept(after_wrap).status == "accepted"
+    assert wrap_window.accept(stale_wrap).status == "out_of_order"
 
     reducer = EventReducer()
     heartbeat = PetEnvelope("heartbeat", 1, "hb:1", base, 30_000, payload={"status": "connected"})

@@ -14,3 +14,4 @@ compile_commands.json
 captures/
 assets/lvgl-official/upstream-master/
 scripts/runtime_apps/codex_pet/assets/rocky/
+scripts/runtime_apps/codex_pet/assets/pets/

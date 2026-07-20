@@ -137,22 +137,57 @@ Codex Desktop Hooks
   -> codex_pet_bridge.py (single BLE owner)
   -> pet/v1 Flow messages
   -> Huangshan Runtime / codex_pet
-  -> Rocky animation + task status + Allow/Deny
+  -> selected pet animation + task status + Allow/Deny
 ```
 
-### 准备 Rocky 宠物资源
+### 准备宠物资源
 
-仓库不提交从 Codex Desktop 提取的 Rocky 图片资源。`extract_codex_rocky.js` 会在本机读取
-已安装的 `/Applications/ChatGPT.app`，校验 ASAR 内资源完整性，并生成 10 帧 VRLE 文件：
+当前宠物来自 Petdex 的 `Boba`、`Boxcat` 和 `Shinchan`。Petdex 源代码是 MIT，但宠物素材
+版权归各提交者，因此仓库只提交来源清单和转换器，不提交原始 spritesheet 或转换后的衍生帧。
+在本机下载并生成板端资源：
+
+```bash
+node scripts/import_petdex_pets.js
+node scripts/import_petdex_pets.js --check
+```
+
+已有 VPST v2 原始帧时可只重建压缩预载包：
+
+```bash
+node scripts/import_petdex_pets.js --build-preload
+```
+
+转换器优先加载项目依赖中的 `sharp`，也可通过 `CODEX_PET_SHARP=/path/to/sharp` 指定；
+在安装了 ChatGPT.app 的 Mac 上会最后回退到其内置转换器。
+
+Petdex 的单帧是 `192x208`，spritesheet 为 8 列、9 或 11 行。转换器识别透明空帧，将
+`idle / ready / blocked / needs / running` 映射到对应状态行，并输出 `160x173` 的 VPST v2
+原始 RGB565 + alpha 帧包，并额外生成 Deflate 压缩的 `preload.bin`。TF 卡保存全部源帧；
+Companion 启动时只解压每只宠物的 `idle` 2 帧，实际读取约 `89 KB`、PSRAM 约 `498 KB`；
+压缩包也保留 running 帧，便于后续固件演进。任务执行时提高帧率并增加跳动/缩放，其他状态
+使用较慢的 idle 动画配合文字和 RGB。
+运行期间切换宠物和任务状态只切换内存图像，不再访问 SD；运行态每 600 ms、其他状态每
+1200 ms 切帧。
+5 个内置提示音也在 Companion 启动时预载到 PSRAM；运行期切宠物、状态变化和 cue 播放均
+不访问 SD。其他 Runtime App 的通用 WAV 播放仍保持 512 字节单扇区读取。
+
+点击板端宠物会切换下一只，并通过加密 BLE 把当前 slug 回报给 Monitor；选择只保存在运行时
+内存，不从 BLE/LVGL 路径写 SD。启用 Huangshan MCP 后也可在 Codex 中调用
+`huangshan_select_pet`，当前支持 `boba`、`boxcat` 和 `shinchan`。
+`huangshan_pet_status` 可从 Codex 只读查询板端正在显示的任务数、状态、指示灯和动画帧，
+便于确认新任务 Hook 是否已经通过 BLE 到达板子。
+
+Rocky 保留为兼容回退。仓库不提交从 Codex Desktop 提取的 Rocky 图片资源。
+`extract_codex_rocky.js` 会在本机读取已安装的 `/Applications/ChatGPT.app`，校验 ASAR 内
+资源完整性，并生成 10 帧 VRLE 文件：
 
 ```bash
 node scripts/extract_codex_rocky.js
 node scripts/extract_codex_rocky.js --check
 ```
 
-VRLE 文件保存在 `scripts/runtime_apps/codex_pet/assets/rocky/`，安装 App 时写入 SD 卡；
-运行时一次性解压到 PSRAM。SD 卡只提供资源存储，不会增加 LVGL 运行内存。若资源缺失或
-任意一帧校验失败，固件会释放全部动画帧并显示内置矢量宠物，不应出现空圆环。
+Rocky VRLE 文件保存在 `scripts/runtime_apps/codex_pet/assets/rocky/`。如果没有生成 Petdex
+资源，Runtime 会尝试 Rocky；两者都不可用时显示内置矢量宠物。
 
 ### 安装到黄山派
 
@@ -170,25 +205,34 @@ python3 -m venv .venv
 .venv/bin/python -m pip install bleak
 ```
 
-然后将 App 和 Rocky 资源安装到 SD 卡。黄山派 FinSH 命令行较短，Codex Pet 资源包应使用
-64 字节安装块和逐段 UART 节流：
+然后将 App 和宠物资源安装到 TF 卡。当前固件启用板载 SPI1 卡槽、exFAT 和 4 个挂载槽位，
+把 `sd0` 挂载到 `/sdcard`；实机在 12--25 MHz 边刷新屏幕边读取宠物帧仍可能卡住 SPI-MSD，
+因此运行频率固定为 6 MHz。健康启动日志应包含：
+
+```text
+[storage] TF SPI capped at 6000000 Hz
+[storage] TF card sd0 mounted on /sdcard
+```
+
+FinSH 实际单行输入边界为 256 字符。安装器会按路径和偏移动态缩小分块，保证命令不超过
+250 字符，并等待 ACK 和新的 `msh />` 提示符后再发送下一条：
 
 ```bash
 .venv/bin/python scripts/runtime_install_serial.py /dev/cu.usbserial-XXXX \
   --package-dir scripts/runtime_apps/codex_pet \
-  --chunk-bytes 64 \
+  --chunk-bytes 96 \
   --no-echo \
-  --command-wait 0.03 \
-  --write-chunk-pause 0.003 \
+  --command-wait 0.02 \
+  --write-chunk-pause 0 \
   --final-wait 3 \
   --ready-timeout 90
 ```
 
 安装过程使用 staging 目录；任一命令失败都会中止提交，不会用半包覆盖当前可运行版本。
-安装完成后重新启动板子，串口日志应包含：
+安装完成后重新启动板子，使用 Petdex 资源时串口日志应包含：
 
 ```text
-[vb_runtime][codex_pet] Rocky loaded: 10 RLE frames in PSRAM
+[vb_runtime][codex_pet] preloaded pets=3 states=3 frames=6 bytes=498240 compressed=88895
 [vb_runtime][lua] codex.pet rc=0
 ```
 
@@ -206,6 +250,19 @@ CODEX_PET_BOARD=<CoreBluetooth peripheral identifier> \
 `approve / deny`，不读取或转发命令参数、文件路径、密码与 API Key。Bridge 运行期间不要再
 启动 App Store、语音 Bridge 或其他会直接占用同一黄山派 BLE 连接的服务。
 
+任务状态由 Bridge 的 durable task journal 恢复，并由 Codex Hooks 持续更新；Bridge 不会扫描
+桌面之外的任务。启动后的新提交、工具调用、权限请求和完成事件会自动同步，已有任务快照
+会在 BLE ready gate 通过后回放到板子。首个 Hook 且没有恢复快照时显示 `Waiting for Codex events`，
+收到事件后没有活动任务时显示 `No active tasks`。任务栏区分正在处理和近期完成的任务，并显示当前项，例如
+`1 active | 2 recent | 1/3`。`recent` 仅保留真实 Codex 任务；稳定性压测创建的 `soak-*`
+任务会在 Stop 后立即清理，不再长期占用任务记录。右上角显示最近同步时间，超过 12 秒未收到
+更新时切换为 `Reconnecting`，30 秒后显示 `Bridge offline`。
+
+板端 Codex Pet 的任务快照、heartbeat 和 `pet.select` 都只保留在运行时内存；板端 BLE 事件线程
+不写 SD/FAT 文件，避免与 LCD/动画 SPI 争用导致卡死。任务跨重启由 Bridge 的
+`~/.vibeboard/codex_pet_tasks.json` 和重连回放负责；通用 Runtime App 的 `flow.*` 持久化仍
+使用 `/sdcard/apps/.flow`。
+
 协议、状态归并、安全边界和 MCP 硬件工具详见
 [`docs/codex-pet-bridge.md`](docs/codex-pet-bridge.md)。
 
@@ -217,14 +274,21 @@ CODEX_PET_BOARD=<CoreBluetooth peripheral identifier> \
 .venv/bin/python scripts/runtime_deep_check.py
 ```
 
-若屏幕只显示圆环，依次确认：
+若屏幕没有显示下载的宠物，依次确认：
 
-1. `node scripts/extract_codex_rocky.js --check` 能验证全部 10 帧。
-2. SD 卡中存在 `/sdcard/apps/codex_pet/assets/rocky/*.rle`。
-3. 冷启动日志出现 `Rocky loaded: 10 RLE frames in PSRAM`；若没有，读取此前的
-   `Rocky frame load failed path=...` 日志，不要把 SD 容量误判为运行内存。
+1. `node scripts/import_petdex_pets.js --check` 能验证 Boba、Boxcat 和 Shinchan。
+2. SD 卡中存在 `/sdcard/apps/codex_pet/assets/pets/catalog.txt` 和各状态 `.bin` 帧包。
+3. 冷启动日志出现 `preloaded pets=3 states=3 frames=6 bytes=498240`；若没有，检查
+   `preload.bin` 是否完整，以及 2.1 MB PSRAM 图像池是否成功分配，不要把 SD 容量误判为运行内存。
 4. `codex.pet rc=0` 表示 App 已成功启动；Bridge 连接问题只影响任务状态同步，不会让已经
    加载的宠物图像消失。
+
+真实板验证建议：启动唯一 `codex_pet_monitor.command` 后，运行
+`PYTHONPATH=scripts .venv/bin/python scripts/codex_pet_soak.py --duration-seconds 180
+--sample-seconds 20 --exercise --exercise-seconds 90`。通过标准是 `passed=true`、
+`exerciseFailures=0`、`animationErrors=0`、`openOutage=false`；串口日志不能出现
+`fatal error`、`assertion failed` 或 `spi sem timeout`。长期验证命令见
+`docs/codex-pet-bridge.md` 的 24 小时 soak 清单。
 
 
 

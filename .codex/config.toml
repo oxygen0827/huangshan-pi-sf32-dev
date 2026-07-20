@@ -1,5 +1,3 @@
-# Review and merge this table into ~/.codex/config.toml when the Bridge is running.
-# It is intentionally project-local and is not installed automatically.
 [mcp_servers.huangshan_pet]
 command = "/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/.venv/bin/python"
 args = ["/Users/hushaohong/vibe-coding/huangshan-pi-workspace/huangshan-pi-sf32-dev/scripts/codex_pet_mcp.py"]

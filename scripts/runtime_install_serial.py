@@ -104,6 +104,7 @@ def run_self_test() -> None:
         flow_roundtrip_text=None,
         raw_command=None,
         abort_only=False,
+        binary_install=False,
         app_id=None,
     )
     status_args = argparse.Namespace(**vars(base))
@@ -237,6 +238,8 @@ def main() -> int:
     parser.add_argument("--ready-timeout", type=float, default=24.0)
     parser.add_argument("--write-chunk-pause", type=float, default=0.012,
                         help="Pause between 24-byte UART writes; lower only with per-command ACK checks enabled")
+    parser.add_argument("--binary-install", action="store_true",
+                        help="Transfer package files as acknowledged 4 KiB binary blocks")
     parser.add_argument("--stop-before-end", action="store_true", help="Write package chunks but do not commit; used to verify staging safety")
     parser.add_argument("--no-echo", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="Run offline CLI routing checks and exit")
@@ -292,9 +295,18 @@ def main() -> int:
     elif args.stop_before_end:
         parser.error("--stop-before-end requires --package-dir or --package-json")
     if package_id and files:
-        commands = build_install_commands(package_id, files, chunk_bytes)
-        if args.stop_before_end:
-            commands = commands[:-1]
+        if args.binary_install:
+            commands = [f"vb_runtime_install_begin {package_id}"]
+            commands.extend(
+                f"vb_runtime_install_blob {package_id} {path} {len(data)}"
+                for path, data in sorted(files.items())
+            )
+            if not args.stop_before_end:
+                commands.append(f"vb_runtime_install_end {package_id}")
+        else:
+            commands = build_install_commands(package_id, files, chunk_bytes)
+            if args.stop_before_end:
+                commands = commands[:-1]
 
 
     if args.flow_persist_text is not None:
@@ -320,16 +332,26 @@ def main() -> int:
                 print("install_end", flush=True)
             elif command.startswith("vb_runtime_install_file ") and (index == 2 or index == total or (index % 25) == 0):
                 print(f"install_file {index}/{total}", flush=True)
+            elif command.startswith("vb_runtime_install_blob "):
+                print(f"install_blob {index}/{total}", flush=True)
 
         try:
             with SerialTransport(serial_transport_options(args)) as transport:
-                output = transport.install_package(
-                    package_id,
-                    files,
-                    chunk_bytes=chunk_bytes,
-                    progress=on_progress,
-                    commit=not args.stop_before_end,
-                )
+                if args.binary_install:
+                    output = transport.install_package_binary(
+                        package_id,
+                        files,
+                        progress=on_progress,
+                        commit=not args.stop_before_end,
+                    )
+                else:
+                    output = transport.install_package(
+                        package_id,
+                        files,
+                        chunk_bytes=chunk_bytes,
+                        progress=on_progress,
+                        commit=not args.stop_before_end,
+                    )
         except Exception as exc:
             fail(str(exc))
         elapsed = time.time() - started

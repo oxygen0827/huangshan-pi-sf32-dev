@@ -16,6 +16,12 @@ carrier-board schematic or a Wi-Fi module part number.
 For the current Huangshan board, treat App update transport as Bluetooth/BLE,
 not ESP32-style Wi-Fi.
 
+The board's Micro SD slot is SPI1, not SDIO: PA24/PA25 carry data, PA28 is clock,
+PA29 is chip select, and PA27 is card detect. The N16R8 module's SDIO/MPI2 pins
+are occupied by its NOR flash. Runtime therefore enables `RT_USING_SPI_MSD`,
+mounts `sd0` at `/sdcard`, supports exFAT, and caps the card at 6 MHz after
+initialization for reliable runtime reads while the display is refreshing.
+
 ## Current Runtime Direction
 
 The default Runtime transport is BLE GATT App install:
