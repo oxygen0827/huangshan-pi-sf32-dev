@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "states": [
+    {"id": "idle", "row": 0, "labelEn": "Idle", "labelZh": "待机"},
+    {"id": "runRight", "row": 1, "labelEn": "Run Right", "labelZh": "向右跑"},
+    {"id": "runLeft", "row": 2, "labelEn": "Run Left", "labelZh": "向左跑"},
+    {"id": "waving", "row": 3, "labelEn": "Waving", "labelZh": "挥手"},
+    {"id": "jumping", "row": 4, "labelEn": "Jumping", "labelZh": "跳跃"},
+    {"id": "failed", "row": 5, "labelEn": "Failed", "labelZh": "失败"},
+    {"id": "waiting", "row": 6, "labelEn": "Waiting", "labelZh": "等待"},
+    {"id": "running", "row": 7, "labelEn": "Running", "labelZh": "运行"},
+    {"id": "review", "row": 8, "labelEn": "Review", "labelZh": "审阅"}
+  ],
+  "taskStates": {
+    "idle": "idle",
+    "running": "running",
+    "ready": "waving",
+    "needs": "waiting",
+    "blocked": "failed"
+  }
+}

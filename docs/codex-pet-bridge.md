@@ -1,6 +1,6 @@
 # Codex Pet Bridge 与 pet/v1
 
-更新时间：2026-07-20
+更新时间：2026-07-24
 
 ## 进程边界
 
@@ -59,6 +59,35 @@ Bridge 到板端使用这些 Flow channel：
 `ac` 只统计 `running / needs_input / blocked`。
 完成任务可以继续显示为 Ready，但不会计入 active。首个 Hook 前的空状态为
 `Waiting for Codex events`，收到 Hook 后没有 active 任务时显示 `No active tasks`。
+
+## Companion Hook 信任健康状态
+
+Companion 的 `/v1/status` 必须区分“Hook 配置已经写入”和“Codex 允许运行 Hook”：
+
+- `codex.bound`：`hooks.json` 中六个 Companion Hook 都存在。这只表示配置完整。
+- `codex.trusted`：六个 Hook 都被当前 Codex 版本标记为 `trusted` 或 `managed`，并且处于
+  enabled 状态。只有 `bound=true && trusted=true` 才表示状态采集链路可用。
+- `codex.trustStatus`：`checking / trusted / modified / untrusted / disabled / incomplete /
+  unknown / not_bound`。
+- `codex.untrustedEvents`：需要处理的事件名，不包含 Hook 命令、prompt 或工具参数。
+- `codex.remediation`：未信任时固定返回 `action=review_hooks`、`command=/hooks` 和
+  `restartRequired=true`。
+
+信任状态来自当前 Codex App Server 的官方 `hooks/list` 接口，不能在 Companion 中复制
+Codex 的私有 Hook 哈希算法。结果会缓存 60 秒；`hooks.json`、同目录 `config.toml` 或 Codex
+可执行文件发生变化时立即失效并重新检查。App Server 暂时不可用时返回 `unknown`，页面不得
+把 unknown 当成健康，也不得允许依赖 Codex 状态的部署动作。
+
+Companion 页面遇到 `modified / untrusted / disabled / incomplete` 时显示项目级红色告警。
+恢复步骤固定为：
+
+1. 在 Codex CLI 输入 `/hooks`。
+2. 核对六条命令都指向当前仓库的 `scripts/codex_pet_hook.py --companion-managed`。
+3. 选择 `Trust all and continue`。
+4. 重启 Codex Desktop 或新建任务，让任务加载新的 Hook 信任状态。
+
+自动写入 `trusted_hash` 或使用 `--dangerously-bypass-hook-trust` 不是 Companion 的正常修复
+方案；信任属于用户安全决定，必须由 Codex 自己展示当前定义并由用户确认。
 
 ## 状态归并
 
@@ -190,7 +219,7 @@ Bridge 每 10 秒重发项目名和可继续任务能力。板端 30 秒没有�
 Bridge 启动时先加载 `~/.vibeboard/codex_pet_tasks.json` 和最近的状态/审批快照，连接通过
 Codex Pet ready gate（`active=1`、至少一个宠物、五个状态帧数大于 0、Flow 队列为空，并连续观察到
 `uiTicks` 前进）后，再按顺序回放任务和审批。冷启动 gate 最多等待 30 秒，覆盖
-Petdex 五状态压缩包的 PSRAM 预载。Monitor 启动时不做可选的项目广播，
+Petdex 九状态源图库中的五个任务语义状态压缩包的 PSRAM 预载。Monitor 启动时不做可选的项目广播，
 避免启动阶段的 BLE 队列竞争；任务 Hook 到达后才发送新的项目/任务快照。
 
 Monitor 使用固定 CoreBluetooth 外设标识做身份校验，但每次连接先扫描到同一标识的实时广告
@@ -318,14 +347,18 @@ python3 scripts/codex_pet_mcp.py --self-test
 ```
 
 板端使用单一 active 宠物槽。更换宠物时，在桌面端重新生成 `preload.bin` 和 `catalog.txt`
-后重新安装 App；安装器通过 `.runtimeignore` 排除桌面源帧和 Rocky 回退帧，运行期不通过
-BLE 或 LVGL 读取新的宠物帧，也不在板端轮换多个宠物。
+后重新安装 App；安装器通过 `.runtimeignore` 排除桌面源帧和 Rocky 回退帧。板端不通过 BLE
+临时取帧，也不轮换多个宠物；状态切换由后台线程从 active 包读取到非活动缓存，稳定动画播放
+期间 LVGL 不访问 SD。后台 loader 每次被唤醒后会先清空已经排队的重复 semaphore token，再读取
+最新目标状态；否则快速点击或连续状态切换可能让陈旧请求再次写入已经交给 LVGL 使用的缓存槽，
+表现为跳跃动画卡帧或撕裂。
 
 `huangshan_pet_status` 是只读诊断工具，直接返回板端实际显示状态。关键字段包括：
 `tasks`（保留的可见任务数）、`activeTasks`（正在执行、待人工输入或阻塞的任务数）、
 `recentTasks`（近期完成的真实任务数）、`syncAgeMs`（距最近一次 Bridge 同步的毫秒数）、
-`state`、`approval`、`indicator`、`pet`、`frames`、`frameMs` 和 `preloadedBytes`。后者必须
-大于 0，表示所有运行时宠物帧已在启动阶段进入 PSRAM。它不返回任务正文、命令、
+`state`、`approval`、`indicator`、`pet`、`assetState`、`requestedAssetState`、`assetStates`、
+`preloadVersion`、`frames`、`frameMs` 和 `preloadedBytes`。后者必须大于 0，表示双状态缓存已在
+PSRAM 分配成功。它不返回任务正文、命令、
 路径或审批内容。需要确认板子是否收到新任务时，优先查询这个工具，而不是根据桌面窗口推断。
 
 ## 验证清单
@@ -333,13 +366,14 @@ BLE 或 LVGL 读取新的宠物帧，也不在板端轮换多个宠物。
 1. 启动唯一 Monitor 终端，看到 `Codex Pet monitor ready`；不要同时启动 App Store、语音
    Bridge 或另一个 BLE 客户端。
 2. 运行 `huangshan_pet_status`，确认 `connected=1`、`active=1`、`tasks` 与
-   `activeTasks` 正确，且 `frames=2`、所有状态 `frameMs=180`、`preloadedBytes=830400`、
-   `loaderPhase=0`。Companion 启动后不再从 SD 读取宠物帧；源资源可以包含更多帧，
-   但运行态只使用 active 包中的五状态原生帧。
+   `activeTasks` 正确，且 `preloadVersion=2`、`assetStates=9`、`frames>=2`、所有状态
+   `frameMs=120`、`preloadedBytes>0`、`loaderPhase=0`。状态切换允许 loader 短暂进入 30/32，
+   但 `assetState` 最终必须追上 `requestedAssetState`，稳定播放时 loader 必须回到 0。
 3. 在 Codex 中开始一个任务，确认板端进入 `running`、RGB 变蓝、`activeTasks=1`；完成或
    等待输入时确认状态分别变为 `ready` 或 `needs_input`。
-4. 在一个任务从 idle 依次进入 running、needs_input、ready、blocked，确认每个状态的
-   宠物动作不同，画面位置和大小不变化，`uiTicks` 持续增长。
+4. 在一个任务从 idle 依次进入 running、needs_input、ready、blocked，确认语义动作不同；再用
+   左右滑、点击和真实审批覆盖 `runLeft/runRight/jumping/review`，画面位置和大小不变化，
+   `uiTicks` 持续增长。
 5. 运行 3 分钟 exercise soak，要求 `passed=true`、`exerciseFailures=0`、
    `animationErrors=0`、`openOutage=false`；串口同时检查 `fatal error`、`assertion failed`、
    `spi sem timeout` 均为 0。

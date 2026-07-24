@@ -22,8 +22,9 @@ import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
+from codex_pet_appserver import CodexAppServerClient, CodexAppServerError, public_error, resolve_codex_bin
 from hpet_package import (
     DEFAULT_CACHE_DIR,
     DEFAULT_KEY_DIR,
@@ -41,6 +42,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 WEB_PATH = ROOT_DIR / "scripts" / "codex_pet_web.html"
 PETDEX_MANIFEST_URL = "https://petdex.dev/api/manifest"
 PETDEX_CONFIG_PATH = ROOT_DIR / "scripts" / "petdex_pets.json"
+PETDEX_STATE_CONTRACT_PATH = ROOT_DIR / "scripts" / "petdex_state_contract.json"
 DEFAULT_STATE_DIR = Path.home() / ".vibeboard" / "companion"
 DEFAULT_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
 SESSION_TTL_SECONDS = 15 * 60
@@ -51,10 +53,59 @@ MAX_SPRITESHEET_BYTES = 16 * 1024 * 1024
 SAFE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 SAFE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 HOOK_EVENTS = ("SessionStart", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+_PETDEX_STATE_CONTRACT = json.loads(PETDEX_STATE_CONTRACT_PATH.read_text(encoding="utf-8"))
+PETDEX_STATE_ROWS = {
+    str(state["id"]): int(state["row"])
+    for state in _PETDEX_STATE_CONTRACT["states"]
+}
+if _PETDEX_STATE_CONTRACT.get("schemaVersion") != 1 or list(PETDEX_STATE_ROWS.values()) != list(range(9)):
+    raise RuntimeError("invalid Petdex state contract")
+HOOK_WIRE_EVENTS = {
+    "SessionStart": "sessionStart",
+    "PermissionRequest": "permissionRequest",
+    "UserPromptSubmit": "userPromptSubmit",
+    "PreToolUse": "preToolUse",
+    "PostToolUse": "postToolUse",
+    "Stop": "stop",
+}
+HOOK_TRUST_REFRESH_SECONDS = 60.0
 
 
 class CompanionError(RuntimeError):
     pass
+
+
+def _cached_v2_hpet_for_slug(
+    cache_dir: Path,
+    public_key: Path,
+    slug: str,
+    *,
+    reader: Callable[..., HpetPackage] = read_hpet,
+) -> tuple[Path, HpetPackage]:
+    try:
+        candidates = sorted(
+            cache_dir.glob("*.hpet"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        raise HpetError("could not inspect the local .hpet cache") from exc
+    for path in candidates:
+        try:
+            package = reader(path.read_bytes(), public_key=public_key)
+        except (HpetError, OSError):
+            continue
+        target = package.manifest.get("target")
+        if (
+            package.slug == slug
+            and package.manifest.get("schemaVersion") == 2
+            and isinstance(target, dict)
+            and target.get("preloadVersion") == 2
+            and target.get("stateCount") == 9
+            and target.get("frameMs") == 120
+        ):
+            return path, package
+    raise HpetError(f"no verified nine-state v2 package is cached for {slug}")
 
 
 class CompanionDevice(Protocol):
@@ -108,8 +159,12 @@ def _fetch_json(url: str, *, max_bytes: int, timeout: float = 20.0) -> object:
 
 
 def _fetch_bytes(url: str, *, max_bytes: int, timeout: float = 25.0) -> tuple[bytes, str]:
-    request = urllib.request.Request(url, headers={"User-Agent": "VibeBoard-Companion/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    request = urllib.request.Request(
+        _valid_petdex_asset_url(url),
+        headers={"User-Agent": "VibeBoard-Companion/1.0"},
+    )
+    opener = urllib.request.build_opener(_PetdexAssetRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
         declared = int(response.headers.get("content-length") or 0)
         if declared > max_bytes:
             raise CompanionError("Petdex spritesheet is too large")
@@ -125,9 +180,42 @@ def _fetch_bytes(url: str, *, max_bytes: int, timeout: float = 25.0) -> tuple[by
 def _valid_petdex_asset_url(value: object) -> str:
     text = str(value or "")
     parsed = urllib.parse.urlsplit(text)
-    if parsed.scheme != "https" or parsed.hostname != "assets.petdex.dev":
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise CompanionError("Petdex entry contains a non-allowlisted asset URL") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "assets.petdex.dev"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or bool(parsed.fragment)
+    ):
         raise CompanionError("Petdex entry contains a non-allowlisted asset URL")
     return text
+
+
+def _valid_petdex_redirect_url(current: str, location: str) -> str:
+    if not location:
+        raise CompanionError("Petdex asset redirect has no location")
+    return _valid_petdex_asset_url(urllib.parse.urljoin(current, location))
+
+
+class _PetdexAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        safe_url = _valid_petdex_redirect_url(request.full_url, new_url)
+        return super().redirect_request(
+            request, file_pointer, code, message, headers, safe_url
+        )
 
 
 def normalize_petdex_entry(value: Mapping[str, object]) -> dict[str, object]:
@@ -146,7 +234,7 @@ def normalize_petdex_entry(value: Mapping[str, object]) -> dict[str, object]:
         "petJsonUrl": _valid_petdex_asset_url(value.get("petJsonUrl")),
         "sourceUrl": f"https://petdex.dev/pets/{slug}",
         "previewUrl": f"/api/pets/{slug}/spritesheet",
-        "stateRows": {"idle": 0, "ready": 1, "running": 2, "blocked": 3, "needs": 4},
+        "stateRows": dict(PETDEX_STATE_ROWS),
     }
 
 
@@ -291,11 +379,213 @@ class PetdexCatalog:
         return dict(pet)
 
 
+def _hook_trust_remediation() -> dict[str, object]:
+    return {
+        "action": "review_hooks",
+        "command": "/hooks",
+        "restartRequired": True,
+    }
+
+
+def _hook_trust_snapshot(
+    trust_status: str,
+    *,
+    trusted: bool | None,
+    checked: bool,
+    events: list[str] | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "trusted": trusted,
+        "trustStatus": trust_status,
+        "trustChecked": checked,
+        "untrustedEvents": list(events or []),
+        "trustError": error,
+        "trustCheckedAt": int(time.time() * 1000) if checked else 0,
+    }
+    if trusted is not True and trust_status not in {"checking", "not_bound"}:
+        result["remediation"] = _hook_trust_remediation()
+    return result
+
+
+def parse_codex_hook_trust(
+    value: object,
+    *,
+    hooks_path: Path,
+    hook_script: Path,
+) -> dict[str, object]:
+    data = value.get("data") if isinstance(value, dict) else None
+    if not isinstance(data, list):
+        raise CompanionError("Codex hooks/list response has no data list")
+    expected_by_wire = {wire: event for event, wire in HOOK_WIRE_EVENTS.items()}
+    status_rank = {"trusted": 0, "managed": 0, "disabled": 1, "untrusted": 2, "modified": 3}
+    observed: dict[str, list[str]] = {event: [] for event in HOOK_EVENTS}
+    resolved_hooks_path = hooks_path.expanduser().resolve()
+    resolved_hook_script = hook_script.expanduser().resolve()
+
+    for entry in data:
+        hooks = entry.get("hooks") if isinstance(entry, dict) else None
+        for hook in hooks if isinstance(hooks, list) else []:
+            if not isinstance(hook, dict):
+                continue
+            source_path = hook.get("sourcePath")
+            command = hook.get("command")
+            wire_event = hook.get("eventName")
+            if not isinstance(source_path, str) or not isinstance(command, str) or not isinstance(wire_event, str):
+                continue
+            if Path(source_path).expanduser().resolve() != resolved_hooks_path:
+                continue
+            if str(resolved_hook_script) not in command or "codex_pet_hook.py" not in command:
+                continue
+            event = expected_by_wire.get(wire_event)
+            if event is None:
+                continue
+            trust = hook.get("trustStatus")
+            if not isinstance(trust, str) or trust not in status_rank:
+                trust = "untrusted"
+            if hook.get("enabled") is not True:
+                trust = "disabled"
+            observed[event].append(trust)
+
+    missing = [event for event in HOOK_EVENTS if not observed[event]]
+    event_status = {
+        event: max(statuses, key=lambda item: status_rank[item])
+        for event, statuses in observed.items()
+        if statuses
+    }
+    modified = [event for event in HOOK_EVENTS if event_status.get(event) == "modified"]
+    untrusted = [event for event in HOOK_EVENTS if event_status.get(event) == "untrusted"]
+    disabled = [event for event in HOOK_EVENTS if event_status.get(event) == "disabled"]
+    if modified:
+        aggregate = "modified"
+        attention = modified + untrusted + disabled + missing
+    elif untrusted:
+        aggregate = "untrusted"
+        attention = untrusted + disabled + missing
+    elif disabled:
+        aggregate = "disabled"
+        attention = disabled + missing
+    elif missing:
+        aggregate = "incomplete"
+        attention = missing
+    else:
+        aggregate = "trusted"
+        attention = []
+    return _hook_trust_snapshot(
+        aggregate,
+        trusted=aggregate == "trusted",
+        checked=True,
+        events=list(dict.fromkeys(attention)),
+    )
+
+
+class CodexHookTrustProbe:
+    def __init__(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        workspace: Path,
+        hooks_path: Path,
+        hook_script: Path,
+        refresh_seconds: float = HOOK_TRUST_REFRESH_SECONDS,
+    ) -> None:
+        self.loop = loop
+        self.workspace = workspace.expanduser().resolve()
+        self.hooks_path = hooks_path.expanduser().resolve()
+        self.hook_script = hook_script.expanduser().resolve()
+        self.refresh_seconds = refresh_seconds
+        self._lock = threading.Lock()
+        self._snapshot = _hook_trust_snapshot("checking", trusted=None, checked=False)
+        self._fingerprint: tuple[tuple[int, int], ...] | None = None
+        self._checked_at = 0.0
+        self._refreshing = False
+
+    def _source_fingerprint(self) -> tuple[tuple[int, int], ...]:
+        paths = [self.hooks_path, self.hooks_path.with_name("config.toml")]
+        try:
+            paths.append(Path(resolve_codex_bin()).expanduser().resolve())
+        except CodexAppServerError:
+            pass
+        values = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                values.append((stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                values.append((0, 0))
+        return tuple(values)
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._checked_at = 0.0
+            self._fingerprint = None
+
+    def status(self, *, bound: bool) -> dict[str, object]:
+        if not bound:
+            return _hook_trust_snapshot("not_bound", trusted=False, checked=True)
+        fingerprint = self._source_fingerprint()
+        schedule = False
+        with self._lock:
+            stale = (
+                self._fingerprint != fingerprint
+                or time.monotonic() - self._checked_at >= self.refresh_seconds
+            )
+            if stale and not self._refreshing:
+                self._refreshing = True
+                schedule = True
+            snapshot = dict(self._snapshot)
+            snapshot["untrustedEvents"] = list(self._snapshot.get("untrustedEvents", []))
+            if isinstance(self._snapshot.get("remediation"), dict):
+                snapshot["remediation"] = dict(self._snapshot["remediation"])
+        if schedule:
+            try:
+                asyncio.run_coroutine_threadsafe(self._refresh(fingerprint), self.loop)
+            except RuntimeError as exc:
+                self._finish_refresh(
+                    fingerprint,
+                    _hook_trust_snapshot("unknown", trusted=None, checked=True, error=type(exc).__name__),
+                )
+        return snapshot
+
+    def _finish_refresh(self, fingerprint: tuple[tuple[int, int], ...], snapshot: dict[str, object]) -> None:
+        with self._lock:
+            self._snapshot = snapshot
+            self._fingerprint = fingerprint
+            self._checked_at = time.monotonic()
+            self._refreshing = False
+
+    async def _refresh(self, fingerprint: tuple[tuple[int, int], ...]) -> None:
+        try:
+            async with CodexAppServerClient(request_timeout=5.0) as client:
+                value = await client.request("hooks/list", {"cwds": [str(self.workspace)]})
+            snapshot = parse_codex_hook_trust(
+                value,
+                hooks_path=self.hooks_path,
+                hook_script=self.hook_script,
+            )
+        except (CodexAppServerError, CompanionError, OSError, ValueError) as exc:
+            message = " ".join(public_error(exc).split()) if isinstance(exc, CodexAppServerError) else type(exc).__name__
+            snapshot = _hook_trust_snapshot(
+                "unknown",
+                trusted=None,
+                checked=True,
+                error=message[:180] or type(exc).__name__,
+            )
+        self._finish_refresh(fingerprint, snapshot)
+
+
 class CodexHookBinding:
-    def __init__(self, hooks_path: Path = DEFAULT_HOOKS_PATH, *, python_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        hooks_path: Path = DEFAULT_HOOKS_PATH,
+        *,
+        python_path: Path | None = None,
+        trust_probe: CodexHookTrustProbe | None = None,
+    ) -> None:
         self.hooks_path = hooks_path.expanduser()
         self.python_path = (python_path or Path(sys.executable)).resolve()
         self.hook_script = (ROOT_DIR / "scripts" / "codex_pet_hook.py").resolve()
+        self.trust_probe = trust_probe
 
     @property
     def command(self) -> str:
@@ -322,12 +612,23 @@ class CodexHookBinding:
                         break
                 if found:
                     events.append(event)
-        return {
+        result: dict[str, object] = {
             "detected": self.hooks_path.parent.exists(),
             "bound": len(events) == len(HOOK_EVENTS),
             "events": events,
             "hooksPath": str(self.hooks_path),
         }
+        if self.trust_probe is None:
+            result.update(
+                _hook_trust_snapshot(
+                    "unknown" if result["bound"] else "not_bound",
+                    trusted=None if result["bound"] else False,
+                    checked=False,
+                )
+            )
+        else:
+            result.update(self.trust_probe.status(bound=bool(result["bound"])))
+        return result
 
     def bind(self) -> dict[str, object]:
         value = _read_json(self.hooks_path, {})
@@ -356,6 +657,8 @@ class CodexHookBinding:
                 backup.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.hooks_path, backup)
         _atomic_json(self.hooks_path, value)
+        if self.trust_probe is not None:
+            self.trust_probe.invalidate()
         return self.status()
 
     def unbind(self) -> dict[str, object]:
@@ -375,6 +678,8 @@ class CodexHookBinding:
                 if not groups:
                     del hooks[event]
         _atomic_json(self.hooks_path, value)
+        if self.trust_probe is not None:
+            self.trust_probe.invalidate()
         return self.status()
 
 
@@ -442,6 +747,12 @@ class CompanionState:
         self.key_dir = self.state_dir / "keys"
         self.catalog = PetdexCatalog(cache_path=self.state_dir / "petdex-manifest.json")
         self.hooks = CodexHookBinding(hooks_path)
+        self.hooks.trust_probe = CodexHookTrustProbe(
+            loop=loop,
+            workspace=ROOT_DIR,
+            hooks_path=self.hooks.hooks_path,
+            hook_script=self.hooks.hook_script,
+        )
         self.ble_cache = ble_cache
         self.jobs: dict[str, CompanionJob] = {}
         self._jobs_lock = threading.Lock()
@@ -526,12 +837,24 @@ class CompanionState:
         job.status = "running"
         job.update(stage="download", progress=8, message="Downloading Petdex source")
         job.append(f"source petdex:{pet['slug']}")
-        package_path, package, public_key = await asyncio.to_thread(
-            build_petdex_hpet,
-            pet,
-            cache_dir=self.cache_dir,
-            key_dir=self.key_dir,
-        )
+        try:
+            package_path, package, public_key = await asyncio.to_thread(
+                build_petdex_hpet,
+                pet,
+                cache_dir=self.cache_dir,
+                key_dir=self.key_dir,
+            )
+        except HpetError as exc:
+            if "fetch failed" not in str(exc).lower():
+                raise
+            _, public_key = await asyncio.to_thread(ensure_signing_keys, self.key_dir)
+            package_path, package = await asyncio.to_thread(
+                _cached_v2_hpet_for_slug,
+                self.cache_dir,
+                public_key,
+                str(pet["slug"]),
+            )
+            job.append(f"source fetch failed; using verified v2 cache digest={package.digest}")
         job.digest = package.digest
         job.download_url = f"/api/packages/{package.digest}.hpet"
         job.update(stage="verify", progress=30, message="Signature and animation states verified")
@@ -909,16 +1232,133 @@ def run_self_test() -> None:
         "spritesheetUrl": "https://assets.petdex.dev/pets/shinchan/sprite.webp",
         "petJsonUrl": "https://assets.petdex.dev/pets/shinchan/pet.json",
     })
-    assert normalized["stateRows"] == {"idle": 0, "ready": 1, "running": 2, "blocked": 3, "needs": 4}
+    assert normalized["stateRows"] == {
+        "idle": 0,
+        "runRight": 1,
+        "runLeft": 2,
+        "waving": 3,
+        "jumping": 4,
+        "failed": 5,
+        "waiting": 6,
+        "running": 7,
+        "review": 8,
+    }
+    for unsafe_url in (
+        "https://user:secret@assets.petdex.dev/pet.webp",
+        "https://assets.petdex.dev:444/pet.webp",
+    ):
+        try:
+            _valid_petdex_asset_url(unsafe_url)
+        except CompanionError:
+            pass
+        else:
+            raise AssertionError(f"unsafe Petdex asset URL passed: {unsafe_url}")
+    try:
+        _valid_petdex_redirect_url(
+            "https://assets.petdex.dev/pet.webp",
+            "https://example.com/pet.webp",
+        )
+    except CompanionError:
+        pass
+    else:
+        raise AssertionError("unsafe Petdex redirect passed")
+    with tempfile.TemporaryDirectory(prefix="companion-cache-test-") as cache_text:
+        cache_dir = Path(cache_text)
+        cache_dir.joinpath("bad.hpet").write_bytes(b"bad")
+        cache_dir.joinpath("legacy.hpet").write_bytes(b"legacy")
+        cache_dir.joinpath("v2.hpet").write_bytes(b"v2")
+
+        def fake_reader(blob: bytes, *, public_key: Path) -> HpetPackage:
+            del public_key
+            if blob == b"bad":
+                raise HpetError("invalid signature")
+            version = 1 if blob == b"legacy" else 2
+            return HpetPackage(
+                digest=hashlib.sha256(blob).hexdigest(),
+                manifest={
+                    "slug": "test-pet",
+                    "schemaVersion": version,
+                    "target": {
+                        "preloadVersion": version,
+                        "stateCount": 9 if version == 2 else 5,
+                        "frameMs": 120 if version == 2 else 180,
+                    },
+                },
+                files={},
+            )
+
+        cached_path, cached_package = _cached_v2_hpet_for_slug(
+            cache_dir,
+            cache_dir / "public.pem",
+            "test-pet",
+            reader=fake_reader,
+        )
+        assert cached_path.name == "v2.hpet" and cached_package.manifest["schemaVersion"] == 2
+        try:
+            _cached_v2_hpet_for_slug(
+                cache_dir,
+                cache_dir / "public.pem",
+                "missing-pet",
+                reader=fake_reader,
+            )
+            raise AssertionError("missing cached pet was accepted")
+        except HpetError as exc:
+            assert "no verified nine-state" in str(exc)
     with tempfile.TemporaryDirectory(prefix="companion-test-") as temp_text:
         hooks_path = Path(temp_text) / ".codex" / "hooks.json"
         hooks_path.parent.mkdir()
         hooks_path.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep-me"}]}]}}), encoding="utf-8")
         binding = CodexHookBinding(hooks_path)
         assert binding.bind()["bound"] is True
+        assert binding.status()["trustStatus"] == "unknown"
         saved = json.loads(hooks_path.read_text(encoding="utf-8"))
         assert any(item.get("command") == "keep-me" for group in saved["hooks"]["Stop"] for item in group["hooks"])
         assert binding.bind()["bound"] is True
+
+        listed_hooks = [
+            {
+                "eventName": HOOK_WIRE_EVENTS[event],
+                "command": binding.command,
+                "sourcePath": str(hooks_path),
+                "enabled": True,
+                "trustStatus": "trusted",
+            }
+            for event in HOOK_EVENTS
+        ]
+        trust_value = {"data": [{"cwd": temp_text, "hooks": listed_hooks, "warnings": [], "errors": []}]}
+        trusted = parse_codex_hook_trust(
+            trust_value,
+            hooks_path=hooks_path,
+            hook_script=binding.hook_script,
+        )
+        assert trusted["trusted"] is True
+        assert trusted["trustStatus"] == "trusted"
+        listed_hooks[0]["trustStatus"] = "modified"
+        modified = parse_codex_hook_trust(
+            trust_value,
+            hooks_path=hooks_path,
+            hook_script=binding.hook_script,
+        )
+        assert modified["trusted"] is False
+        assert modified["trustStatus"] == "modified"
+        assert modified["untrustedEvents"] == [HOOK_EVENTS[0]]
+        assert modified["remediation"] == _hook_trust_remediation()
+        listed_hooks[0]["trustStatus"] = "trusted"
+        listed_hooks[1]["enabled"] = False
+        disabled = parse_codex_hook_trust(
+            trust_value,
+            hooks_path=hooks_path,
+            hook_script=binding.hook_script,
+        )
+        assert disabled["trustStatus"] == "disabled"
+        listed_hooks.pop()
+        incomplete = parse_codex_hook_trust(
+            trust_value,
+            hooks_path=hooks_path,
+            hook_script=binding.hook_script,
+        )
+        assert incomplete["trustStatus"] == "disabled"
+        assert HOOK_EVENTS[-1] in incomplete["untrustedEvents"]
         assert binding.unbind()["bound"] is False
         saved = json.loads(hooks_path.read_text(encoding="utf-8"))
         assert any(item.get("command") == "keep-me" for group in saved["hooks"]["Stop"] for item in group["hooks"])

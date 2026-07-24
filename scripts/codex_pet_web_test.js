@@ -15,6 +15,10 @@ function requireSource(pattern, message) {
   if (!pattern.test(script)) throw new Error(message);
 }
 
+function requireHtml(pattern, message) {
+  if (!pattern.test(html)) throw new Error(message);
+}
+
 function rejectSource(pattern, message) {
   if (pattern.test(script)) throw new Error(message);
 }
@@ -31,6 +35,14 @@ requireSource(/保存 \.hpet/,
   "the optional package action must be labelled as saving an hpet file");
 requireSource(/先绑定 Codex/,
   "deploy must explain that Codex binding is required");
+requireSource(/Codex Hooks 未信任/,
+  "the Companion must surface untrusted Codex hooks as a project warning");
+requireSource(/\/hooks/,
+  "the untrusted-hooks warning must provide the Codex review command");
+requireSource(/codex\?\.bound && codex\?\.trusted === true/,
+  "Codex readiness must require both binding and runtime trust");
+requireSource(/hookTrustNeedsAction/,
+  "the status renderer must distinguish untrusted hooks from an unbound project");
 requireSource(/先连接板子/,
   "deploy must explain that the board connection is required");
 requireSource(/state\.jobActive \|\| !\(board && codex\)/,
@@ -45,6 +57,16 @@ requireSource(/data-frames|frameList|visibleFrames/,
   "sprite animation must retain a non-empty frame list per state row");
 requireSource(/requestAnimationFrame|setTimeout\(animateSprites/,
   "sprite animation must use a continuous browser animation loop");
+for (const [state, label] of [
+  ["idle", "待机"], ["runRight", "向右跑"], ["runLeft", "向左跑"],
+  ["waving", "挥手"], ["jumping", "跳跃"], ["failed", "失败"],
+  ["waiting", "等待"], ["running", "运行"], ["review", "审阅"],
+]) {
+  requireSource(new RegExp(`${state}: ["']${label}["']`),
+    `the Petdex ${state} animation must be exposed as ${label}`);
+}
+requireHtml(/\.states\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/,
+  "nine Petdex state buttons must use a stable three-column grid");
 
 const visibleFrameFunction = script.match(
   /function visibleSpriteFrames\([\s\S]*?\n    }\n\n    function loadSprite/,

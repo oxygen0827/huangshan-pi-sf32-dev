@@ -378,7 +378,7 @@ def audit_codex_pet_bridge() -> None:
     if "vb_runtime_audio_preload_codex_cues();" not in runtime_main:
         fail("codex_pet_bridge", "Codex cue cache must be populated before the pet UI starts")
     if "VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)" not in helper:
-        fail("codex_pet_bridge", "startup-only pet preload must use bounded 8 KiB SD reads")
+        fail("codex_pet_bridge", "pet state loading must use bounded 8 KiB SD reads")
     read_start = helper.find("static int vb_pet_read_full(")
     read_end = helper.find("static void vb_pet_release_rocky_frames", read_start)
     read_body = helper[read_start:read_end] if read_start >= 0 and read_end > read_start else ""
@@ -386,34 +386,44 @@ def audit_codex_pet_bridge() -> None:
         fail("codex_pet_bridge", "single-sector preload reads must not sleep for one RTOS tick per sector")
     for token in (
         "vb_pet_preload_assets",
-        "vb_pet_validate_preload_index",
-        "vb_pet_fill_preloaded_assets_unlocked",
+        "vb_pet_parse_preload_unlocked",
+        "vb_pet_load_state_unlocked",
+        "vb_pet_preload_worker",
+        "vb_pet_apply_preload_completion",
+        "rt_sem_take(g_pet.loader_sem, RT_WAITING_NO)",
         "vb_pet_activate_preloaded_state",
         "VB_PET_PRELOAD_MAGIC 0x43504256u",
+        "VB_PET_PRELOAD_VERSION 2u",
         "VB_PET_MAX_ASSETS 1",
-        "VB_PET_PRELOAD_PACK_STATE_COUNT VB_PET_ASSET_STATE_COUNT",
-        "VB_PET_PRELOAD_STATE_COUNT VB_PET_ASSET_STATE_COUNT",
-        "VB_PET_PRELOAD_MAX_BYTES (900000u)",
+        "VB_PET_ASSET_STATE_COUNT 9",
+        "VB_PET_PRELOAD_CACHE_BANKS 2",
+        "VB_PET_PRELOAD_STATE_PATH_FORMAT",
+        "VB_PET_PRELOAD_MAX_BYTES (1400000u)",
         "VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)",
-        "VB_PET_RUNTIME_FRAME_LIMIT 2",
-        "VB_PET_NATIVE_FRAME_MS 180",
+        "VB_PET_RUNTIME_FRAME_LIMIT VB_PET_MAX_ASSET_FRAMES",
+        "VB_PET_NATIVE_FRAME_MS 120",
         "preloaded_frames",
-        "uncompress(cursor",
+        "uncompress(target",
+        "g_pet.preload_split",
         "lv_img_set_zoom(g_pet.pet_image",
-        "rt_thread_yield();",
         '\\"preloadedBytes\\"',
+        '\\"assetStates\\"',
+        '\\"preloadVersion\\"',
         "g_pet.custom_displayed_frame = -1;",
         "custom_displayed_frame == g_pet.custom_frame_index",
     ):
         if token not in helper:
-            fail("codex_pet_bridge", f"pet assets must remain startup-preloaded: {token!r}")
+            fail("codex_pet_bridge", f"pet state cache is missing {token!r}")
     if "VB_PET_IMAGE_RUNNING_ZOOM" in helper or "VB_PET_IMAGE_RUNNING_RAISED_Y" in helper:
         fail("codex_pet_bridge", "custom pet animation must not animate zoom or position")
-    if "VB_PET_NATIVE_FRAME_MS" not in helper or "g_pet.custom_frame_ms = VB_PET_NATIVE_FRAME_MS;" not in helper:
+    if "VB_PET_NATIVE_FRAME_MS" not in helper or "VB_PET_LEGACY_FRAME_MS" not in helper:
         fail("codex_pet_bridge", "custom pet states must use native frame timing")
-    for forbidden in ("vb_pet_custom_loader", 'rt_thread_create("vbpetload"'):
-        if forbidden in helper:
-            fail("codex_pet_bridge", f"runtime pet SD loading must stay removed: {forbidden!r}")
+    frame_start = helper.find("static void vb_pet_update_custom_frame")
+    frame_end = helper.find("static void vb_pet_activate_cache_bank", frame_start)
+    frame_body = helper[frame_start:frame_end] if frame_start >= 0 and frame_end > frame_start else ""
+    for forbidden in ("open(", "read(", "uncompress(", "vb_runtime_storage_take"):
+        if forbidden in frame_body:
+            fail("codex_pet_bridge", f"animation playback must remain SD-free: {forbidden!r}")
     if "PET_READY_TIMEOUT_SECONDS = 30.0" not in read("scripts/codex_pet_bridge.py"):
         fail("codex_pet_bridge", "cold-boot ready gate must cover the bounded startup preload")
     keychain_launcher = read("scripts/codex_pet_test_backend.command")

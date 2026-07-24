@@ -598,7 +598,10 @@ class DeviceSession:
     async def publish_tasks(self, payload: str) -> None:
         if len(payload.encode("utf-8")) > 184:
             raise BridgeError("desktop task snapshot exceeds board transport limit")
+        previous = self._tasks_snapshot
         self._tasks_snapshot = (payload, self.clock_ms())
+        if previous is not None and previous[0] == payload:
+            return
         if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
@@ -663,6 +666,16 @@ class DeviceSession:
                     raise BridgeError("VibeBoard is disconnected")
                 self._installing = True
                 self._replay_pending = False
+                try:
+                    # Long-lived control traffic and a sustained bulk transfer have
+                    # different CoreBluetooth failure modes. Start each transaction
+                    # on a fresh encrypted GATT client after publishers are paused.
+                    await self._mark_transport_failure_unlocked()
+                    await self._connect_unlocked()
+                except BaseException:
+                    self._installing = False
+                    await self._mark_transport_failure_unlocked()
+                    raise
             try:
                 await self.commands.call(
                     "install_package",
@@ -817,9 +830,11 @@ class DeviceSession:
                 if expected_slug is not None:
                     valid = valid and (
                         status.get("pet") == expected_slug
-                        and status.get("frames") == 2
-                        and status.get("frameMs") == 180
-                        and status.get("preloadedBytes") == 160 * 173 * 3 * 5 * 2
+                        and status.get("preloadVersion") == 2
+                        and status.get("assetStates") == 9
+                        and status.get("frames", 0) >= 2
+                        and status.get("frameMs") == 120
+                        and status.get("preloadedBytes", 0) >= 160 * 173 * 3 * 2 * 2
                     )
                 if valid:
                     if last_ui_ticks is not None:
@@ -1610,9 +1625,13 @@ class FakeDeviceTransport:
                 "active": 1,
                 "pets": 1,
                 "pet": self.pet_slug,
-                "frames": 2,
-                "frameMs": 180,
-                "preloadedBytes": 160 * 173 * 3 * 5 * 2,
+                "assetState": "idle",
+                "requestedAssetState": "idle",
+                "assetStates": 9,
+                "preloadVersion": 2,
+                "frames": 6,
+                "frameMs": 120,
+                "preloadedBytes": 160 * 173 * 3 * 8 * 2,
                 "uiTicks": self.pet_ui_ticks,
                 "queuedFlows": 0,
                 "ok": True,
@@ -1954,6 +1973,7 @@ async def self_test_async() -> None:
     await install_device.publish_state("running", task_id="during-install", detail="Latest snapshot")
     installed_status = await install_task
     assert installed_status["pet"] == "test-pet"
+    assert install_transport.connect_count == 2
     replayed_states = [frame for frame in install_transport.frames if frame[0] == STATE_CHANNEL]
     assert len(replayed_states) == 1
     assert isinstance(replayed_states[0][2], PetEnvelope)
@@ -1984,7 +2004,7 @@ async def self_test_async() -> None:
         "recovered-pet",
     )
     assert uncertain_status["pet"] == "recovered-pet"
-    assert uncertain_transport.connect_count == 2
+    assert uncertain_transport.connect_count == 3
     assert uncertain_transport.abort_calls == 0
     await uncertain_device.close()
 
@@ -2288,9 +2308,15 @@ async def self_test_async() -> None:
         )
         await reconnect_device.start(run_heartbeat=True)
         await reconnect_device.publish_state("running", task_id="thr-reconnect", detail="Thinking")
-        await reconnect_device.publish_tasks(
+        reconnect_tasks = (
             '{"v":1,"p":"reconnect","st":"running","d":"Thinking","i":1,"n":1,"ac":1,"a":0}'
         )
+        await reconnect_device.publish_tasks(reconnect_tasks)
+        task_frame_count = sum(
+            frame[0] == TASKS_CHANNEL for frame in reconnect_transport.frames
+        )
+        await reconnect_device.publish_tasks(reconnect_tasks)
+        assert sum(frame[0] == TASKS_CHANNEL for frame in reconnect_transport.frames) == task_frame_count
         await reconnect_device.publish_approval('{"v":1,"a":1,"r":"a:0123456789abcdefabcd"}')
         await reconnect_device.publish_pet_selection("boba")
         reconnect_transport.frames.clear()

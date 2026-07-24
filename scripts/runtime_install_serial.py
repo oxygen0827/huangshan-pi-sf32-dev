@@ -16,8 +16,11 @@ from runtime_transport import (
     RuntimeTransportError,
     SerialTransport,
     SerialTransportOptions,
+    flow_send_matches,
     validate_flow_roundtrip_output,
 )
+
+PETDEX_STATE_CONTRACT = Path(__file__).with_name("petdex_state_contract.json")
 
 
 
@@ -38,9 +41,9 @@ def validate_codex_pet_ready(output: str) -> dict[str, object]:
     expected = {
         "api": CODEX_PET_API,
         "active": 1,
-        "frames": 2,
-        "frameMs": 180,
-        "preloadedBytes": 160 * 173 * 3 * 5 * 2,
+        "assetStates": 9,
+        "preloadVersion": 2,
+        "frameMs": 120,
     }
     for key, wanted in expected.items():
         if value.get(key) != wanted:
@@ -49,10 +52,16 @@ def validate_codex_pet_ready(output: str) -> dict[str, object]:
             )
     pet = value.get("pet")
     ui_ticks = value.get("uiTicks")
+    frames = value.get("frames")
+    preloaded_bytes = value.get("preloadedBytes")
     if not isinstance(pet, str) or not pet:
         raise RuntimeTransportError("Codex Pet status has no active pet slug")
     if not isinstance(ui_ticks, int) or isinstance(ui_ticks, bool):
         raise RuntimeTransportError("Codex Pet status has no numeric uiTicks")
+    if not isinstance(frames, int) or isinstance(frames, bool) or frames < 2:
+        raise RuntimeTransportError("Codex Pet frames mismatch: expected at least 2")
+    if not isinstance(preloaded_bytes, int) or preloaded_bytes < 160 * 173 * 3 * 2 * 2:
+        raise RuntimeTransportError("Codex Pet has no valid resident animation cache")
     return value
 
 
@@ -61,6 +70,54 @@ def codex_pet_ticks_advanced(previous: dict[str, object], current: dict[str, obj
     after = int(current["uiTicks"])
     delta = (after - before) & 0xFFFFFFFF
     return 0 < delta < 0x80000000
+
+
+def codex_pet_preview_states() -> tuple[str, ...]:
+    try:
+        value = json.loads(PETDEX_STATE_CONTRACT.read_text(encoding="utf-8"))
+        states = tuple(item["id"] for item in value["states"])
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeTransportError(f"Petdex state contract is invalid: {exc}") from exc
+    if len(states) != 9 or len(set(states)) != 9 or not all(
+        isinstance(state, str) and state for state in states
+    ):
+        raise RuntimeTransportError("Petdex state contract must define nine unique state ids")
+    return states
+
+
+def codex_pet_preview_ready(
+    value: dict[str, object], state: str, first_frame: int | None
+) -> bool:
+    if value.get("assetState") != state or value.get("requestedAssetState") != state:
+        return False
+    if value.get("loaderPhase") != 0:
+        return False
+    frame = value.get("frame")
+    return (
+        first_frame is not None
+        and isinstance(frame, int)
+        and not isinstance(frame, bool)
+        and frame != first_frame
+    )
+
+
+def codex_pet_fast_status(transport: SerialTransport) -> dict[str, object]:
+    output = transport.read_json(
+        "vb_runtime_codex_pet_status", "codex_pet", CODEX_PET_API, wait=0.08
+    )
+    return validate_codex_pet_ready(output)
+
+
+def codex_pet_fast_flow(
+    transport: SerialTransport, sequence: int, payload: str
+) -> None:
+    hex_payload = payload.encode("utf-8").hex() if payload else "-"
+    transport.read_matching(
+        f"vb_runtime_flow_send pet.preview {sequence} {hex_payload}",
+        lambda current: flow_send_matches(current, "pet.preview", sequence),
+        timeout=1.0,
+        wait=0.08,
+    )
 
 
 def serial_transport_options(args: argparse.Namespace) -> SerialTransportOptions:
@@ -88,6 +145,8 @@ def has_standard_transport_command(args: argparse.Namespace) -> bool:
     return any((
         args.status_only,
         args.codex_pet_only,
+        args.codex_pet_sweep,
+        args.codex_pet_click_test,
         args.capabilities_only,
         args.sensors_only,
         args.power_only,
@@ -122,6 +181,8 @@ def run_self_test() -> None:
     base = argparse.Namespace(
         status_only=False,
         codex_pet_only=False,
+        codex_pet_sweep=False,
+        codex_pet_click_test=False,
         capabilities_only=False,
         sensors_only=False,
         power_only=False,
@@ -153,16 +214,29 @@ def run_self_test() -> None:
     pet_args = argparse.Namespace(**vars(base))
     pet_args.codex_pet_only = True
     assert has_standard_transport_command(pet_args)
+    sweep_args = argparse.Namespace(**vars(base))
+    sweep_args.codex_pet_sweep = True
+    assert has_standard_transport_command(sweep_args)
+    click_args = argparse.Namespace(**vars(base))
+    click_args.codex_pet_click_test = True
+    assert has_standard_transport_command(click_args)
     first_pet = validate_codex_pet_ready(
-        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":2,"frameMs":180,"preloadedBytes":830400,"uiTicks":9}}'
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"uiTicks":9}}'
     )
     second_pet = validate_codex_pet_ready(
-        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":2,"frameMs":180,"preloadedBytes":830400,"uiTicks":10}}'
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"uiTicks":10}}'
     )
     assert codex_pet_ticks_advanced(first_pet, second_pet)
+    assert codex_pet_preview_states() == (
+        "idle", "runRight", "runLeft", "waving", "jumping",
+        "failed", "waiting", "running", "review",
+    )
+    preview = dict(second_pet, assetState="running", requestedAssetState="running", loaderPhase=0, frame=2)
+    assert codex_pet_preview_ready(preview, "running", 1)
+    assert not codex_pet_preview_ready(preview, "review", 1)
     try:
         validate_codex_pet_ready(
-            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":1,"frameMs":180,"preloadedBytes":830400,"uiTicks":10}}'
+            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":1,"frameMs":120,"preloadedBytes":1328640,"uiTicks":10}}'
         )
     except RuntimeTransportError as exc:
         assert "frames mismatch" in str(exc)
@@ -217,10 +291,110 @@ def run_standard_transport_command(args: argparse.Namespace) -> int | None:
                         previous = None
                     time.sleep(0.5)
                 fail(
-                    "Codex Pet readiness check timed out; expected active=1, frames=2, "
-                    "frameMs=180, preloadedBytes=830400 and advancing uiTicks; "
+                    "Codex Pet readiness check timed out; expected active=1, assetStates=9, "
+                    "preloadVersion=2, frames>=2, frameMs=120, a resident cache and advancing uiTicks; "
                     f"last_error={last_error}"
                 )
+            elif args.codex_pet_sweep:
+                states = codex_pet_preview_states()
+                sequence = args.flow_seq if args.flow_seq is not None else (int(time.time()) & 0xFFFFFFFF)
+                results: list[dict[str, object]] = []
+                try:
+                    for state_index, state in enumerate(states):
+                        transport.flow_send("pet.preview", sequence + state_index, state)
+                        deadline = time.monotonic() + max(4.0, args.ready_timeout)
+                        first_frame: int | None = None
+                        previous: dict[str, object] | None = None
+                        last_error = f"state {state} was not applied"
+                        while time.monotonic() < deadline:
+                            try:
+                                latest = validate_codex_pet_ready(transport.codex_pet())
+                                if (
+                                    latest.get("assetState") == state
+                                    and latest.get("requestedAssetState") == state
+                                    and latest.get("loaderPhase") == 0
+                                ):
+                                    frame = latest.get("frame")
+                                    if first_frame is None and isinstance(frame, int) and not isinstance(frame, bool):
+                                        first_frame = frame
+                                    if (
+                                        previous is not None
+                                        and codex_pet_ticks_advanced(previous, latest)
+                                        and codex_pet_preview_ready(latest, state, first_frame)
+                                    ):
+                                        results.append(latest)
+                                        break
+                                    previous = latest
+                                else:
+                                    previous = None
+                                    first_frame = None
+                            except (RuntimePackageError, RuntimeTransportError) as exc:
+                                last_error = str(exc)
+                                previous = None
+                                first_frame = None
+                            time.sleep(0.12)
+                        else:
+                            fail(f"Codex Pet preview sweep timed out for {state}: {last_error}")
+                finally:
+                    transport.flow_send("pet.preview", sequence + len(states), "auto")
+                print(json.dumps(results, sort_keys=True, separators=(",", ":")))
+                return 0
+            elif args.codex_pet_click_test:
+                sequence = args.flow_seq if args.flow_seq is not None else (int(time.time()) & 0xFFFFFFFF)
+                deadline = time.monotonic() + max(4.0, args.ready_timeout)
+                baseline: dict[str, object] | None = None
+                transport.flow_send("pet.preview", sequence, "auto")
+                while time.monotonic() < deadline:
+                    latest = validate_codex_pet_ready(transport.codex_pet())
+                    if latest.get("assetState") != "jumping" and latest.get("loaderPhase") == 0:
+                        baseline = latest
+                        break
+                    time.sleep(0.12)
+                if baseline is None:
+                    fail("Codex Pet click test could not establish a non-jumping baseline")
+
+                codex_pet_fast_flow(transport, sequence + 1, "tap")
+                deadline = time.monotonic() + max(4.0, args.ready_timeout)
+                jumping: dict[str, object] | None = None
+                first_frame: int | None = None
+                previous: dict[str, object] | None = None
+                while time.monotonic() < deadline:
+                    latest = codex_pet_fast_status(transport)
+                    if latest.get("assetState") == "jumping" and latest.get("loaderPhase") == 0:
+                        frame = latest.get("frame")
+                        if first_frame is None and isinstance(frame, int) and not isinstance(frame, bool):
+                            first_frame = frame
+                        elif (
+                            previous is not None
+                            and codex_pet_ticks_advanced(previous, latest)
+                            and codex_pet_preview_ready(latest, "jumping", first_frame)
+                        ):
+                            jumping = latest
+                            break
+                        previous = latest
+                    time.sleep(0.12)
+                if jumping is None:
+                    fail("Codex Pet click test did not observe advancing jumping frames")
+
+                codex_pet_fast_flow(transport, sequence + 2, "tap")
+                deadline = time.monotonic() + max(4.0, args.ready_timeout)
+                returned: dict[str, object] | None = None
+                while time.monotonic() < deadline:
+                    latest = codex_pet_fast_status(transport)
+                    if (
+                        latest.get("assetState") != "jumping"
+                        and latest.get("requestedAssetState") != "jumping"
+                        and latest.get("loaderPhase") == 0
+                        and codex_pet_ticks_advanced(jumping, latest)
+                    ):
+                        returned = latest
+                        break
+                    time.sleep(0.12)
+                if returned is None:
+                    fail("Codex Pet click test remained stuck in jumping after a repeated tap")
+                print(json.dumps({"baseline": baseline, "jumping": jumping, "returned": returned},
+                                 sort_keys=True, separators=(",", ":")))
+                return 0
             elif args.capabilities_only:
                 print(transport.capabilities())
             elif args.sensors_only:
@@ -286,6 +460,8 @@ def main() -> int:
     source.add_argument("--package-json", type=Path, help="VibeBoard runtime package JSON with app.packageId and files")
     source.add_argument("--status-only", action="store_true", help="Read Runtime serial status and exit")
     source.add_argument("--codex-pet-only", action="store_true", help="Validate Codex Pet preloaded frames and advancing UI ticks")
+    source.add_argument("--codex-pet-sweep", action="store_true", help="Validate all nine Petdex states in one serial session")
+    source.add_argument("--codex-pet-click-test", action="store_true", help="Validate cached jumping and repeated pet taps")
     source.add_argument("--capabilities-only", action="store_true", help="Read Runtime capability JSON and exit")
     source.add_argument("--sensors-only", action="store_true", help="Read built-in sensor JSON and exit")
     source.add_argument("--power-only", action="store_true", help="Read Runtime power JSON and exit")
@@ -334,6 +510,8 @@ def main() -> int:
         args.package_json,
         args.status_only,
         args.codex_pet_only,
+        args.codex_pet_sweep,
+        args.codex_pet_click_test,
         args.capabilities_only,
         args.sensors_only,
         args.power_only,

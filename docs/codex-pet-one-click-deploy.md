@@ -7,14 +7,15 @@
 ## 用户流程
 
 1. 首次启动 VibeBoard Companion，在网页顶部完成 Codex Hooks 绑定和 VibeBoard 系统配对。
-2. 浏览 Petdex 同步图库，在卡片上预览 `idle/running/ready/needs/blocked` 五种动作。
+2. 浏览 Petdex 同步图库，在卡片上预览 `Idle / Run Right / Run Left / Waving / Jumping /
+   Failed / Waiting / Running / Review` 九种原生动作。
 3. 点击“部署到板子”，或从公开网站打开
    `vibeboard://pet/install?source=petdex&slug=<slug>&digest=<sha256>`。
    Companion 只在首次导航时消费该深链并立即清除本地 URL 参数；刷新页面不会重新筛选图库或
    重复部署同一宠物。
    “部署到板子”本身会自动完成下载、校验和传输，不要求用户先保存文件。次操作“保存 `.hpet`”
    只用于离线留档；未绑定 Codex 或未连接板子时，部署按钮会显示对应前置条件并禁用。
-4. Companion 下载 Petdex 源资源、验证五状态、生成并签名 `.hpet`，再合成可信
+4. Companion 下载 Petdex 源资源、验证九行素材和五个板端任务状态、生成并签名 `.hpet`，再合成可信
    `codex_pet` Runtime App。
 5. BLE 事务安装期间暂停任务状态发送；`install_end` 后验证宠物和 UI tick，再回放一次
    最新 Codex 快照。
@@ -45,20 +46,32 @@ signature.ed25519
 ```
 
 包内不能包含 Lua、脚本、绝对路径或 `..`。Ed25519 签名覆盖规范化 manifest 和三个
-payload 的大小、SHA-256。转换器只接受 `assets.petdex.dev`，支持 8x9 和 8x11、单格
-192x208 的 Petdex spritesheet，并按状态名映射：
+payload 的大小、SHA-256。转换器只接受无凭据、标准 HTTPS 端口的 `assets.petdex.dev`；下载
+过程中的每一次重定向都必须再次通过相同白名单，不能利用 CDN 跳转把 Companion 带到任意主机。
+转换器支持 8x9 和 8x11、单格 192x208 的 Petdex spritesheet。Companion 图库按 Petdex 的固定
+前九行完整预览；板端
+`pet/v1` 仍是任务状态协议，因此五种任务状态按下表映射；其余四种由板端交互和审批状态触发：
+
+这份行号和任务映射只有一个代码源：`scripts/petdex_state_contract.json`。Companion API、旧批量
+导入器和 `.hpet` 转换器都读取该文件，禁止各自维护另一份行号表。
 
 | 板端状态 | Petdex 状态 | 源行 |
 | --- | --- | --- |
 | `idle` | `idle` | 0 |
-| `running` | `run` | 2 |
-| `ready` | `wave` | 1 |
-| `needs` | `review` | 4 |
-| `blocked` | `failed` | 3 |
+| `running` | `running` | 7 |
+| `ready` | `waving` | 3 |
+| `needs` | `waiting` | 6 |
+| `blocked` | `failed` | 5 |
 
-每个状态必须找到两张非透明、视觉不同的帧，五组动画也不能完全相同。输出固定为
-160x173、每状态 2 帧、180ms，PSRAM 解压后总计 830400 字节。物理 preload 顺序严格匹配
-板端索引：`idle, ready, blocked, needs, running`。
+九个状态都必须找到至少两张非透明、视觉不同的帧，最多保留 8 帧。`VBPC v2` 输出固定为
+160x173 RGB565A、120ms，并按状态分别保存可变帧数的 zlib 块。板端使用两个“当前状态”缓存，
+最多常驻 16 帧（1328640 字节），不会一次性解压全部状态。`Run Right / Run Left` 由中间区域
+左右滑触发，`Jumping` 由点击宠物和部署后首次启动触发，`Review` 用于真实审批等待。
+
+签名前和验签后都必须解析 `VBPC v2` 状态目录：9 个状态块必须从目录末尾开始连续排列，不允许
+空洞、重叠或尾随数据；每个 zlib 流必须完整结束，解压长度必须等于该状态帧数乘以固定帧字节数。
+manifest 的逐状态帧数、总帧数和最大帧数还必须与该目录一致。这样损坏或元数据矛盾的转换产物
+会在主机端立即失败，不会先被签名并经 BLE 传完整包后才由板子拒绝。
 
 构建和验证：
 
@@ -136,10 +149,11 @@ node scripts/build_hpet_petdex.js --self-test
 .venv/bin/python scripts/codex_pet_companion.py --self-test
 .venv/bin/python scripts/codex_pet_bridge.py --self-test
 .venv/bin/python scripts/runtime_transport.py --self-test
-.venv/bin/python scripts/runtime_architecture_audit.py
+.venv/bin/python scripts/runtime_architecture_audit.py --self-test
 ```
 
 真机至少覆盖：首次配对、断线重连、每阶段断线、错误 ACK、重启、abort、上一宠物回滚、连续
-50 次安装、五状态动作差异、3 分钟 exercise soak 和 24 小时连接 soak。单次成功必须看到
-`pet=<slug>`、`frames=2`、`frameMs=180`、`preloadedBytes=830400`、`uiTicks` 增长且
-`queuedFlows=0`。50 次与 24 小时是发布 gate，不应用单次开发验证代替。
+50 次安装、九状态图库和板端逐状态预览、3 分钟 exercise soak 和 24 小时连接 soak。单次成功
+必须看到 `pet=<slug>`、`preloadVersion=2`、`assetStates=9`、`frames>=2`、`frameMs=120`、
+`preloadedBytes>0`、`uiTicks` 增长且 `queuedFlows=0`。50 次与 24 小时是发布 gate，不应用单次
+开发验证代替。

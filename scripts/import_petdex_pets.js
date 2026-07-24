@@ -32,13 +32,14 @@ const CHECK_ONLY = process.argv.includes("--check");
 const CHECK_CONFIG_ONLY = process.argv.includes("--check-config");
 const UPGRADE_RAW = process.argv.includes("--upgrade-raw");
 const BUILD_PRELOAD = process.argv.includes("--build-preload");
-const STATE_ROWS = [
-  ["idle", 0],
-  ["ready", 3],
-  ["blocked", 5],
-  ["needs", 6],
-  ["running", 7],
-];
+const PETDEX_CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, "petdex_state_contract.json"), "utf8"));
+const PETDEX_STATE_ROWS = new Map(PETDEX_CONTRACT.states.map(state => [state.id, state.row]));
+const STATE_ROWS = ["idle", "ready", "blocked", "needs", "running"].map(boardState => {
+  const sourceState = PETDEX_CONTRACT.taskStates[boardState];
+  const row = PETDEX_STATE_ROWS.get(sourceState);
+  if (!Number.isInteger(row)) throw new Error(`Petdex state contract has no row for ${sourceState}`);
+  return [boardState, row];
+});
 const PRELOAD_STATES = STATE_ROWS.map(([state]) => state);
 
 function loadConfig() {

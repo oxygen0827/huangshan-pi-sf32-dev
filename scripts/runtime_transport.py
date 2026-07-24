@@ -60,8 +60,13 @@ BLE_BULK_V2_VERSION = 2
 BLE_BULK_V2_ACK_REQUEST = 0x01
 BLE_BULK_V2_HEADER = struct.Struct("<4sBBHIIII")
 BLE_BULK_V2_MAX_PAYLOAD = 220
-BLE_BULK_V2_WINDOW = 4
+# The Huangshan/CoreBluetooth path can poison the GATT session after a sustained
+# four-packet burst. One board ACK per frame keeps transfer backpressure tied to
+# completed mailbox/SD processing instead of host-side write acceptance.
+BLE_BULK_V2_WINDOW = 1
 BLE_BULK_V2_RETRIES = 5
+BLE_BULK_V2_RECONNECT_RETRIES = 3
+BLE_BULK_V2_ALREADY_APPLIED_RC = -7  # RT-Thread -RT_EBUSY after a lost completion ACK.
 SERIAL_BLOB_CHUNK_BYTES = 3072
 SERIAL_BLOB_WRITE_BYTES = 256
 # CoreBluetooth may need a full service-change/bond window on the first link.
@@ -70,6 +75,7 @@ SERIAL_BLOB_WRITE_BYTES = 256
 BLE_AUTHENTICATION_TIMEOUT_SECONDS = 45.0
 BLE_STATUS_NOTIFICATION_LIMIT = 64
 BLE_GATT_IO_TIMEOUT_SECONDS = 5.0
+BLE_STATUS_SUBSCRIBE_SETTLE_SECONDS = 0.8
 
 
 class JSONResponsePending(RuntimeError):
@@ -816,6 +822,20 @@ def parse_ble_bulk_ack(status: str) -> BLEBulkAck | None:
         )
     except (KeyError, ValueError):
         return None
+
+
+def ble_bulk_ack_confirms_progress(
+    ack: BLEBulkAck,
+    transfer_id: int,
+    expected_offset: int,
+    expected_next_sequence: int,
+) -> bool:
+    return (
+        ack.transfer_id == transfer_id
+        and ack.offset == expected_offset
+        and ack.next_sequence == expected_next_sequence
+        and (ack.ok or ack.rc == BLE_BULK_V2_ALREADY_APPLIED_RC)
+    )
 
 
 def validate_ble_runtime_status(status: str) -> None:
@@ -1642,14 +1662,17 @@ class BLETransport:
                 except Exception:
                     pass
                 self._status_notify_started = False
-        if self.options.disconnect_pause > 0:
-            await asyncio.sleep(self.options.disconnect_pause)
         if self._client_context is not None:
             await self._client_context.__aexit__(None, None, None)
         self._client_context = None
         self._client = None
         self._bulk_v2_supported = False
         self._clear_status_notifications()
+        await self._pause_after_disconnect()
+
+    async def _pause_after_disconnect(self) -> None:
+        if self.options.disconnect_pause > 0:
+            await asyncio.sleep(self.options.disconnect_pause)
 
     @property
     def connection_label(self) -> str:
@@ -1809,6 +1832,21 @@ class BLETransport:
         try:
             await self._client.start_notify(STATUS_UUID, self._handle_status_notification)
             self._status_notify_started = True
+            # Older firmware actively notified `ok notify=1` from its CCCD
+            # callback. Drain that legacy response before issuing a command;
+            # current firmware only logs the subscription transition.
+            deadline = time.monotonic() + BLE_STATUS_SUBSCRIBE_SETTLE_SECONDS
+            while time.monotonic() < deadline:
+                try:
+                    status = await asyncio.wait_for(
+                        self._status_notifications.get(),
+                        timeout=deadline - time.monotonic(),
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if status.startswith("ok notify=1"):
+                    break
+            self._clear_response_notifications()
         except Exception as exc:
             if not _ble_authentication_pending(exc):
                 raise
@@ -1885,9 +1923,10 @@ class BLETransport:
             try:
                 await self._wait_for_services_retrying(wait)
                 self._clear_response_notifications()
-                # The install callback is intentionally asynchronous on the
-                # board. Use ATT Write Command for those lines so an ATT write
-                # response cannot race the worker's SD/SPI-backed ACK notify.
+                # Install text is executed asynchronously by the board worker.
+                # Use Write Command and require its idempotent Runtime ACK; a
+                # missing ACK reconnects and resends the same control command.
+                # Other control paths retain ATT Write Request semantics.
                 write_response = self.options.write_with_response and not command.startswith("vb_runtime_install_")
                 await asyncio.wait_for(
                     self._client.write_gatt_char(
@@ -2351,10 +2390,8 @@ class BLETransport:
                         continue
                     last_status = status
                     attempt_status = status
-                    if (
-                        ack.ok
-                        and ack.offset == expected_offset
-                        and ack.next_sequence == expected_next_sequence
+                    if ble_bulk_ack_confirms_progress(
+                        ack, transfer_id, expected_offset, expected_next_sequence
                     ):
                         return status
                     break
@@ -2364,10 +2401,8 @@ class BLETransport:
                     if ack is not None and ack.transfer_id == transfer_id:
                         last_status = status
                         attempt_status = status
-                        if (
-                            ack.ok
-                            and ack.offset == expected_offset
-                            and ack.next_sequence == expected_next_sequence
+                        if ble_bulk_ack_confirms_progress(
+                            ack, transfer_id, expected_offset, expected_next_sequence
                         ):
                             return status
             except Exception as exc:  # pragma: no cover - platform BLE failure path
@@ -2378,6 +2413,69 @@ class BLETransport:
             "BLE bulk window failed after retries"
             + (f": {last_status}" if last_status else "")
         )
+
+    async def _refresh_bulk_connection(self) -> None:
+        last_error: BaseException | None = None
+        with contextlib.suppress(Exception):
+            await self.close()
+        for attempt in range(BLE_BULK_V2_RECONNECT_RETRIES):
+            try:
+                await self.connect()
+                await self.verify_connection(
+                    timeout=max(4.0, self.options.final_wait + 3.0)
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                detail = " ".join(str(exc).split())[:160]
+                print(
+                    "warning: BLE bulk reconnect "
+                    f"{attempt + 1}/{BLE_BULK_V2_RECONNECT_RETRIES} failed: "
+                    f"{type(exc).__name__}: {detail}",
+                    flush=True,
+                )
+                with contextlib.suppress(Exception):
+                    await self.close()
+                if attempt + 1 < BLE_BULK_V2_RECONNECT_RETRIES:
+                    await asyncio.sleep(0.8 * (attempt + 1))
+        transport_fail(
+            "BLE bulk reconnect failed after retries"
+            + (f": {last_error}" if last_error else "")
+        )
+
+    async def _read_install_control_retrying(
+        self,
+        command: str,
+        matcher: Callable[[str], bool],
+    ) -> str:
+        last_error: BaseException | None = None
+        for attempt in range(BLE_BULK_V2_RECONNECT_RETRIES):
+            try:
+                return await self.read_matching(
+                    command,
+                    matcher,
+                    timeout=max(4.0, self.options.final_wait + 3.0),
+                    response_wait=max(self.options.response_wait, 0.12),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 >= BLE_BULK_V2_RECONNECT_RETRIES:
+                    break
+                detail = " ".join(str(exc).split())[:160]
+                print(
+                    "warning: BLE install control ACK "
+                    f"{attempt + 1}/{BLE_BULK_V2_RECONNECT_RETRIES} failed: "
+                    f"{type(exc).__name__}: {detail}; reconnecting",
+                    flush=True,
+                )
+                await self._refresh_bulk_connection()
+        if last_error is not None:
+            raise last_error
+        transport_fail("BLE install control failed without an error")
 
     async def install_package(
         self,
@@ -2414,8 +2512,9 @@ class BLETransport:
         progress: Callable[[str, int, int], None] | None,
         commit: bool,
     ) -> str:
+        file_items = list(files.items())
         frame_count = sum(
-            (len(data) + payload_size - 1) // payload_size for data in files.values()
+            (len(data) + payload_size - 1) // payload_size for _, data in file_items
         )
         total = 1 + len(files) + frame_count + (1 if commit else 0)
         index = 0
@@ -2427,11 +2526,9 @@ class BLETransport:
             current_command = f"vb_runtime_install_begin {package_id}"
             if progress:
                 progress(current_command, index + 1, total)
-            last_status = await self.read_matching(
+            last_status = await self._read_install_control_retrying(
                 current_command,
                 lambda status, command=current_command: install_ack_matches(status, command),
-                timeout=max(4.0, self.options.final_wait + 3.0),
-                response_wait=max(self.options.response_wait, 0.12),
             )
             if last_status.startswith("err ") or " rc=-" in last_status:
                 transport_fail(f"BLE install command failed: {last_status}")
@@ -2439,20 +2536,19 @@ class BLETransport:
             current_ack_received = True
             index += 1
 
-            for path, data in files.items():
+            for path, data in file_items:
                 transfer_id = secrets.randbits(32) or 1
-                current_command = (
+                bulk_begin_command = (
                     f"vb_runtime_install_bulk {package_id} {path} "
                     f"{len(data)} {transfer_id}"
                 )
+                current_command = bulk_begin_command
                 current_ack_received = False
                 if progress:
                     progress(current_command, index + 1, total)
-                last_status = await self.read_matching(
+                last_status = await self._read_install_control_retrying(
                     current_command,
                     lambda status, command=current_command: install_ack_matches(status, command),
-                    timeout=max(4.0, self.options.final_wait + 3.0),
-                    response_wait=max(self.options.response_wait, 0.12),
                 )
                 current_ack_received = True
                 if last_status.startswith("err ") or " rc=-" in last_status:
@@ -2461,6 +2557,7 @@ class BLETransport:
 
                 offset = 0
                 sequence = 0
+                data_reconnects = 0
                 while offset < len(data):
                     frames: list[bytes] = []
                     batch_offset = offset
@@ -2492,13 +2589,43 @@ class BLETransport:
                         f"{offset} {batch_offset}"
                     )
                     current_ack_received = False
-                    last_status = await self._send_bulk_window(
-                        transfer_id,
-                        frames,
-                        expected_offset=batch_offset,
-                        expected_next_sequence=batch_sequence,
-                    )
+                    try:
+                        last_status = await self._send_bulk_window(
+                            transfer_id,
+                            frames,
+                            expected_offset=batch_offset,
+                            expected_next_sequence=batch_sequence,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if data_reconnects >= BLE_BULK_V2_RECONNECT_RETRIES:
+                            raise
+                        data_reconnects += 1
+                        detail = " ".join(str(exc).split())[:160]
+                        print(
+                            "warning: BLE bulk data ACK failed at "
+                            f"{path}:{offset}; reconnecting "
+                            f"{data_reconnects}/{BLE_BULK_V2_RECONNECT_RETRIES}: "
+                            f"{type(exc).__name__}: {detail}",
+                            flush=True,
+                        )
+                        await self._refresh_bulk_connection()
+                        last_status = await self._read_install_control_retrying(
+                            bulk_begin_command,
+                            lambda status, command=bulk_begin_command: install_ack_matches(
+                                status, command
+                            ),
+                        )
+                        if last_status.startswith("err ") or " rc=-" in last_status:
+                            transport_fail(f"BLE bulk resume failed: {last_status}")
+                        current_command = (
+                            f"vb_runtime_install_bulk_data {transfer_id} "
+                            f"{offset} {batch_offset}"
+                        )
+                        continue
                     current_ack_received = True
+                    data_reconnects = 0
                     offset = batch_offset
                     sequence = batch_sequence
                     index += len(frames)
@@ -2669,6 +2796,29 @@ async def _self_test_ble_failed_notify_cleanup() -> None:
     assert transport._force_scan_next_connect
 
 
+async def _self_test_ble_disconnect_precedes_pause() -> None:
+    events: list[str] = []
+
+    class RecordingClient:
+        async def stop_notify(self, _uuid: str) -> None:
+            events.append("stop_notify")
+
+    class RecordingContext:
+        async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+            events.append("disconnect")
+
+    class RecordingTransport(BLETransport):
+        async def _pause_after_disconnect(self) -> None:
+            events.append("pause")
+
+    transport = RecordingTransport(BLETransportOptions(disconnect_pause=0.8))
+    transport._client = RecordingClient()
+    transport._client_context = RecordingContext()
+    transport._status_notify_started = True
+    await transport.close()
+    assert events == ["stop_notify", "disconnect", "pause"]
+
+
 async def _self_test_ble_connect_recreates_client_after_notify_auth() -> None:
     class Device:
         name = "VibeBoard"
@@ -2825,6 +2975,7 @@ def run_self_test() -> None:
     assert not _ble_gatt_cache_mismatch(RuntimeError("GATT operation timed out"))
     asyncio.run(_self_test_ble_secure_link_retry())
     asyncio.run(_self_test_ble_failed_notify_cleanup())
+    asyncio.run(_self_test_ble_disconnect_precedes_pause())
     asyncio.run(_self_test_ble_connect_recreates_client_after_notify_auth())
     assert SERIAL_APP_PAGE_LIMIT >= BLE_APP_PAGE_LIMIT > 0
     assert hasattr(BLETransport, "verify_connection")
@@ -2967,6 +3118,18 @@ def run_self_test() -> None:
     assert flow_clear_matches("noise\n[vb_runtime][flow] cleared")
     assert not flow_clear_matches("vb_runtime_flow_clear")
     assert not flow_send_matches("vb_runtime_flow_send pc.voice 7 6f6b", "pc.voice", 7)
+    lost_completion = parse_ble_bulk_ack(
+        "err install_bulk_data id=9 seq=24 next=25 offset=5484 rc=-7"
+    )
+    assert lost_completion is not None
+    assert ble_bulk_ack_confirms_progress(lost_completion, 9, 5484, 25)
+    assert not ble_bulk_ack_confirms_progress(lost_completion, 10, 5484, 25)
+    assert not ble_bulk_ack_confirms_progress(lost_completion, 9, 5485, 25)
+    crc_failure = parse_ble_bulk_ack(
+        "err install_bulk_data id=9 seq=24 next=25 offset=5484 rc=-1"
+    )
+    assert crc_failure is not None
+    assert not ble_bulk_ack_confirms_progress(crc_failure, 9, 5484, 25)
     assert parse_key_values("api=x active=demo rc=0") == {"api": "x", "active": "demo", "rc": "0"}
     pet_status_json = (
         f'{{"api":"{CODEX_PET_API}","active":1,"connected":1,'
@@ -3506,8 +3669,32 @@ def run_self_test() -> None:
             def __init__(self) -> None:
                 super().__init__(BLETransportOptions(disconnect_pause=0))
                 self.commands: list[str] = []
+                self.refresh_count = 0
+                self.control_failures = 1
+                self.data_failures = 1
                 self._bulk_v2_supported = True
                 self._client = BulkClient(self)
+
+            async def _refresh_bulk_connection(self) -> None:
+                self.refresh_count += 1
+
+            async def _send_bulk_window(
+                self,
+                transfer_id: int,
+                frames: list[bytes],
+                *,
+                expected_offset: int,
+                expected_next_sequence: int,
+            ) -> str:
+                if self.data_failures:
+                    self.data_failures -= 1
+                    raise RuntimeTransportError("fake bulk data link loss")
+                return await super()._send_bulk_window(
+                    transfer_id,
+                    frames,
+                    expected_offset=expected_offset,
+                    expected_next_sequence=expected_next_sequence,
+                )
 
             async def read_matching(
                 self,
@@ -3521,6 +3708,9 @@ def run_self_test() -> None:
                 if command.startswith("vb_runtime_install_begin "):
                     response = "ok install_begin app=demo rc=0"
                 elif command.startswith("vb_runtime_install_bulk "):
+                    if self.control_failures:
+                        self.control_failures -= 1
+                        raise RuntimeTransportError("fake install_bulk acknowledgement loss")
                     parts = command.split()
                     self._client.transfer_id = int(parts[4])
                     self._client.expected = int(parts[3])
@@ -3544,13 +3734,53 @@ def run_self_test() -> None:
 
         transport = BulkTransport()
         result = await transport.install_package(
-            "demo", {"main.lua": b"x" * 1000}, commit=True
+            "demo", {"main.lua": b"x" * 1000, "assets/data.bin": b"y" * 1000}, commit=True
         )
         assert "active=demo" in result
         assert any(command.startswith("vb_runtime_install_bulk ") for command in transport.commands)
         assert not any(command.startswith("vb_runtime_install_file ") for command in transport.commands)
-        assert transport._client.ack_count == 3
-        assert transport._client.binary_writes == 9
+        assert transport.refresh_count == 2
+        assert transport.control_failures == 0
+        assert transport.data_failures == 0
+        assert transport._client.ack_count == 11
+        assert transport._client.binary_writes == 11
+
+        class RefreshRetryTransport(BLETransport):
+            def __init__(self, failures: int) -> None:
+                super().__init__(BLETransportOptions(disconnect_pause=0))
+                self.failures = failures
+                self.connect_count = 0
+                self.close_count = 0
+                self.verify_count = 0
+
+            async def close(self) -> None:
+                self.close_count += 1
+
+            async def connect(self) -> None:
+                self.connect_count += 1
+                if self.connect_count <= self.failures:
+                    raise RuntimeTransportError("transient scan failure")
+
+            async def verify_connection(self, *, timeout: float | None = None) -> str:
+                assert timeout is not None and timeout >= 4.0
+                self.verify_count += 1
+                return "ok status api=vibeboard-huangshan-ble-install/v1 secure=1"
+
+        refresh_retry = RefreshRetryTransport(failures=1)
+        await refresh_retry._refresh_bulk_connection()
+        assert refresh_retry.connect_count == 2
+        assert refresh_retry.close_count == 2
+        assert refresh_retry.verify_count == 1
+
+        refresh_failed = RefreshRetryTransport(failures=BLE_BULK_V2_RECONNECT_RETRIES)
+        try:
+            await refresh_failed._refresh_bulk_connection()
+            raise AssertionError("exhausted BLE reconnect retries were accepted")
+        except RuntimeTransportError as exc:
+            assert "reconnect failed after retries" in str(exc)
+        assert refresh_failed.connect_count == BLE_BULK_V2_RECONNECT_RETRIES
+        assert refresh_failed.close_count == BLE_BULK_V2_RECONNECT_RETRIES + 1
+        assert refresh_failed.verify_count == 0
 
     asyncio.run(check_ble_bulk_v2_retry())
 

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -22,11 +23,26 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 CODEX_PET_APP_DIR = ROOT_DIR / "scripts" / "runtime_apps" / "codex_pet"
 CRYPTO_SCRIPT = ROOT_DIR / "scripts" / "hpet_crypto.js"
 CONVERTER_SCRIPT = ROOT_DIR / "scripts" / "build_hpet_petdex.js"
+PETDEX_STATE_CONTRACT_PATH = ROOT_DIR / "scripts" / "petdex_state_contract.json"
 DEFAULT_KEY_DIR = Path.home() / ".vibeboard" / "companion" / "keys"
 DEFAULT_CACHE_DIR = Path.home() / ".vibeboard" / "companion" / "packages"
 HPET_FILES = ("hpet.json", "catalog.txt", "preload.bin", "preview.webp", "signature.ed25519")
 PAYLOAD_FILES = ("catalog.txt", "preload.bin", "preview.webp")
+_PETDEX_STATE_CONTRACT = json.loads(PETDEX_STATE_CONTRACT_PATH.read_text(encoding="utf-8"))
+PETDEX_STATES = tuple(
+    sorted(
+        (
+            {"id": str(state["id"]), "row": int(state["row"])}
+            for state in _PETDEX_STATE_CONTRACT["states"]
+        ),
+        key=lambda state: state["row"],
+    )
+)
 BOARD_STATE_MAPPING = {
+    str(state): str(animation)
+    for state, animation in _PETDEX_STATE_CONTRACT["taskStates"].items()
+}
+LEGACY_BOARD_STATE_MAPPING = {
     "idle": "idle",
     "running": "run",
     "ready": "wave",
@@ -34,9 +50,16 @@ BOARD_STATE_MAPPING = {
     "blocked": "failed",
 }
 SAFE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
-MAX_ARCHIVE_BYTES = 4 * 1024 * 1024
-MAX_UNCOMPRESSED_BYTES = 3 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 6 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
 EXPECTED_PRELOADED_BYTES = 160 * 173 * 3 * 5 * 2
+FRAME_BYTES = 160 * 173 * 3
+V2_FRAME_MS = 120
+V2_STATE_COUNT = len(PETDEX_STATES)
+V2_MAX_FRAMES_PER_STATE = 8
+V2_PRELOAD_HEADER_SIZE = 16
+V2_PRELOAD_STATE_ENTRY_SIZE = 12
+V2_PRELOAD_MAGIC = b"VBPC"
 
 
 class HpetError(RuntimeError):
@@ -152,7 +175,8 @@ def _validated_text(value: object, label: str, limit: int) -> str:
 def _validate_manifest(manifest: object) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise HpetError("hpet.json must be an object")
-    if manifest.get("schemaVersion") != 1 or manifest.get("kind") != "vibeboard-codex-pet":
+    schema_version = manifest.get("schemaVersion")
+    if schema_version not in (1, 2) or manifest.get("kind") != "vibeboard-codex-pet":
         raise HpetError("unsupported .hpet manifest")
     slug = _validated_text(manifest.get("slug"), "slug", 24)
     if SAFE_SLUG.fullmatch(slug) is None:
@@ -168,11 +192,48 @@ def _validate_manifest(manifest: object) -> dict[str, Any]:
         raise HpetError(".hpet target must be codex_pet")
     if target.get("width") != 160 or target.get("height") != 173:
         raise HpetError("unsupported .hpet frame dimensions")
-    if target.get("framesPerState") != 2 or target.get("frameMs") != 180:
-        raise HpetError("unsupported .hpet animation timing")
-    states = manifest.get("states")
-    if states != BOARD_STATE_MAPPING:
-        raise HpetError(".hpet must provide the five semantic Codex Pet states")
+    if schema_version == 1:
+        if target.get("framesPerState") != 2 or target.get("frameMs") != 180:
+            raise HpetError("unsupported legacy .hpet animation timing")
+        states = manifest.get("states")
+        if states not in (BOARD_STATE_MAPPING, LEGACY_BOARD_STATE_MAPPING):
+            raise HpetError("legacy .hpet must provide the five semantic Codex Pet states")
+    else:
+        if target.get("preloadVersion") != 2 or target.get("stateCount") != V2_STATE_COUNT:
+            raise HpetError(".hpet v2 must provide all nine Petdex states")
+        if target.get("compression") != "zlib-state-block":
+            raise HpetError("unsupported .hpet v2 frame compression")
+        if target.get("frameMs") != V2_FRAME_MS:
+            raise HpetError("unsupported .hpet v2 animation timing")
+        if target.get("maxFramesPerState") not in range(2, V2_MAX_FRAMES_PER_STATE + 1):
+            raise HpetError("invalid .hpet v2 maximum frame count")
+        if target.get("taskStates") != BOARD_STATE_MAPPING:
+            raise HpetError(".hpet v2 task-state mapping does not match the Petdex contract")
+        states = manifest.get("states")
+        if not isinstance(states, list) or len(states) != V2_STATE_COUNT:
+            raise HpetError(".hpet v2 state index is incomplete")
+        expected = {state["id"]: state["row"] for state in PETDEX_STATES}
+        seen: set[str] = set()
+        total_frames = 0
+        for state in states:
+            if not isinstance(state, dict):
+                raise HpetError("invalid .hpet v2 state entry")
+            state_id = str(state.get("id") or "")
+            frame_count = state.get("frameCount")
+            if state_id in seen or expected.get(state_id) != state.get("row"):
+                raise HpetError("invalid .hpet v2 state mapping")
+            if not isinstance(frame_count, int) or not 2 <= frame_count <= V2_MAX_FRAMES_PER_STATE:
+                raise HpetError("invalid .hpet v2 state frame count")
+            seen.add(state_id)
+            total_frames += frame_count
+        if seen != set(expected) or target.get("totalFrames") != total_frames:
+            raise HpetError(".hpet v2 total frame count does not match its state index")
+        if target.get("maxFramesPerState") != max(int(state["frameCount"]) for state in states):
+            raise HpetError(".hpet v2 maximum frame count does not match its state index")
+        if target.get("residentCacheBytes") != FRAME_BYTES * 2 * int(target["maxFramesPerState"]):
+            raise HpetError("invalid .hpet v2 resident cache size")
+        if target.get("totalRawBytes") != FRAME_BYTES * total_frames:
+            raise HpetError("invalid .hpet v2 total raw frame size")
     file_rows = manifest.get("files")
     if not isinstance(file_rows, list) or len(file_rows) != len(PAYLOAD_FILES):
         raise HpetError("invalid .hpet file index")
@@ -199,17 +260,44 @@ def build_hpet_from_conversion(
     private_key: Path,
 ) -> HpetPackage:
     payloads = {name: (conversion_dir / name).read_bytes() for name in PAYLOAD_FILES}
-    manifest: dict[str, Any] = {
-        "schemaVersion": 1,
-        "kind": "vibeboard-codex-pet",
-        "slug": str(conversion["slug"]),
-        "name": str(conversion["name"]),
-        "author": str(conversion["author"]),
-        "license": str(conversion.get("license") or "unspecified"),
-        "sourceUrl": str(conversion["sourceUrl"]),
-        "sourceSha256": str(conversion["sourceSha256"]),
-        "converterVersion": 1,
-        "target": {
+    preload_version = int(conversion.get("preloadVersion") or 1)
+    if preload_version == 2:
+        _, _, preload_frame_counts = _split_v2_preload(payloads["preload.bin"])
+        conversion_states = conversion.get("states")
+        if not isinstance(conversion_states, Mapping):
+            raise HpetError("converter did not provide the nine-state index")
+        state_rows = [
+            {
+                "id": state["id"],
+                "row": state["row"],
+                "frameCount": int(conversion_states[state["id"]]["frameCount"]),
+            }
+            for state in PETDEX_STATES
+        ]
+        if tuple(state["frameCount"] for state in state_rows) != preload_frame_counts:
+            raise HpetError("converter state index does not match its VBPC v2 preload")
+        max_frames = max(state["frameCount"] for state in state_rows)
+        total_frames = sum(state["frameCount"] for state in state_rows)
+        target: dict[str, Any] = {
+            "appId": "codex_pet",
+            "runtimeProfile": "huangshan-pi",
+            "width": 160,
+            "height": 173,
+            "preloadVersion": 2,
+            "compression": "zlib-state-block",
+            "stateCount": V2_STATE_COUNT,
+            "totalFrames": total_frames,
+            "maxFramesPerState": max_frames,
+            "frameMs": V2_FRAME_MS,
+            "residentCacheBytes": FRAME_BYTES * 2 * max_frames,
+            "totalRawBytes": FRAME_BYTES * total_frames,
+            "taskStates": dict(BOARD_STATE_MAPPING),
+        }
+        schema_version = 2
+        converter_version = 2
+        manifest_states: object = state_rows
+    else:
+        target = {
             "appId": "codex_pet",
             "runtimeProfile": "huangshan-pi",
             "width": 160,
@@ -217,8 +305,22 @@ def build_hpet_from_conversion(
             "framesPerState": 2,
             "frameMs": 180,
             "preloadedBytes": EXPECTED_PRELOADED_BYTES,
-        },
-        "states": dict(BOARD_STATE_MAPPING),
+        }
+        schema_version = 1
+        converter_version = 1
+        manifest_states = dict(BOARD_STATE_MAPPING)
+    manifest: dict[str, Any] = {
+        "schemaVersion": schema_version,
+        "kind": "vibeboard-codex-pet",
+        "slug": str(conversion["slug"]),
+        "name": str(conversion["name"]),
+        "author": str(conversion["author"]),
+        "license": str(conversion.get("license") or "unspecified"),
+        "sourceUrl": str(conversion["sourceUrl"]),
+        "sourceSha256": str(conversion["sourceSha256"]),
+        "converterVersion": converter_version,
+        "target": target,
+        "states": manifest_states,
         "files": [
             {"path": name, "size": len(payloads[name]), "sha256": _sha256(payloads[name])}
             for name in PAYLOAD_FILES
@@ -226,7 +328,8 @@ def build_hpet_from_conversion(
     }
     manifest = _validate_manifest(manifest)
     manifest_bytes = _canonical_json(manifest) + b"\n"
-    signature = _sign(b"HPET1\n" + manifest_bytes, private_key)
+    signature_prefix = f"HPET{schema_version}\n".encode("ascii")
+    signature = _sign(signature_prefix + manifest_bytes, private_key)
     archive_files = {"hpet.json": manifest_bytes, **payloads, "signature.ed25519": signature}
     blob = _zip_bytes(archive_files)
     if len(blob) > MAX_ARCHIVE_BYTES:
@@ -269,17 +372,89 @@ def read_hpet(blob: bytes, *, public_key: Path) -> HpetPackage:
             raise HpetError(f".hpet payload integrity failed: {name}")
     if len(files["signature.ed25519"]) != 64:
         raise HpetError("invalid Ed25519 signature length")
-    _verify(b"HPET1\n" + canonical, files["signature.ed25519"], public_key)
+    signature_prefix = f"HPET{manifest['schemaVersion']}\n".encode("ascii")
+    _verify(signature_prefix + canonical, files["signature.ed25519"], public_key)
     expected_catalog = f"VBPETS1\n{manifest['slug']}|{manifest['name']}|{manifest['author']}\n".encode("utf-8")
     if files["catalog.txt"] != expected_catalog:
         raise HpetError("catalog.txt does not match hpet.json")
+    if manifest["schemaVersion"] == 2:
+        _, _, preload_frame_counts = _split_v2_preload(files["preload.bin"])
+        manifest_counts = {
+            str(state["id"]): int(state["frameCount"])
+            for state in manifest["states"]
+        }
+        if tuple(manifest_counts[state["id"]] for state in PETDEX_STATES) != preload_frame_counts:
+            raise HpetError(".hpet v2 state index does not match its preload directory")
     return HpetPackage(_sha256(blob), manifest, files)
+
+
+def _split_v2_preload(preload: bytes) -> tuple[bytes, dict[str, bytes], tuple[int, ...]]:
+    index_end = V2_PRELOAD_HEADER_SIZE + V2_STATE_COUNT * V2_PRELOAD_STATE_ENTRY_SIZE
+    if len(preload) < index_end or preload[:4] != V2_PRELOAD_MAGIC:
+        raise HpetError("invalid VBPC v2 preload header")
+    if (
+        int.from_bytes(preload[4:6], "little") != 2
+        or int.from_bytes(preload[6:8], "little") != 1
+        or int.from_bytes(preload[8:10], "little") != 160
+        or int.from_bytes(preload[10:12], "little") != 173
+        or int.from_bytes(preload[12:14], "little") != V2_STATE_COUNT
+    ):
+        raise HpetError("invalid VBPC v2 preload format")
+    expected_first = 0
+    expected_offset = index_end
+    state_files: dict[str, bytes] = {}
+    frame_counts: list[int] = []
+    for state_index in range(V2_STATE_COUNT):
+        entry_offset = V2_PRELOAD_HEADER_SIZE + state_index * V2_PRELOAD_STATE_ENTRY_SIZE
+        first_frame = int.from_bytes(preload[entry_offset : entry_offset + 2], "little")
+        frame_count = preload[entry_offset + 2]
+        flags = preload[entry_offset + 3]
+        offset = int.from_bytes(preload[entry_offset + 4 : entry_offset + 8], "little")
+        length = int.from_bytes(preload[entry_offset + 8 : entry_offset + 12], "little")
+        if (
+            first_frame != expected_first
+            or not 2 <= frame_count <= V2_MAX_FRAMES_PER_STATE
+            or flags != 0
+            or offset != expected_offset
+            or length <= 0
+            or offset > len(preload)
+            or length > len(preload) - offset
+        ):
+            raise HpetError(f"invalid VBPC v2 state block {state_index}")
+        block = preload[offset : offset + length]
+        expected_raw_size = FRAME_BYTES * frame_count
+        decoder = zlib.decompressobj()
+        try:
+            raw = decoder.decompress(block, expected_raw_size + 1)
+        except zlib.error as exc:
+            raise HpetError(f"invalid VBPC v2 compressed state {state_index}") from exc
+        if (
+            len(raw) != expected_raw_size
+            or not decoder.eof
+            or decoder.unconsumed_tail
+            or decoder.unused_data
+        ):
+            raise HpetError(f"invalid VBPC v2 decoded state {state_index}")
+        state_files[f"assets/pets/state{state_index}.bin"] = block
+        frame_counts.append(frame_count)
+        expected_first += frame_count
+        expected_offset += length
+    if expected_first != int.from_bytes(preload[14:16], "little"):
+        raise HpetError("VBPC v2 total frame count does not match its directory")
+    if expected_offset != len(preload):
+        raise HpetError("VBPC v2 state directory does not cover the preload exactly")
+    return preload[:index_end], state_files, tuple(frame_counts)
 
 
 def compose_codex_pet_runtime(package: HpetPackage) -> tuple[str, dict[str, bytes]]:
     package_id, files = load_package_from_dir(CODEX_PET_APP_DIR, "codex_pet")
     files["assets/pets/catalog.txt"] = package.files["catalog.txt"]
-    files["assets/pets/preload.bin"] = package.files["preload.bin"]
+    if package.manifest.get("schemaVersion") == 2:
+        preload_header, state_files, _ = _split_v2_preload(package.files["preload.bin"])
+        files["assets/pets/preload.bin"] = preload_header
+        files.update(state_files)
+    else:
+        files["assets/pets/preload.bin"] = package.files["preload.bin"]
     return validate_package(package_id, files)
 
 
@@ -342,6 +517,85 @@ def run_self_test() -> None:
         package_id, runtime_files = compose_codex_pet_runtime(loaded)
         if package_id != "codex_pet" or runtime_files["assets/pets/preload.bin"] != preload.read_bytes():
             raise AssertionError(".hpet Runtime composition failed")
+        v2_header = bytearray(V2_PRELOAD_HEADER_SIZE + V2_STATE_COUNT * V2_PRELOAD_STATE_ENTRY_SIZE)
+        v2_header[:4] = V2_PRELOAD_MAGIC
+        v2_header[4:6] = (2).to_bytes(2, "little")
+        v2_header[6:8] = (1).to_bytes(2, "little")
+        v2_header[8:10] = (160).to_bytes(2, "little")
+        v2_header[10:12] = (173).to_bytes(2, "little")
+        v2_header[12:14] = V2_STATE_COUNT.to_bytes(2, "little")
+        v2_header[14:16] = (V2_STATE_COUNT * 2).to_bytes(2, "little")
+        blocks: list[bytes] = []
+        block_offset = len(v2_header)
+        for state_index in range(V2_STATE_COUNT):
+            raw = bytes([state_index + 1]) * (FRAME_BYTES * 2)
+            block = zlib.compress(raw)
+            entry_offset = V2_PRELOAD_HEADER_SIZE + state_index * V2_PRELOAD_STATE_ENTRY_SIZE
+            v2_header[entry_offset : entry_offset + 2] = (state_index * 2).to_bytes(2, "little")
+            v2_header[entry_offset + 2] = 2
+            v2_header[entry_offset + 4 : entry_offset + 8] = block_offset.to_bytes(4, "little")
+            v2_header[entry_offset + 8 : entry_offset + 12] = len(block).to_bytes(4, "little")
+            blocks.append(block)
+            block_offset += len(block)
+        split_header, split_files, frame_counts = _split_v2_preload(bytes(v2_header) + b"".join(blocks))
+        if (
+            split_header != bytes(v2_header)
+            or len(split_files) != V2_STATE_COUNT
+            or frame_counts != (2,) * V2_STATE_COUNT
+        ):
+            raise AssertionError("VBPC v2 Runtime splitting failed")
+        for state_index, block in enumerate(blocks):
+            if split_files[f"assets/pets/state{state_index}.bin"] != block:
+                raise AssertionError("VBPC v2 state block was split incorrectly")
+        converted_v2 = temp / "converted-v2"
+        converted_v2.mkdir()
+        converted_v2.joinpath("catalog.txt").write_bytes(catalog.read_bytes())
+        converted_v2.joinpath("preload.bin").write_bytes(bytes(v2_header) + b"".join(blocks))
+        converted_v2.joinpath("preview.webp").write_bytes(b"RIFF\x04\x00\x00\x00WEBP")
+        conversion_v2 = {
+            **conversion,
+            "preloadVersion": 2,
+            "states": {
+                state["id"]: {"frameCount": 2}
+                for state in PETDEX_STATES
+            },
+        }
+        output_v2 = temp / "pet-v2.hpet"
+        built_v2 = build_hpet_from_conversion(
+            converted_v2, conversion_v2, output_v2, private_key=private_key
+        )
+        loaded_v2 = read_hpet(output_v2.read_bytes(), public_key=public_key)
+        if loaded_v2.digest != built_v2.digest or loaded_v2.manifest.get("schemaVersion") != 2:
+            raise AssertionError(".hpet v2 round trip failed")
+        mismatched_v2 = {**conversion_v2, "states": dict(conversion_v2["states"])}
+        mismatched_v2["states"][PETDEX_STATES[0]["id"]] = {"frameCount": 3}
+        try:
+            build_hpet_from_conversion(
+                converted_v2, mismatched_v2, temp / "mismatched-v2.hpet", private_key=private_key
+            )
+        except HpetError:
+            pass
+        else:
+            raise AssertionError(".hpet accepted a state index that disagrees with its preload")
+        invalid_preloads: list[tuple[str, bytes]] = []
+        overlapping = bytearray(v2_header)
+        second_entry = V2_PRELOAD_HEADER_SIZE + V2_PRELOAD_STATE_ENTRY_SIZE
+        first_block_offset = int.from_bytes(
+            v2_header[V2_PRELOAD_HEADER_SIZE + 4 : V2_PRELOAD_HEADER_SIZE + 8], "little"
+        )
+        overlapping[second_entry + 4 : second_entry + 8] = first_block_offset.to_bytes(4, "little")
+        invalid_preloads.append(("overlapping state blocks", bytes(overlapping) + b"".join(blocks)))
+        invalid_preloads.append(("trailing bytes", bytes(v2_header) + b"".join(blocks) + b"trailing"))
+        damaged = bytearray(bytes(v2_header) + b"".join(blocks))
+        damaged[first_block_offset] ^= 0xFF
+        invalid_preloads.append(("damaged zlib stream", bytes(damaged)))
+        for label, invalid_preload in invalid_preloads:
+            try:
+                _split_v2_preload(invalid_preload)
+            except HpetError:
+                pass
+            else:
+                raise AssertionError(f"VBPC v2 accepted {label}")
         tampered = bytearray(output.read_bytes())
         tampered[-8] ^= 1
         try:

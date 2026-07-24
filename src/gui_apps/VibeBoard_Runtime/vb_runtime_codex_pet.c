@@ -33,28 +33,34 @@
 #define VB_PET_ASSET_SLUG_MAX 33
 #define VB_PET_ASSET_NAME_MAX 33
 #define VB_PET_ASSET_CATALOG_MAX 1024
-#define VB_PET_ASSET_STATE_COUNT 5
+#define VB_PET_ASSET_STATE_COUNT 9
 #define VB_PET_ROCKY_RLE_MAGIC 0x454c5256u
 #define VB_PET_ROCKY_RLE_VERSION 1u
 #define VB_PET_ROCKY_RLE_HEADER_SIZE 20u
 #define VB_PET_RLE_RECORD_BATCH 800u
 #define VB_PET_PRELOAD_PATH VB_PET_ASSET_ROOT "/preload.bin"
+#define VB_PET_PRELOAD_STATE_PATH_FORMAT VB_PET_ASSET_ROOT "/state%d.bin"
 #define VB_PET_PRELOAD_MAGIC 0x43504256u
-#define VB_PET_PRELOAD_VERSION 1u
+#define VB_PET_PRELOAD_LEGACY_VERSION 1u
+#define VB_PET_PRELOAD_VERSION 2u
 #define VB_PET_PRELOAD_HEADER_SIZE 16u
-#define VB_PET_PRELOAD_PACK_STATE_COUNT VB_PET_ASSET_STATE_COUNT
-#define VB_PET_PRELOAD_STATE_COUNT VB_PET_ASSET_STATE_COUNT
-#define VB_PET_PRELOAD_FRAMES_PER_STATE 2
+#define VB_PET_PRELOAD_STATE_ENTRY_SIZE 12u
+#define VB_PET_PRELOAD_LEGACY_STATE_COUNT 5u
+#define VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE 2u
 #define VB_PET_STATUS_API "vibeboard-huangshan-codex-pet/v1"
 #define VB_PET_PRELOAD_STORAGE_WAIT_MS 3000
-#define VB_PET_PRELOAD_MAX_BYTES (900000u)
-#define VB_PET_PRELOAD_MAX_COMPRESSED_BYTES (128u * 1024u)
+#define VB_PET_PRELOAD_MAX_BYTES (1400000u)
+#define VB_PET_PRELOAD_MAX_COMPRESSED_BYTES (1024u * 1024u)
+#define VB_PET_PRELOAD_CACHE_BANKS 2
+#define VB_PET_PRELOAD_THREAD_STACK 4096
+#define VB_PET_STARTUP_ANIMATION_DELAY_MS 2500
 #define VB_PET_FLOW_QUEUE_SIZE 16
 #define VB_PET_FLOW_CHANNEL_MAX 25
 #define VB_PET_FLOW_PAYLOAD_MAX 193
-#define VB_PET_RUNTIME_FRAME_LIMIT 2
+#define VB_PET_RUNTIME_FRAME_LIMIT VB_PET_MAX_ASSET_FRAMES
 #define VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)
-#define VB_PET_NATIVE_FRAME_MS 180
+#define VB_PET_NATIVE_FRAME_MS 120
+#define VB_PET_LEGACY_FRAME_MS 180
 #define VB_PET_IMAGE_X 115
 #define VB_PET_IMAGE_Y 115
 #define VB_PET_IMAGE_ZOOM 360
@@ -94,6 +100,19 @@ typedef enum
     VB_PET_DISCONNECTED
 } vb_pet_state_t;
 
+typedef enum
+{
+    VB_PET_ASSET_IDLE = 0,
+    VB_PET_ASSET_RUN_RIGHT,
+    VB_PET_ASSET_RUN_LEFT,
+    VB_PET_ASSET_WAVING,
+    VB_PET_ASSET_JUMPING,
+    VB_PET_ASSET_FAILED,
+    VB_PET_ASSET_WAITING,
+    VB_PET_ASSET_RUNNING,
+    VB_PET_ASSET_REVIEW
+} vb_pet_asset_state_t;
+
 typedef struct
 {
     int active;
@@ -132,14 +151,45 @@ typedef struct
     int custom_displayed_frame;
     int custom_frame_ms;
     uint8_t *preloaded_data;
+    uint8_t *preload_compressed;
     uint32_t preloaded_data_size;
-    uint8_t preloaded_frame_counts[VB_PET_MAX_ASSETS][VB_PET_PRELOAD_STATE_COUNT];
+    uint32_t preload_raw_frame_size;
+    uint32_t preload_max_compressed;
+    uint32_t preload_state_offsets[VB_PET_ASSET_STATE_COUNT];
+    uint32_t preload_state_lengths[VB_PET_ASSET_STATE_COUNT];
+    uint32_t preload_legacy_offsets[VB_PET_PRELOAD_LEGACY_STATE_COUNT]
+                                      [VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE];
+    uint32_t preload_legacy_lengths[VB_PET_PRELOAD_LEGACY_STATE_COUNT]
+                                      [VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE];
+    uint8_t preload_state_frame_counts[VB_PET_ASSET_STATE_COUNT];
+    uint8_t preload_version;
+    uint8_t preload_max_frames;
+    uint8_t preload_split;
+    int cache_state[VB_PET_PRELOAD_CACHE_BANKS];
+    uint8_t cache_frame_counts[VB_PET_PRELOAD_CACHE_BANKS];
+    int active_cache_bank;
+    int requested_asset_state;
+    volatile uint32_t loader_request_sequence;
+    volatile uint32_t loader_completed_sequence;
+    uint32_t loader_applied_sequence;
+    volatile int loader_request_state;
+    volatile int loader_request_bank;
+    volatile int loader_completed_state;
+    volatile int loader_completed_bank;
+    volatile int loader_completed_result;
+    volatile int loader_stop;
+    rt_thread_t loader_thread;
+    rt_sem_t loader_sem;
+    int preview_asset_state;
+    int transient_asset_state;
+    int transient_started;
     uint32_t ui_tick_count;
     int pet_index;
     int pet_count;
     volatile int pending_pet_selection;
     int pending_pet_attempts;
     uint32_t custom_next_frame_at;
+    uint32_t startup_transient_at;
     uint32_t pending_pet_retry_at;
     int touch_press_x;
     int touch_press_y;
@@ -167,8 +217,7 @@ typedef struct
     lv_obj_t *right_ear;
     lv_obj_t *pet_image;
     lv_img_dsc_t *rocky_frames[5][2];
-    lv_img_dsc_t preloaded_frames[VB_PET_MAX_ASSETS][VB_PET_PRELOAD_STATE_COUNT]
-                                       [VB_PET_PRELOAD_FRAMES_PER_STATE];
+    lv_img_dsc_t preloaded_frames[VB_PET_PRELOAD_CACHE_BANKS][VB_PET_MAX_ASSET_FRAMES];
     lv_obj_t *left_eye;
     lv_obj_t *right_eye;
     lv_obj_t *mouth;
@@ -209,6 +258,10 @@ typedef struct
     int custom_frame_count;
     int custom_frame_index;
     int custom_frame_ms;
+    int custom_state;
+    int requested_asset_state;
+    int preload_version;
+    int asset_state_count;
     uint32_t preloaded_data_size;
     uint32_t ui_tick_count;
     uint32_t queued_flows;
@@ -514,159 +567,346 @@ static int vb_pet_read_text(const char *path, char *dst, rt_size_t cap)
     return RT_EOK;
 }
 
+static const char *vb_pet_asset_state_name(int state)
+{
+    static const char *const names[VB_PET_ASSET_STATE_COUNT] = {
+        "idle", "runRight", "runLeft", "waving", "jumping",
+        "failed", "waiting", "running", "review"
+    };
+    return state >= 0 && state < VB_PET_ASSET_STATE_COUNT ? names[state] : "none";
+}
+
 static int vb_pet_asset_state_index(void)
 {
+    if (g_pet.approval_pending) return VB_PET_ASSET_REVIEW;
     switch (g_pet.state)
     {
-    case VB_PET_RECORDING: return 3;
-    case VB_PET_TRANSCRIBING: return 4;
-    case VB_PET_RUNNING: return 4;
-    case VB_PET_NEEDS_INPUT: return 3;
-    case VB_PET_READY: return 1;
-    case VB_PET_ERROR: return 2;
-    default: return 0;
+    case VB_PET_RECORDING: return VB_PET_ASSET_WAVING;
+    case VB_PET_TRANSCRIBING:
+    case VB_PET_RUNNING: return VB_PET_ASSET_RUNNING;
+    case VB_PET_NEEDS_INPUT: return VB_PET_ASSET_WAITING;
+    case VB_PET_READY: return VB_PET_ASSET_WAVING;
+    case VB_PET_ERROR: return VB_PET_ASSET_FAILED;
+    default: return VB_PET_ASSET_IDLE;
     }
 }
 
-static int vb_pet_preload_state_index(int asset_state)
+static int vb_pet_desired_asset_state(void)
 {
-    return asset_state >= 0 && asset_state < VB_PET_PRELOAD_STATE_COUNT ? asset_state : -1;
+    if (g_pet.preview_asset_state >= 0) return g_pet.preview_asset_state;
+    return g_pet.transient_asset_state >= 0 ?
+           g_pet.transient_asset_state : vb_pet_asset_state_index();
+}
+
+static int vb_pet_legacy_state_index(int asset_state)
+{
+    switch (asset_state)
+    {
+    case VB_PET_ASSET_IDLE: return 0;
+    case VB_PET_ASSET_WAVING:
+    case VB_PET_ASSET_JUMPING: return 1;
+    case VB_PET_ASSET_FAILED: return 2;
+    case VB_PET_ASSET_WAITING:
+    case VB_PET_ASSET_REVIEW: return 3;
+    case VB_PET_ASSET_RUN_RIGHT:
+    case VB_PET_ASSET_RUN_LEFT:
+    case VB_PET_ASSET_RUNNING: return 4;
+    default: return -1;
+    }
+}
+
+static void vb_pet_stop_preload_worker(void)
+{
+    if (g_pet.loader_thread)
+    {
+        g_pet.loader_stop = 1;
+        if (g_pet.loader_sem) rt_sem_release(g_pet.loader_sem);
+        while (g_pet.loader_thread) rt_thread_mdelay(10);
+    }
+    if (g_pet.loader_sem)
+    {
+        rt_sem_delete(g_pet.loader_sem);
+        g_pet.loader_sem = RT_NULL;
+    }
 }
 
 static void vb_pet_release_preloaded_assets(void)
 {
-    int pet;
-    int state;
+    int bank;
     int frame;
+    vb_pet_stop_preload_worker();
     vb_pet_clear_custom_state();
-    for (pet = 0; pet < VB_PET_MAX_ASSETS; pet++)
+    for (bank = 0; bank < VB_PET_PRELOAD_CACHE_BANKS; bank++)
     {
-        for (state = 0; state < VB_PET_PRELOAD_STATE_COUNT; state++)
+        for (frame = 0; frame < VB_PET_MAX_ASSET_FRAMES; frame++)
         {
-            for (frame = 0; frame < VB_PET_PRELOAD_FRAMES_PER_STATE; frame++)
-            {
-                lv_img_dsc_t *image = &g_pet.preloaded_frames[pet][state][frame];
-                if (image->data) lv_img_cache_invalidate_src(image);
-            }
+            lv_img_dsc_t *image = &g_pet.preloaded_frames[bank][frame];
+            if (image->data) lv_img_cache_invalidate_src(image);
         }
     }
+    if (g_pet.preload_compressed) app_cache_free(g_pet.preload_compressed);
     if (g_pet.preloaded_data) app_cache_free(g_pet.preloaded_data);
+    g_pet.preload_compressed = RT_NULL;
     g_pet.preloaded_data = RT_NULL;
     g_pet.preloaded_data_size = 0;
-    rt_memset(g_pet.preloaded_frame_counts, 0, sizeof(g_pet.preloaded_frame_counts));
     rt_memset(g_pet.preloaded_frames, 0, sizeof(g_pet.preloaded_frames));
 }
 
-static int vb_pet_validate_preload_index(const uint8_t *pack, uint32_t index_bytes,
-                                         off_t file_size, uint32_t *max_compressed)
+static int vb_pet_preload_segment_valid(uint32_t offset, uint32_t length,
+                                        uint32_t minimum_offset, off_t file_size)
 {
-    uint32_t entry_count = index_bytes / 8u;
-    uint32_t entry;
-    if (!pack || !max_compressed || index_bytes == 0 || index_bytes % 8u != 0) return 0;
-    *max_compressed = 0;
-    for (entry = 0; entry < entry_count; entry++)
-    {
-        uint32_t offset = vb_pet_read_le32(&pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u]);
-        uint32_t length = vb_pet_read_le32(&pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u + 4u]);
-        if (offset < VB_PET_PRELOAD_HEADER_SIZE + index_bytes || length == 0 ||
-            length > VB_PET_PRELOAD_MAX_COMPRESSED_BYTES ||
-            (off_t)offset > file_size || (off_t)length > file_size - (off_t)offset)
-            return 0;
-        if (length > *max_compressed) *max_compressed = length;
-    }
-    return *max_compressed > 0;
+    return offset >= minimum_offset && length > 0 &&
+           length <= VB_PET_PRELOAD_MAX_COMPRESSED_BYTES &&
+           (off_t)offset <= file_size &&
+           (off_t)length <= file_size - (off_t)offset;
 }
 
-static int vb_pet_fill_preloaded_assets_unlocked(void)
+static int vb_pet_parse_preload_unlocked(void)
 {
     uint8_t pack[VB_PET_PRELOAD_HEADER_SIZE +
-                 VB_PET_MAX_ASSETS * VB_PET_PRELOAD_PACK_STATE_COUNT *
-                 VB_PET_PRELOAD_FRAMES_PER_STATE * 8u];
-    uint8_t *compressed = RT_NULL;
-    uint8_t *cursor;
-    uint32_t entry_count;
-    uint32_t index_bytes;
-    uint32_t max_compressed;
-    uint32_t loaded_compressed = 0;
+                 VB_PET_ASSET_STATE_COUNT * VB_PET_PRELOAD_STATE_ENTRY_SIZE];
     uint32_t raw_size;
-    uint32_t total_bytes;
+    uint32_t resident_bytes;
+    uint32_t max_compressed = 0;
+    uint32_t expected_first = 0;
+    uint32_t index_bytes;
     uint16_t width;
     uint16_t height;
+    uint16_t version;
     struct stat st;
     int fd = -1;
-    int pet;
     int state;
+    int bank;
     int frame;
     int result = 0;
+
     fd = open(VB_PET_PRELOAD_PATH, O_RDONLY);
     if (fd < 0 || vb_pet_read_full(fd, pack, VB_PET_PRELOAD_HEADER_SIZE) != RT_EOK ||
         fstat(fd, &st) != 0) goto finish;
+    version = vb_pet_read_le16(&pack[4]);
     width = vb_pet_read_le16(&pack[8]);
     height = vb_pet_read_le16(&pack[10]);
-    entry_count = (uint32_t)g_pet.pet_count * VB_PET_PRELOAD_PACK_STATE_COUNT *
-                  VB_PET_PRELOAD_FRAMES_PER_STATE;
-    index_bytes = entry_count * 8u;
     if (vb_pet_read_le32(&pack[0]) != VB_PET_PRELOAD_MAGIC ||
-        vb_pet_read_le16(&pack[4]) != VB_PET_PRELOAD_VERSION ||
         vb_pet_read_le16(&pack[6]) != g_pet.pet_count ||
-        width == 0 || width > 240 || height == 0 || height > 240 ||
-        vb_pet_read_le16(&pack[12]) != VB_PET_PRELOAD_PACK_STATE_COUNT ||
-        vb_pet_read_le16(&pack[14]) != VB_PET_PRELOAD_FRAMES_PER_STATE ||
-        vb_pet_read_full(fd, &pack[VB_PET_PRELOAD_HEADER_SIZE], index_bytes) != RT_EOK ||
-        !vb_pet_validate_preload_index(pack, index_bytes, st.st_size, &max_compressed))
-        goto finish;
+        width == 0 || width > 240 || height == 0 || height > 240) goto finish;
     raw_size = (uint32_t)width * (uint32_t)height * 3u;
-    total_bytes = raw_size * (uint32_t)g_pet.pet_count *
-                  VB_PET_PRELOAD_STATE_COUNT * VB_PET_PRELOAD_FRAMES_PER_STATE;
-    if (total_bytes == 0 || total_bytes > VB_PET_PRELOAD_MAX_BYTES) goto finish;
-    g_pet.preloaded_data = (uint8_t *)app_cache_alloc(total_bytes, IMAGE_CACHE_PSRAM);
-    compressed = (uint8_t *)app_cache_alloc(max_compressed, IMAGE_CACHE_PSRAM);
-    if (!g_pet.preloaded_data || !compressed) goto finish;
-    g_pet.preloaded_data_size = total_bytes;
-    cursor = g_pet.preloaded_data;
-    for (pet = 0; pet < g_pet.pet_count; pet++)
+    g_pet.preload_max_frames = 0;
+    if (version == VB_PET_PRELOAD_VERSION)
     {
-        for (state = 0; state < VB_PET_PRELOAD_STATE_COUNT; state++)
+        uint16_t total_frames = vb_pet_read_le16(&pack[14]);
+        if (vb_pet_read_le16(&pack[12]) != VB_PET_ASSET_STATE_COUNT ||
+            total_frames < VB_PET_ASSET_STATE_COUNT * 2u ||
+            total_frames > VB_PET_ASSET_STATE_COUNT * VB_PET_MAX_ASSET_FRAMES)
+            goto finish;
+        index_bytes = VB_PET_ASSET_STATE_COUNT * VB_PET_PRELOAD_STATE_ENTRY_SIZE;
+        if (vb_pet_read_full(fd, &pack[VB_PET_PRELOAD_HEADER_SIZE], index_bytes) != RT_EOK)
+            goto finish;
+        g_pet.preload_split = st.st_size ==
+            (off_t)(VB_PET_PRELOAD_HEADER_SIZE + index_bytes);
+        for (state = 0; state < VB_PET_ASSET_STATE_COUNT; state++)
         {
-            for (frame = 0; frame < VB_PET_PRELOAD_FRAMES_PER_STATE; frame++)
+            const uint8_t *entry = &pack[VB_PET_PRELOAD_HEADER_SIZE +
+                                         state * VB_PET_PRELOAD_STATE_ENTRY_SIZE];
+            uint32_t first = vb_pet_read_le16(entry);
+            uint32_t count = entry[2];
+            uint32_t offset = vb_pet_read_le32(entry + 4);
+            uint32_t length = vb_pet_read_le32(entry + 8);
+            if (entry[3] != 0 || first != expected_first || count < 2 ||
+                count > VB_PET_MAX_ASSET_FRAMES) goto finish;
+            if (g_pet.preload_split)
             {
-                uint32_t entry = ((uint32_t)pet * VB_PET_PRELOAD_PACK_STATE_COUNT +
-                                  (uint32_t)state) * VB_PET_PRELOAD_FRAMES_PER_STATE +
-                                 (uint32_t)frame;
-                uint32_t offset = vb_pet_read_le32(
-                    &pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u]);
-                uint32_t length = vb_pet_read_le32(
-                    &pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u + 4u]);
-                uLongf decoded_size = raw_size;
-                lv_img_dsc_t *image = &g_pet.preloaded_frames[pet][state][frame];
-                if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
-                    vb_pet_read_full(fd, compressed, length) != RT_EOK ||
-                    uncompress(cursor, &decoded_size, compressed, length) != Z_OK ||
-                    decoded_size != raw_size) goto finish;
-                rt_memset(image, 0, sizeof(*image));
-                image->header.always_zero = 0;
-                image->header.w = width;
-                image->header.h = height;
-                image->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
-                image->data_size = raw_size;
-                image->data = cursor;
-                cursor += raw_size;
-                loaded_compressed += length;
-                rt_thread_yield();
+                char state_path[96];
+                struct stat state_st;
+                rt_snprintf(state_path, sizeof(state_path),
+                            VB_PET_PRELOAD_STATE_PATH_FORMAT, state);
+                if (stat(state_path, &state_st) != 0 || state_st.st_size != (off_t)length)
+                    goto finish;
             }
-            g_pet.preloaded_frame_counts[pet][state] = VB_PET_PRELOAD_FRAMES_PER_STATE;
+            else if (!vb_pet_preload_segment_valid(offset, length,
+                         VB_PET_PRELOAD_HEADER_SIZE + index_bytes, st.st_size)) goto finish;
+            g_pet.preload_state_frame_counts[state] = (uint8_t)count;
+            g_pet.preload_state_offsets[state] = offset;
+            g_pet.preload_state_lengths[state] = length;
+            if (count > g_pet.preload_max_frames) g_pet.preload_max_frames = (uint8_t)count;
+            if (length > max_compressed) max_compressed = length;
+            expected_first += count;
+        }
+        if (expected_first != total_frames) goto finish;
+    }
+    else if (version == VB_PET_PRELOAD_LEGACY_VERSION)
+    {
+        uint32_t entry;
+        uint32_t minimum_offset;
+        if (vb_pet_read_le16(&pack[12]) != VB_PET_PRELOAD_LEGACY_STATE_COUNT ||
+            vb_pet_read_le16(&pack[14]) != VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE)
+            goto finish;
+        index_bytes = VB_PET_PRELOAD_LEGACY_STATE_COUNT *
+                      VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE * 8u;
+        minimum_offset = VB_PET_PRELOAD_HEADER_SIZE + index_bytes;
+        if (vb_pet_read_full(fd, &pack[VB_PET_PRELOAD_HEADER_SIZE], index_bytes) != RT_EOK)
+            goto finish;
+        for (entry = 0; entry < VB_PET_PRELOAD_LEGACY_STATE_COUNT *
+                                   VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; entry++)
+        {
+            uint32_t offset = vb_pet_read_le32(
+                &pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u]);
+            uint32_t length = vb_pet_read_le32(
+                &pack[VB_PET_PRELOAD_HEADER_SIZE + entry * 8u + 4u]);
+            int legacy_state = (int)(entry / VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE);
+            int legacy_frame = (int)(entry % VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE);
+            if (!vb_pet_preload_segment_valid(offset, length, minimum_offset, st.st_size))
+                goto finish;
+            g_pet.preload_legacy_offsets[legacy_state][legacy_frame] = offset;
+            g_pet.preload_legacy_lengths[legacy_state][legacy_frame] = length;
+            if (length > max_compressed) max_compressed = length;
+        }
+        for (state = 0; state < VB_PET_ASSET_STATE_COUNT; state++)
+            g_pet.preload_state_frame_counts[state] = VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE;
+        g_pet.preload_max_frames = VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE;
+    }
+    else goto finish;
+
+    resident_bytes = raw_size * (uint32_t)g_pet.preload_max_frames *
+                     VB_PET_PRELOAD_CACHE_BANKS;
+    if (resident_bytes == 0 || resident_bytes > VB_PET_PRELOAD_MAX_BYTES ||
+        max_compressed == 0) goto finish;
+    g_pet.preloaded_data = (uint8_t *)app_cache_alloc(resident_bytes, IMAGE_CACHE_PSRAM);
+    g_pet.preload_compressed = (uint8_t *)app_cache_alloc(max_compressed, IMAGE_CACHE_PSRAM);
+    if (!g_pet.preloaded_data || !g_pet.preload_compressed) goto finish;
+    g_pet.preloaded_data_size = resident_bytes;
+    g_pet.preload_raw_frame_size = raw_size;
+    g_pet.preload_max_compressed = max_compressed;
+    g_pet.preload_version = (uint8_t)version;
+    for (bank = 0; bank < VB_PET_PRELOAD_CACHE_BANKS; bank++)
+    {
+        g_pet.cache_state[bank] = -1;
+        for (frame = 0; frame < g_pet.preload_max_frames; frame++)
+        {
+            lv_img_dsc_t *image = &g_pet.preloaded_frames[bank][frame];
+            rt_memset(image, 0, sizeof(*image));
+            image->header.always_zero = 0;
+            image->header.w = width;
+            image->header.h = height;
+            image->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
+            image->data_size = raw_size;
+            image->data = g_pet.preloaded_data +
+                ((uint32_t)bank * g_pet.preload_max_frames + (uint32_t)frame) * raw_size;
         }
     }
-    rt_kprintf("[vb_runtime][codex_pet] preloaded pets=%d states=%d frames=%d bytes=%lu compressed=%lu\n",
-               g_pet.pet_count, g_pet.pet_count * VB_PET_PRELOAD_STATE_COUNT,
-               g_pet.pet_count * VB_PET_PRELOAD_FRAMES_PER_STATE,
-               (unsigned long)g_pet.preloaded_data_size,
-               (unsigned long)loaded_compressed);
     result = 1;
 finish:
-    if (compressed) app_cache_free(compressed);
     if (fd >= 0) close(fd);
     return result;
+}
+
+static int vb_pet_load_state_unlocked(int state, int bank)
+{
+    char state_path[96];
+    uint8_t *target;
+    uint32_t frame_count;
+    int fd = -1;
+    int result = 0;
+    if (!g_pet.preloaded_data || !g_pet.preload_compressed ||
+        state < 0 || state >= VB_PET_ASSET_STATE_COUNT ||
+        bank < 0 || bank >= VB_PET_PRELOAD_CACHE_BANKS) return 0;
+    frame_count = g_pet.preload_state_frame_counts[state];
+    target = g_pet.preloaded_data +
+        (uint32_t)bank * g_pet.preload_max_frames * g_pet.preload_raw_frame_size;
+    if (g_pet.preload_version == VB_PET_PRELOAD_VERSION && g_pet.preload_split)
+    {
+        rt_snprintf(state_path, sizeof(state_path),
+                    VB_PET_PRELOAD_STATE_PATH_FORMAT, state);
+        fd = open(state_path, O_RDONLY);
+    }
+    else fd = open(VB_PET_PRELOAD_PATH, O_RDONLY);
+    if (fd < 0) goto finish;
+    if (g_pet.preload_version == VB_PET_PRELOAD_VERSION)
+    {
+        uint32_t offset = g_pet.preload_split ? 0u : g_pet.preload_state_offsets[state];
+        uint32_t length = g_pet.preload_state_lengths[state];
+        uLongf decoded_size = g_pet.preload_raw_frame_size * frame_count;
+        if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
+            vb_pet_read_full(fd, g_pet.preload_compressed, length) != RT_EOK ||
+            uncompress(target, &decoded_size, g_pet.preload_compressed, length) != Z_OK ||
+            decoded_size != g_pet.preload_raw_frame_size * frame_count) goto finish;
+    }
+    else
+    {
+        int legacy_state = vb_pet_legacy_state_index(state);
+        int frame;
+        if (legacy_state < 0) goto finish;
+        for (frame = 0; frame < VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; frame++)
+        {
+            uint32_t offset = g_pet.preload_legacy_offsets[legacy_state][frame];
+            uint32_t length = g_pet.preload_legacy_lengths[legacy_state][frame];
+            uLongf decoded_size = g_pet.preload_raw_frame_size;
+            if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
+                vb_pet_read_full(fd, g_pet.preload_compressed, length) != RT_EOK ||
+                uncompress(target + (uint32_t)frame * g_pet.preload_raw_frame_size,
+                           &decoded_size, g_pet.preload_compressed, length) != Z_OK ||
+                decoded_size != g_pet.preload_raw_frame_size) goto finish;
+        }
+    }
+    result = 1;
+finish:
+    if (fd >= 0) close(fd);
+    return result;
+}
+
+static void vb_pet_preload_worker(void *parameter)
+{
+    (void)parameter;
+    while (!g_pet.loader_stop)
+    {
+        uint32_t sequence;
+        int state;
+        int bank;
+        int result = 0;
+        if (rt_sem_take(g_pet.loader_sem, RT_WAITING_FOREVER) != RT_EOK) continue;
+        if (g_pet.loader_stop) break;
+        /* Coalesce state changes queued while SD/zlib work was in progress.
+         * Replaying stale semaphore tokens can otherwise overwrite a bank that
+         * the LVGL thread has already activated from the latest completion. */
+        while (rt_sem_take(g_pet.loader_sem, RT_WAITING_NO) == RT_EOK) {}
+        if (g_pet.loader_stop) break;
+        sequence = g_pet.loader_request_sequence;
+        state = g_pet.loader_request_state;
+        bank = g_pet.loader_request_bank;
+        g_vb_pet_loader_phase = 30;
+        if (vb_runtime_storage_take(VB_PET_PRELOAD_STORAGE_WAIT_MS) == RT_EOK)
+        {
+            g_vb_pet_loader_phase = 32;
+            result = vb_pet_load_state_unlocked(state, bank);
+            vb_runtime_storage_release();
+        }
+        g_pet.loader_completed_state = state;
+        g_pet.loader_completed_bank = bank;
+        g_pet.loader_completed_result = result;
+        g_pet.loader_completed_sequence = sequence;
+        g_vb_pet_loader_phase = 0;
+    }
+    g_vb_pet_loader_phase = 0;
+    g_pet.loader_thread = RT_NULL;
+}
+
+static int vb_pet_start_preload_worker(void)
+{
+    rt_thread_t thread;
+    g_pet.loader_sem = rt_sem_create("vbpetld", 0, RT_IPC_FLAG_FIFO);
+    if (!g_pet.loader_sem) return 0;
+    thread = rt_thread_create("vbpetld", vb_pet_preload_worker, RT_NULL,
+                              VB_PET_PRELOAD_THREAD_STACK,
+                              RT_THREAD_PRIORITY_MIDDLE + 10,
+                              RT_THREAD_TICK_DEFAULT);
+    if (!thread)
+    {
+        rt_sem_delete(g_pet.loader_sem);
+        g_pet.loader_sem = RT_NULL;
+        return 0;
+    }
+    g_pet.loader_thread = thread;
+    rt_thread_startup(thread);
+    return 1;
 }
 
 static int vb_pet_preload_assets(void)
@@ -674,27 +914,38 @@ static int vb_pet_preload_assets(void)
     int result = 0;
     if (vb_runtime_storage_take(VB_PET_PRELOAD_STORAGE_WAIT_MS) != RT_EOK) return 0;
     g_vb_pet_loader_phase = 20;
-    g_vb_pet_loader_phase = 22;
-    result = vb_pet_fill_preloaded_assets_unlocked();
-finish:
+    if (vb_pet_parse_preload_unlocked())
+    {
+        g_vb_pet_loader_phase = 22;
+        result = vb_pet_load_state_unlocked(VB_PET_ASSET_IDLE, 0);
+    }
     vb_runtime_storage_release();
     g_vb_pet_loader_phase = 0;
+    if (result)
+    {
+        g_pet.cache_state[0] = VB_PET_ASSET_IDLE;
+        g_pet.cache_frame_counts[0] = g_pet.preload_state_frame_counts[VB_PET_ASSET_IDLE];
+        g_pet.active_cache_bank = 0;
+        result = vb_pet_start_preload_worker();
+    }
     if (!result) vb_pet_release_preloaded_assets();
+    else
+        rt_kprintf("[vb_runtime][codex_pet] preload v%d states=%d cache=%lu max_frames=%d\n",
+                   g_pet.preload_version,
+                   g_pet.preload_version == VB_PET_PRELOAD_VERSION ?
+                       VB_PET_ASSET_STATE_COUNT : VB_PET_PRELOAD_LEGACY_STATE_COUNT,
+                   (unsigned long)g_pet.preloaded_data_size, g_pet.preload_max_frames);
     return result;
 }
 
 static void vb_pet_update_custom_frame(void)
 {
     lv_img_dsc_t *image;
-    int preload_state;
     if (!g_pet.custom_available || !g_pet.pet_image || g_pet.custom_frame_count < 1) return;
     if (g_pet.custom_frame_index < 0 || g_pet.custom_frame_index >= g_pet.custom_frame_count)
         g_pet.custom_frame_index = 0;
     if (g_pet.custom_displayed_frame == g_pet.custom_frame_index) return;
-    preload_state = vb_pet_preload_state_index(g_pet.custom_state);
-    if (preload_state < 0) return;
-    image = &g_pet.preloaded_frames[g_pet.pet_index][preload_state]
-                                         [g_pet.custom_frame_index];
+    image = &g_pet.preloaded_frames[g_pet.active_cache_bank][g_pet.custom_frame_index];
     if (!image->data) return;
     lv_img_set_src(g_pet.pet_image, image);
     /* Native Petdex frames define the action. Keep the image geometry stable. */
@@ -703,37 +954,117 @@ static void vb_pet_update_custom_frame(void)
     g_pet.custom_displayed_frame = g_pet.custom_frame_index;
 }
 
-static int vb_pet_activate_preloaded_state(int index, int state)
+static void vb_pet_activate_cache_bank(int index, int bank, int state)
 {
-    int frame_count;
-    int preload_state;
-    if (!g_pet.preloaded_data || index < 0 || index >= g_pet.pet_count ||
-        state < 0 || state >= VB_PET_ASSET_STATE_COUNT) return 0;
-    preload_state = vb_pet_preload_state_index(state);
-    if (preload_state < 0) return 0;
-    frame_count = g_pet.preloaded_frame_counts[index][preload_state];
-    if (frame_count < 1 || frame_count > VB_PET_RUNTIME_FRAME_LIMIT ||
-        !g_pet.preloaded_frames[index][preload_state][0].data) return 0;
     g_pet.pet_index = index;
     vb_pet_copy(g_pet.pet_slug, sizeof(g_pet.pet_slug), g_pet.pet_slugs[index]);
     vb_pet_copy(g_pet.pet_name, sizeof(g_pet.pet_name), g_pet.pet_names[index]);
+    g_pet.active_cache_bank = bank;
     g_pet.custom_state = state;
-    g_pet.custom_frame_count = frame_count;
+    g_pet.custom_frame_count = g_pet.cache_frame_counts[bank];
     g_pet.custom_frame_index = 0;
     g_pet.custom_displayed_frame = -1;
-    g_pet.custom_frame_ms = VB_PET_NATIVE_FRAME_MS;
+    g_pet.custom_frame_ms = g_pet.preload_version == VB_PET_PRELOAD_VERSION ?
+                            VB_PET_NATIVE_FRAME_MS : VB_PET_LEGACY_FRAME_MS;
     g_pet.custom_next_frame_at = rt_tick_get() +
         rt_tick_from_millisecond(g_pet.custom_frame_ms);
     g_pet.custom_available = 1;
     vb_pet_update_custom_frame();
     g_pet.dirty = 1;
+}
+
+static int vb_pet_activate_preloaded_state(int index, int state)
+{
+    int bank;
+    int frame;
+    if (!g_pet.preloaded_data || index < 0 || index >= g_pet.pet_count ||
+        state < 0 || state >= VB_PET_ASSET_STATE_COUNT) return 0;
+    g_pet.requested_asset_state = state;
+    for (bank = 0; bank < VB_PET_PRELOAD_CACHE_BANKS; bank++)
+    {
+        if (g_pet.cache_state[bank] == state)
+        {
+            vb_pet_activate_cache_bank(index, bank, state);
+            return 1;
+        }
+    }
+    if (!g_pet.loader_thread || !g_pet.loader_sem) return 0;
+    if (g_pet.loader_request_state == state &&
+        g_pet.loader_completed_sequence != g_pet.loader_request_sequence) return 1;
+    bank = 1 - g_pet.active_cache_bank;
+    for (frame = 0; frame < g_pet.preload_max_frames; frame++)
+        lv_img_cache_invalidate_src(&g_pet.preloaded_frames[bank][frame]);
+    g_pet.cache_state[bank] = -1;
+    g_pet.cache_frame_counts[bank] = 0;
+    g_pet.loader_request_state = state;
+    g_pet.loader_request_bank = bank;
+    g_pet.loader_request_sequence++;
+    if (g_pet.loader_request_sequence == 0) g_pet.loader_request_sequence = 1;
+    rt_sem_release(g_pet.loader_sem);
     return 1;
+}
+
+static void vb_pet_apply_preload_completion(void)
+{
+    uint32_t sequence = g_pet.loader_completed_sequence;
+    int state;
+    int bank;
+    if (!sequence || sequence == g_pet.loader_applied_sequence) return;
+    g_pet.loader_applied_sequence = sequence;
+    if (sequence != g_pet.loader_request_sequence) return;
+    state = g_pet.loader_completed_state;
+    bank = g_pet.loader_completed_bank;
+    if (!g_pet.loader_completed_result || state < 0 ||
+        state >= VB_PET_ASSET_STATE_COUNT || bank < 0 ||
+        bank >= VB_PET_PRELOAD_CACHE_BANKS)
+    {
+        rt_kprintf("[vb_runtime][codex_pet] state load failed state=%s seq=%lu\n",
+                   vb_pet_asset_state_name(state), (unsigned long)sequence);
+        return;
+    }
+    g_pet.cache_state[bank] = state;
+    g_pet.cache_frame_counts[bank] = g_pet.preload_state_frame_counts[state];
+    if (g_pet.requested_asset_state == state)
+    {
+        vb_pet_activate_cache_bank(g_pet.pet_index, bank, state);
+    }
+    rt_kprintf("[vb_runtime][codex_pet] state ready state=%s frames=%d bank=%d seq=%lu\n",
+               vb_pet_asset_state_name(state), g_pet.cache_frame_counts[bank], bank,
+               (unsigned long)sequence);
+}
+
+static void vb_pet_begin_transient(int state)
+{
+    if (!g_pet.custom_available || state < 0 || state >= VB_PET_ASSET_STATE_COUNT) return;
+    g_pet.transient_asset_state = state;
+    /* Arm before cache selection; cache hits do not visit loader completion. */
+    g_pet.transient_started = 1;
+    if (g_pet.custom_state == state && g_pet.custom_frame_count > 0)
+    {
+        g_pet.custom_frame_index = 0;
+        g_pet.custom_displayed_frame = -1;
+        g_pet.custom_next_frame_at = rt_tick_get() +
+            rt_tick_from_millisecond(g_pet.custom_frame_ms);
+        vb_pet_update_custom_frame();
+    }
+    g_pet.dirty = 1;
+}
+
+static int vb_pet_asset_state_from_name(const char *name)
+{
+    int state;
+    if (!name) return -1;
+    for (state = 0; state < VB_PET_ASSET_STATE_COUNT; state++)
+    {
+        if (rt_strcmp(name, vb_pet_asset_state_name(state)) == 0) return state;
+    }
+    return -1;
 }
 
 static int vb_pet_select_index(int index, int persist)
 {
     (void)persist;
-    return vb_pet_activate_preloaded_state(index, vb_pet_asset_state_index());
+    return vb_pet_activate_preloaded_state(index, vb_pet_desired_asset_state());
 }
 
 static int vb_pet_load_catalog(void)
@@ -1079,6 +1410,7 @@ static int vb_pet_handle_horizontal_swipe(int dx, int dy)
         abs(dy) > VB_PET_SWIPE_MAX_DY) return 0;
     g_pet.touch_swipe_consumed = 1;
     /* A left swipe advances; a right swipe returns to the previous task. */
+    vb_pet_begin_transient(dx < 0 ? VB_PET_ASSET_RUN_LEFT : VB_PET_ASSET_RUN_RIGHT);
     vb_pet_navigate_task(dx < 0 ? 1 : -1);
     rt_kprintf("[vb_runtime][codex_pet] task swipe %s dx=%d dy=%d\n",
                dx < 0 ? "next" : "prev", dx, dy);
@@ -1147,7 +1479,7 @@ static void vb_pet_render(void)
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
     if (g_pet.custom_available)
     {
-        int asset_state = vb_pet_asset_state_index();
+        int asset_state = vb_pet_desired_asset_state();
         if (asset_state != g_pet.custom_state)
             (void)vb_pet_activate_preloaded_state(g_pet.pet_index, asset_state);
     }
@@ -1436,8 +1768,12 @@ static void vb_pet_image_event(lv_event_t *event)
 {
     int next;
     const char *next_slug;
-    if (lv_event_get_code(event) != LV_EVENT_CLICKED || g_pet.approval_pending ||
-        g_pet.pet_count < 2) return;
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || g_pet.approval_pending) return;
+    if (g_pet.pet_count < 2)
+    {
+        vb_pet_begin_transient(VB_PET_ASSET_JUMPING);
+        return;
+    }
     next = (g_pet.pet_index + 1) % g_pet.pet_count;
     next_slug = g_pet.pet_slugs[next];
     if (!vb_pet_select_index(next, 1))
@@ -1449,6 +1785,7 @@ static void vb_pet_image_event(lv_event_t *event)
     g_pet.error[0] = '\0';
     if (g_pet.ops.send_action)
         (void)g_pet.ops.send_action("pet_select", next_slug);
+    vb_pet_begin_transient(VB_PET_ASSET_JUMPING);
 }
 
 static int vb_pet_json_ttl(const char *payload)
@@ -1596,6 +1933,11 @@ static void vb_pet_publish_status(void)
     snapshot.custom_frame_count = g_pet.custom_frame_count;
     snapshot.custom_frame_index = g_pet.custom_frame_index;
     snapshot.custom_frame_ms = g_pet.custom_frame_ms;
+    snapshot.custom_state = g_pet.custom_state;
+    snapshot.requested_asset_state = g_pet.requested_asset_state;
+    snapshot.preload_version = g_pet.preload_version;
+    snapshot.asset_state_count = g_pet.preload_version == VB_PET_PRELOAD_VERSION ?
+                                 VB_PET_ASSET_STATE_COUNT : VB_PET_PRELOAD_LEGACY_STATE_COUNT;
     snapshot.preloaded_data_size = g_pet.preloaded_data_size;
     snapshot.ui_tick_count = g_pet.ui_tick_count;
     vb_pet_copy(snapshot.pet_slug, sizeof(snapshot.pet_slug), g_pet.pet_slug);
@@ -1624,6 +1966,11 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     g_pet.rocky_frame_key = -1;
     g_pet.custom_state = -1;
     g_pet.custom_displayed_frame = -1;
+    g_pet.requested_asset_state = -1;
+    g_pet.loader_request_state = -1;
+    g_pet.loader_completed_state = -1;
+    g_pet.preview_asset_state = -1;
+    g_pet.transient_asset_state = -1;
     vb_pet_copy(g_pet.project, sizeof(g_pet.project), project);
 
     lv_obj_clean(root);
@@ -1635,7 +1982,7 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     g_pet.connection_label = vb_pet_label(root, "Bridge offline", 0x94a3b8);
     lv_obj_set_width(g_pet.connection_label, 150);
     lv_obj_set_style_text_align(g_pet.connection_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(g_pet.connection_label, 220, 62);
+    lv_obj_set_pos(g_pet.connection_label, 210, 62);
 
     g_pet.pet_tail = lv_obj_create(root);
     lv_obj_set_size(g_pet.pet_tail, 64, 24);
@@ -1707,15 +2054,8 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
         lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_EVENT_BUBBLE |
                          LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_PRESS_LOCK);
-        if (g_pet.pet_count > 1)
-        {
-            lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_event_cb(g_pet.pet_image, vb_pet_image_event, LV_EVENT_CLICKED, RT_NULL);
-        }
-        else
-        {
-            lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_CLICKABLE);
-        }
+        lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(g_pet.pet_image, vb_pet_image_event, LV_EVENT_CLICKED, RT_NULL);
         lv_obj_add_flag(g_pet.pet_body, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_pet.pet_tail, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_pet.left_ear, LV_OBJ_FLAG_HIDDEN);
@@ -1766,6 +2106,9 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     lv_obj_add_flag(g_pet.new_button, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(g_pet.continue_button, LV_OBJ_FLAG_HIDDEN);
     vb_pet_render();
+    if (g_pet.custom_available)
+        g_pet.startup_transient_at = rt_tick_get() +
+            rt_tick_from_millisecond(VB_PET_STARTUP_ANIMATION_DELAY_MS);
     vb_pet_rgb_tick(rt_tick_get());
     vb_pet_reset_flow_queue(1);
     vb_pet_publish_status();
@@ -1840,6 +2183,33 @@ static void vb_pet_apply_flow(const char *channel, uint32_t sequence,
         g_pet.pending_pet_retry_at = 0;
         g_pet.pending_pet_selection = 1;
     }
+    else if (rt_strcmp(channel, "pet.preview") == 0)
+    {
+        char state_name[20];
+        int state;
+        if (!vb_pet_json_string(payload, "state", state_name, sizeof(state_name)))
+            vb_pet_copy(state_name, sizeof(state_name), payload);
+        if (rt_strcmp(state_name, "tap") == 0)
+        {
+            g_pet.preview_asset_state = -1;
+            vb_pet_begin_transient(VB_PET_ASSET_JUMPING);
+            return;
+        }
+        if (rt_strcmp(state_name, "auto") == 0)
+        {
+            g_pet.preview_asset_state = -1;
+            g_pet.dirty = 1;
+            return;
+        }
+        state = vb_pet_asset_state_from_name(state_name);
+        if (state >= 0)
+        {
+            g_pet.preview_asset_state = state;
+            g_pet.transient_asset_state = -1;
+            g_pet.transient_started = 0;
+            g_pet.dirty = 1;
+        }
+    }
     else if (rt_strcmp(channel, "codex.mcp") == 0)
     {
         vb_pet_copy(g_pet.task, sizeof(g_pet.task), payload);
@@ -1885,6 +2255,13 @@ void vb_codex_pet_tick(uint32_t now)
     if (!g_pet.active) return;
     g_pet.ui_tick_count++;
     vb_pet_drain_flows();
+    vb_pet_apply_preload_completion();
+    if (g_pet.startup_transient_at &&
+        (int32_t)(now - g_pet.startup_transient_at) >= 0)
+    {
+        g_pet.startup_transient_at = 0;
+        vb_pet_begin_transient(VB_PET_ASSET_JUMPING);
+    }
     if (g_pet.pending_pet_selection &&
         (!g_pet.pending_pet_retry_at ||
          (int32_t)(now - g_pet.pending_pet_retry_at) >= 0))
@@ -1973,7 +2350,18 @@ void vb_codex_pet_tick(uint32_t now)
     {
         if ((int32_t)(now - g_pet.custom_next_frame_at) >= 0)
         {
-            g_pet.custom_frame_index = (g_pet.custom_frame_index + 1) % g_pet.custom_frame_count;
+            g_pet.custom_frame_index++;
+            if (g_pet.custom_frame_index >= g_pet.custom_frame_count)
+            {
+                g_pet.custom_frame_index = 0;
+                if (g_pet.transient_asset_state == g_pet.custom_state &&
+                    g_pet.transient_started)
+                {
+                    g_pet.transient_asset_state = -1;
+                    g_pet.transient_started = 0;
+                    g_pet.dirty = 1;
+                }
+            }
             g_pet.custom_next_frame_at = now + rt_tick_from_millisecond(g_pet.custom_frame_ms);
             vb_pet_update_custom_frame();
         }
@@ -2035,6 +2423,8 @@ int vb_codex_pet_status_json(char *dst, rt_size_t cap)
                 "\"recentTasks\":%d,\"syncAgeMs\":%lu,"
                 "\"taskIndex\":%d,\"approval\":%d,\"pet\":\"%s\","
                 "\"petIndex\":%d,\"pets\":%d,\"custom\":%d,"
+                "\"assetState\":\"%s\",\"requestedAssetState\":\"%s\","
+                "\"assetStates\":%d,\"preloadVersion\":%d,"
                 "\"frames\":%d,\"frame\":%d,\"frameMs\":%d,"
                 "\"preloadedBytes\":%lu,\"uiTicks\":%lu,\"loaderPhase\":%d,"
                 "\"queuedFlows\":%lu,\"droppedFlows\":%lu,"
@@ -2053,6 +2443,10 @@ int vb_codex_pet_status_json(char *dst, rt_size_t cap)
                 snapshot.pet_count > 0 ? snapshot.pet_index + 1 : 0,
                 snapshot.pet_count,
                 snapshot.custom_available,
+                vb_pet_asset_state_name(snapshot.custom_state),
+                vb_pet_asset_state_name(snapshot.requested_asset_state),
+                snapshot.asset_state_count,
+                snapshot.preload_version,
                 snapshot.custom_frame_count,
                 snapshot.custom_frame_index,
                 snapshot.custom_frame_ms,

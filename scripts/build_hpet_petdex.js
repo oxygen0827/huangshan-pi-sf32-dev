@@ -13,22 +13,18 @@ const CELL_HEIGHT = 208;
 const OUTPUT_WIDTH = 160;
 const OUTPUT_HEIGHT = 173;
 const PRELOAD_MAGIC = 0x43504256; // VBPC
-const PRELOAD_VERSION = 1;
+const PRELOAD_VERSION = 2;
 const PRELOAD_HEADER_SIZE = 16;
-const FRAMES_PER_STATE = 2;
-const FRAME_MS = 180;
+const PRELOAD_STATE_ENTRY_SIZE = 12;
+const MAX_FRAMES_PER_STATE = 8;
+const MIN_FRAMES_PER_STATE = 2;
+const FRAME_MS = 120;
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES = 64 * 1024;
-const SOURCE_STATES = [
-  ["idle", "idle", 0],
-  ["running", "run", 2],
-  ["ready", "wave", 1],
-  ["needs", "review", 4],
-  ["blocked", "failed", 3],
-];
-// Board asset indexes are fixed by vb_pet_asset_state_index():
-// idle=0, ready=1, blocked/error=2, needs=3, running=4.
-const PRELOAD_ORDER = ["idle", "ready", "blocked", "needs", "running"];
+const PETDEX_CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, "petdex_state_contract.json"), "utf8"));
+const SOURCE_STATES = [...PETDEX_CONTRACT.states]
+  .sort((left, right) => left.row - right.row)
+  .map(state => [state.id, state.row]);
 
 function loadSharp() {
   const candidates = [process.env.CODEX_PET_SHARP, "sharp", BUNDLED_SHARP_PATH].filter(Boolean);
@@ -56,15 +52,32 @@ function validateSlug(value) {
 
 function validateAssetUrl(value) {
   const url = new URL(String(value || ""));
-  if (url.protocol !== "https:" || url.hostname !== "assets.petdex.dev") {
+  if (url.protocol !== "https:" || url.hostname !== "assets.petdex.dev" ||
+      url.username || url.password || url.port || url.hash) {
     throw new Error(`Petdex asset URL is not allowlisted: ${url.href}`);
   }
   return url.href;
 }
 
+function resolveAssetRedirect(current, location) {
+  if (!location) throw new Error("source fetch failed: Petdex redirect has no location");
+  return validateAssetUrl(new URL(location, current).href);
+}
+
 async function download(url, maxBytes) {
-  const response = await fetch(validateAssetUrl(url), { redirect: "follow" });
-  if (!response.ok) throw new Error(`download failed (${response.status}): ${url}`);
+  let current = validateAssetUrl(url);
+  let response;
+  for (let redirects = 0; redirects <= 4; redirects++) {
+    try {
+      response = await fetch(current, { redirect: "manual" });
+    } catch (error) {
+      throw new Error(`source fetch failed: ${error.message}`);
+    }
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    if (redirects === 4) throw new Error("source fetch failed: too many Petdex redirects");
+    current = resolveAssetRedirect(current, response.headers.get("location"));
+  }
+  if (!response?.ok) throw new Error(`source fetch failed (${response?.status || "unknown"}): ${current}`);
   const declared = Number(response.headers.get("content-length") || 0);
   if (declared > maxBytes) throw new Error(`download exceeds ${maxBytes} bytes: ${url}`);
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -87,11 +100,19 @@ function rgb565Alpha(data, info) {
   }
   const output = Buffer.allocUnsafe(OUTPUT_WIDTH * OUTPUT_HEIGHT * 3);
   for (let source = 0, target = 0; source < data.length; source += 4, target += 3) {
+    const sourceAlpha = data[source + 3];
+    if (sourceAlpha <= 8) {
+      output[target] = 0;
+      output[target + 1] = 0;
+      output[target + 2] = 0;
+      continue;
+    }
+    const alpha = Math.min(15, Math.round(sourceAlpha / 17)) * 17;
     const rgb565 = ((data[source] & 0xf8) << 8) |
       ((data[source + 1] & 0xfc) << 3) |
       (data[source + 2] >> 3);
     output.writeUInt16LE(rgb565, target);
-    output[target + 2] = data[source + 3];
+    output[target + 2] = alpha;
   }
   return output;
 }
@@ -121,47 +142,71 @@ async function extractStateFrames(sharp, spritesheet, row) {
       hashes.add(digest);
       distinct.push({ raw, sourceColumn: column });
     }
-    if (distinct.length === FRAMES_PER_STATE) break;
+    if (distinct.length === MAX_FRAMES_PER_STATE) break;
   }
-  if (distinct.length < FRAMES_PER_STATE) {
-    throw new Error(`source row ${row} needs two visually different frames`);
+  if (distinct.length < MIN_FRAMES_PER_STATE) {
+    throw new Error(`source row ${row} needs at least ${MIN_FRAMES_PER_STATE} visually different frames`);
   }
   return distinct;
 }
 
 function buildPreload(states) {
-  const compressed = [];
-  for (const boardState of PRELOAD_ORDER) {
-    for (const frame of states[boardState].frames) {
-      compressed.push(zlib.deflateSync(frame.raw, { level: 9 }));
-    }
+  const stateDirectory = [];
+  const compressedStates = [];
+  let totalFrames = 0;
+  for (const [stateId] of SOURCE_STATES) {
+    const payload = Buffer.concat(states[stateId].frames.map(frame => frame.raw));
+    const compressed = zlib.deflateSync(payload, { level: 9 });
+    stateDirectory.push({
+      firstFrame: totalFrames,
+      frameCount: states[stateId].frames.length,
+      compressed,
+    });
+    compressedStates.push(compressed);
+    totalFrames += states[stateId].frames.length;
   }
-  const header = Buffer.alloc(PRELOAD_HEADER_SIZE + compressed.length * 8);
+  const stateBytes = stateDirectory.length * PRELOAD_STATE_ENTRY_SIZE;
+  const header = Buffer.alloc(PRELOAD_HEADER_SIZE + stateBytes);
   header.writeUInt32LE(PRELOAD_MAGIC, 0);
   header.writeUInt16LE(PRELOAD_VERSION, 4);
   header.writeUInt16LE(1, 6);
   header.writeUInt16LE(OUTPUT_WIDTH, 8);
   header.writeUInt16LE(OUTPUT_HEIGHT, 10);
-  header.writeUInt16LE(SOURCE_STATES.length, 12);
-  header.writeUInt16LE(FRAMES_PER_STATE, 14);
+  header.writeUInt16LE(stateDirectory.length, 12);
+  header.writeUInt16LE(totalFrames, 14);
   let offset = header.length;
-  compressed.forEach((frame, index) => {
-    header.writeUInt32LE(offset, PRELOAD_HEADER_SIZE + index * 8);
-    header.writeUInt32LE(frame.length, PRELOAD_HEADER_SIZE + index * 8 + 4);
-    offset += frame.length;
+  stateDirectory.forEach((state, index) => {
+    const entryOffset = PRELOAD_HEADER_SIZE + index * PRELOAD_STATE_ENTRY_SIZE;
+    header.writeUInt16LE(state.firstFrame, entryOffset);
+    header.writeUInt8(state.frameCount, entryOffset + 2);
+    header.writeUInt32LE(offset, entryOffset + 4);
+    header.writeUInt32LE(state.compressed.length, entryOffset + 8);
+    offset += state.compressed.length;
   });
-  return Buffer.concat([header, ...compressed]);
+  return Buffer.concat([header, ...compressedStates]);
 }
 
 function verifyPreloadOrder(preload, states) {
-  let entry = 0;
-  for (const boardState of PRELOAD_ORDER) {
-    for (const expected of states[boardState].frames) {
-      const offset = preload.readUInt32LE(PRELOAD_HEADER_SIZE + entry * 8);
-      const length = preload.readUInt32LE(PRELOAD_HEADER_SIZE + entry * 8 + 4);
-      const actual = zlib.inflateSync(preload.subarray(offset, offset + length));
-      if (!actual.equals(expected.raw)) throw new Error(`preload state order mismatch at ${boardState}#${entry % 2}`);
-      entry += 1;
+  const stateCount = preload.readUInt16LE(12);
+  const totalFrames = preload.readUInt16LE(14);
+  if (stateCount !== SOURCE_STATES.length) throw new Error("preload state count mismatch");
+  for (let stateIndex = 0; stateIndex < SOURCE_STATES.length; stateIndex++) {
+    const [stateId] = SOURCE_STATES[stateIndex];
+    const stateOffset = PRELOAD_HEADER_SIZE + stateIndex * PRELOAD_STATE_ENTRY_SIZE;
+    const firstFrame = preload.readUInt16LE(stateOffset);
+    const frameCount = preload.readUInt8(stateOffset + 2);
+    const offset = preload.readUInt32LE(stateOffset + 4);
+    const length = preload.readUInt32LE(stateOffset + 8);
+    if (frameCount !== states[stateId].frames.length || firstFrame + frameCount > totalFrames) {
+      throw new Error(`preload state directory mismatch at ${stateId}`);
+    }
+    const actual = zlib.inflateSync(preload.subarray(offset, offset + length));
+    for (let frame = 0; frame < frameCount; frame++) {
+      const expected = states[stateId].frames[frame];
+      const frameStart = frame * expected.raw.length;
+      if (!actual.subarray(frameStart, frameStart + expected.raw.length).equals(expected.raw)) {
+        throw new Error(`preload state order mismatch at ${stateId}#${frame}`);
+      }
     }
   }
 }
@@ -191,12 +236,12 @@ async function convertEntry(entry, outputDir, { allowLocal = false } = {}) {
   }
   const states = {};
   const stateDigests = new Set();
-  for (const [boardState, sourceState, row] of SOURCE_STATES) {
+  for (const [stateId, row] of SOURCE_STATES) {
     const frames = await extractStateFrames(sharp, spritesheet, row);
     const digest = crypto.createHash("sha256").update(Buffer.concat(frames.map(frame => frame.raw))).digest("hex");
-    if (stateDigests.has(digest)) throw new Error(`${boardState} animation duplicates another required state`);
+    if (stateDigests.has(digest)) throw new Error(`${stateId} animation duplicates another required state`);
     stateDigests.add(digest);
-    states[boardState] = { sourceState, sourceRow: row, frames, digest };
+    states[stateId] = { sourceRow: row, frames, digest };
   }
 
   fs.mkdirSync(outputDir, { recursive: true });
@@ -222,13 +267,18 @@ async function convertEntry(entry, outputDir, { allowLocal = false } = {}) {
     sourceSha256: crypto.createHash("sha256").update(spritesheet).digest("hex"),
     sourceDimensions: [imageMetadata.width, imageMetadata.height],
     outputDimensions: [OUTPUT_WIDTH, OUTPUT_HEIGHT],
-    framesPerState: FRAMES_PER_STATE,
+    preloadVersion: PRELOAD_VERSION,
+    compression: "zlib-state-block",
+    stateCount: SOURCE_STATES.length,
+    totalFrames: SOURCE_STATES.reduce((total, [stateId]) => total + states[stateId].frames.length, 0),
+    maxFramesPerState: Math.max(...SOURCE_STATES.map(([stateId]) => states[stateId].frames.length)),
     frameMs: FRAME_MS,
-    states: Object.fromEntries(SOURCE_STATES.map(([boardState]) => [boardState, {
-      source: states[boardState].sourceState,
-      row: states[boardState].sourceRow,
-      columns: states[boardState].frames.map(frame => frame.sourceColumn),
-      sha256: states[boardState].digest,
+    taskStates: { ...PETDEX_CONTRACT.taskStates },
+    states: Object.fromEntries(SOURCE_STATES.map(([stateId]) => [stateId, {
+      row: states[stateId].sourceRow,
+      frameCount: states[stateId].frames.length,
+      columns: states[stateId].frames.map(frame => frame.sourceColumn),
+      sha256: states[stateId].digest,
     }])),
   };
   fs.writeFileSync(path.join(outputDir, "conversion.json"), JSON.stringify(result, null, 2) + "\n");
@@ -239,10 +289,27 @@ async function selfTest() {
   const sharp = loadSharp();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "hpet-converter-"));
   try {
+    for (const unsafe of [
+      "https://user:secret@assets.petdex.dev/pet.webp",
+      "https://assets.petdex.dev:444/pet.webp",
+    ]) {
+      try {
+        validateAssetUrl(unsafe);
+        throw new Error(`unsafe Petdex asset URL passed: ${unsafe}`);
+      } catch (error) {
+        if (String(error.message).startsWith("unsafe Petdex asset URL passed")) throw error;
+      }
+    }
+    try {
+      resolveAssetRedirect("https://assets.petdex.dev/pet.webp", "https://example.com/pet.webp");
+      throw new Error("unsafe Petdex redirect passed");
+    } catch (error) {
+      if (error.message === "unsafe Petdex redirect passed") throw error;
+    }
     const width = CELL_WIDTH * 8;
     const height = CELL_HEIGHT * 9;
     const pixels = Buffer.alloc(width * height * 4);
-    for (let row = 0; row < 5; row++) {
+    for (let row = 0; row < 9; row++) {
       for (let column = 0; column < 8; column++) {
         const left = column * CELL_WIDTH + 22 + column * 2;
         const top = row * CELL_HEIGHT + 44;
@@ -270,8 +337,18 @@ async function selfTest() {
       petJsonPath: metadata,
       spritesheetPath: sheet,
     }, output, { allowLocal: true });
-    if (result.framesPerState !== 2 || fs.statSync(path.join(output, "preload.bin")).size <= 100) {
+    if (result.preloadVersion !== 2 || result.stateCount !== 9 || result.totalFrames !== 72 ||
+        result.maxFramesPerState !== 8 || result.frameMs !== 120 ||
+        fs.statSync(path.join(output, "preload.bin")).size <= 100) {
       throw new Error("converter did not produce a valid preload");
+    }
+    for (const [stateId, row] of SOURCE_STATES) {
+      if (result.states[stateId]?.row !== row || result.states[stateId]?.frameCount !== 8) {
+        throw new Error(`converter mapped ${stateId} to the wrong Petdex animation`);
+      }
+    }
+    if (JSON.stringify(result.taskStates) !== JSON.stringify(PETDEX_CONTRACT.taskStates)) {
+      throw new Error("converter did not preserve the task-state contract");
     }
     process.stdout.write("build_hpet_petdex self-test ok\n");
   } finally {

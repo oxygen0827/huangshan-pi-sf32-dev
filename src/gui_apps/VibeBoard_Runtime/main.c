@@ -129,6 +129,8 @@
 #define VB_BLE_MAX_COMMAND 896
 #define VB_BLE_STATUS_MAX 1024
 #define VB_BLE_THREAD_STACK 8192
+#define VB_BLE_NOTIFY_RETRIES 20
+#define VB_BLE_NOTIFY_RETRY_MS 5
 #define VB_RUNTIME_INSTALL_MAX_CHUNK_BYTES 240
 #define VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES 4096u
 #define VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES 3072u
@@ -2811,12 +2813,26 @@ static void vb_ble_set_status(const char *fmt, ...)
 static void vb_ble_notify_status(void)
 {
     sibles_value_t value;
+    char status[VB_BLE_STATUS_MAX];
+    int attempt;
+    int result = 0;
     if (!g_vb_ble.connected || !g_vb_ble.encrypted || !g_vb_ble.notify_cccd || !g_vb_ble.srv_handle) return;
+    rt_strncpy(status, g_vb_ble.status, sizeof(status) - 1);
+    status[sizeof(status) - 1] = '\0';
     value.hdl = g_vb_ble.srv_handle;
     value.idx = VB_BLE_INSTALL_STATUS_VALUE;
-    value.len = (uint16_t)rt_strlen(g_vb_ble.status);
-    value.value = (uint8_t *)g_vb_ble.status;
-    sibles_write_value(g_vb_ble.conn_idx, &value);
+    value.len = (uint16_t)rt_strlen(status);
+    value.value = (uint8_t *)status;
+    for (attempt = 0; attempt < VB_BLE_NOTIFY_RETRIES; attempt++)
+    {
+        result = sibles_write_value(g_vb_ble.conn_idx, &value);
+        if (result == value.len) return;
+        if (result < 0) break;
+        rt_thread_mdelay(VB_BLE_NOTIFY_RETRY_MS);
+    }
+    rt_kprintf("[vb_runtime][ble] status notify dropped len=%u rc=%d attempts=%d\n",
+               (unsigned)value.len, result,
+               attempt < VB_BLE_NOTIFY_RETRIES ? attempt + 1 : VB_BLE_NOTIFY_RETRIES);
 }
 
 static int vb_ble_voice_stream_ready(void)
@@ -3445,8 +3461,8 @@ static uint8_t vb_ble_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
         {
             if (!vb_ble_claim_host_connection(conn_idx)) return 1;
             g_vb_ble.notify_cccd = (uint16_t)para->value[0] | ((uint16_t)para->value[1] << 8);
-            vb_ble_set_status("ok notify=%d", g_vb_ble.notify_cccd ? 1 : 0);
-            vb_ble_notify_status();
+            rt_kprintf("[vb_runtime][ble] status notify=%d\n",
+                       g_vb_ble.notify_cccd ? 1 : 0);
         }
         break;
     case VB_BLE_INSTALL_VOICE_CCCD:
@@ -8995,13 +9011,13 @@ static int vb_thunder_start(const char *title)
     label = vb_create_label(g_vb_runtime.root, title && title[0] ? title : "Thunder Wing",
                             FONT_NORMAL, lv_color_hex(0xf8fafc));
     lv_obj_set_width(label, 148);
-    lv_obj_align(label, LV_ALIGN_TOP_LEFT, VB_SCREEN_SAFE_LEFT, VB_SCREEN_SAFE_TOP - 7);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, VB_SCREEN_SAFE_LEFT, VB_SCREEN_SAFE_TOP);
 
     game->score_label = vb_create_label(g_vb_runtime.root, "S 00000   L 3   W 1",
                                         FONT_SMALL, lv_color_hex(0x93c5fd));
-    lv_obj_set_width(game->score_label, 190);
+    lv_obj_set_width(game->score_label, 140);
     lv_obj_set_style_text_align(game->score_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(game->score_label, LV_ALIGN_TOP_MID, 36, VB_SCREEN_SAFE_TOP + 21);
+    lv_obj_align(game->score_label, LV_ALIGN_TOP_RIGHT, -84, VB_SCREEN_SAFE_TOP + 21);
 
     game->status_label = vb_create_label(g_vb_runtime.root, "LEVEL 0/24", FONT_SMALL,
                                          lv_color_hex(0xfbbf24));
@@ -9010,9 +9026,9 @@ static int vb_thunder_start(const char *title)
                  VB_SCREEN_SAFE_TOP + 21);
 
     game->pause_button = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(game->pause_button, 34, 30);
+    lv_obj_set_size(game->pause_button, 44, 44);
     lv_obj_align(game->pause_button, LV_ALIGN_TOP_RIGHT, -VB_SCREEN_SAFE_RIGHT,
-                 VB_SCREEN_SAFE_TOP - 5);
+                 VB_SCREEN_SAFE_TOP);
     lv_obj_set_style_radius(game->pause_button, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(game->pause_button, lv_color_hex(0x263b55),
                               LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -9410,11 +9426,11 @@ static int vb_imu_start(const char *title)
                                          FONT_SMALL, lv_color_hex(0x94a3b8));
     lv_obj_set_width(imu->summary_label, VB_SCREEN_SAFE_WIDTH);
     lv_obj_set_style_text_align(imu->summary_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(imu->summary_label, VB_SCREEN_SAFE_LEFT, 362);
+    lv_obj_set_pos(imu->summary_label, VB_SCREEN_SAFE_LEFT, 348);
 
     button = lv_btn_create(g_vb_runtime.root);
-    lv_obj_set_size(button, 126, 36);
-    lv_obj_set_pos(button, 132, 386);
+    lv_obj_set_size(button, 126, 44);
+    lv_obj_set_pos(button, 132, 370);
     lv_obj_set_style_radius(button, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(button, lv_color_hex(0x263b55), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(button, lv_color_hex(0x334e6f), LV_PART_MAIN | LV_STATE_PRESSED);
@@ -11038,12 +11054,12 @@ static void vb_pager_render_messages(void)
     if (!content[0]) rt_snprintf(content, sizeof(content), "No messages yet");
     g_vb_runtime.pager.messages_label = vb_create_label(g_vb_runtime.root, content, FONT_SMALL,
                                                         lv_color_hex(0xe2e8f0));
-    lv_obj_set_size(g_vb_runtime.pager.messages_label, 350, 205);
-    lv_obj_set_pos(g_vb_runtime.pager.messages_label, 20, 76);
+    lv_obj_set_size(g_vb_runtime.pager.messages_label, 330, 205);
+    lv_obj_set_pos(g_vb_runtime.pager.messages_label, 30, 76);
     lv_label_set_long_mode(g_vb_runtime.pager.messages_label, LV_LABEL_LONG_WRAP);
     cancel_target = lv_obj_create(g_vb_runtime.root);
-    lv_obj_set_size(cancel_target, 250, 42);
-    lv_obj_set_pos(cancel_target, 70, 278);
+    lv_obj_set_size(cancel_target, 250, 44);
+    lv_obj_set_pos(cancel_target, 70, 276);
     lv_obj_set_style_radius(cancel_target, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(cancel_target, lv_color_hex(0x7f1d1d),
                               LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -11069,7 +11085,7 @@ static void vb_pager_render_messages(void)
         voice_text = "Hold to retry";
         voice_color = 0x9f1239;
     }
-    voice_button = vb_pager_button(voice_text, 20, 354, 230, 48, voice_color,
+    voice_button = vb_pager_button(voice_text, 30, 354, 218, 48, voice_color,
                                    RT_NULL, RT_NULL);
     g_vb_runtime.pager.voice_button = voice_button;
     g_vb_runtime.pager.voice_button_label = lv_obj_get_child(voice_button, 0);
@@ -11077,7 +11093,7 @@ static void vb_pager_render_messages(void)
     lv_obj_add_event_cb(voice_button, vb_pager_voice_event, LV_EVENT_PRESSING, RT_NULL);
     lv_obj_add_event_cb(voice_button, vb_pager_voice_event, LV_EVENT_RELEASED, RT_NULL);
     lv_obj_add_event_cb(voice_button, vb_pager_voice_event, LV_EVENT_PRESS_LOST, RT_NULL);
-    vb_pager_button("Forget", 266, 354, 104, 48, 0x7f1d1d,
+    vb_pager_button("Forget", 260, 354, 100, 48, 0x7f1d1d,
                     vb_pager_forget_event, RT_NULL);
     if (g_vb_runtime.pager.voice_state == VB_PAGER_VOICE_ERROR &&
         g_vb_runtime.pager.voice_error[0])
@@ -11085,9 +11101,9 @@ static void vb_pager_render_messages(void)
         lv_obj_t *error = vb_create_label(g_vb_runtime.root,
                                           g_vb_runtime.pager.voice_error,
                                           FONT_SMALL, lv_color_hex(0xfda4af));
-        lv_obj_set_width(error, 350);
+        lv_obj_set_width(error, 330);
         lv_obj_set_style_text_align(error, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_pos(error, 20, 410);
+        lv_obj_set_pos(error, 30, 326);
     }
     vb_peer_mark_read();
 }
@@ -11099,15 +11115,15 @@ static void vb_pager_render_compose(void)
     lv_obj_t *transcript = vb_create_label(g_vb_runtime.root,
                                            g_vb_runtime.pager.draft,
                                            FONT_NORMAL, lv_color_hex(0xf8fafc));
-    lv_obj_set_pos(title, 20, 78);
-    lv_obj_set_size(transcript, 350, 210);
-    lv_obj_set_pos(transcript, 20, 116);
+    lv_obj_set_pos(title, 30, 78);
+    lv_obj_set_size(transcript, 330, 210);
+    lv_obj_set_pos(transcript, 30, 116);
     lv_label_set_long_mode(transcript, LV_LABEL_LONG_WRAP);
-    vb_pager_button("Cancel", 20, 350, 104, 48, 0x334155,
+    vb_pager_button("Cancel", 30, 350, 104, 48, 0x334155,
                     vb_pager_back_event, RT_NULL);
     vb_pager_button("Retry", 143, 350, 104, 48, 0x475569,
                     vb_pager_retry_event, RT_NULL);
-    vb_pager_button("Send", 266, 350, 104, 48, 0x0f766e,
+    vb_pager_button("Send", 256, 350, 104, 48, 0x0f766e,
                     vb_pager_send_event, RT_NULL);
 }
 
@@ -12163,14 +12179,14 @@ static void vb_launcher_delete_event_cb(lv_event_t *event)
     rt_kprintf("[vb_runtime][launcher] delete app=%s rc=%d\n", item->id, result);
 }
 
-static void vb_render_component(vb_component_t *component, int index)
+static void vb_render_component(lv_obj_t *parent, vb_component_t *component, int index)
 {
-    lv_coord_t y = 142 + index * 42;
+    lv_coord_t y = index * 46;
     if (rt_strcmp(component->type, "action") == 0)
     {
-        lv_obj_t *button = lv_btn_create(g_vb_runtime.root);
+        lv_obj_t *button = lv_btn_create(parent);
         lv_obj_t *label;
-        lv_obj_set_size(button, 260, 34);
+        lv_obj_set_size(button, 300, 44);
         lv_obj_align(button, LV_ALIGN_TOP_MID, 0, y);
         lv_obj_set_style_radius(button, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(button, lv_color_hex(0x2dd4bf), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -12180,13 +12196,13 @@ static void vb_render_component(vb_component_t *component, int index)
         return;
     }
 
-    lv_obj_t *left = vb_create_label(g_vb_runtime.root, component->label, FONT_SMALL, lv_color_hex(0x94a3b8));
-    lv_obj_set_width(left, 150);
-    lv_obj_align(left, LV_ALIGN_TOP_LEFT, 32, y);
+    lv_obj_t *left = vb_create_label(parent, component->label, FONT_SMALL, lv_color_hex(0x94a3b8));
+    lv_obj_set_width(left, 144);
+    lv_obj_align(left, LV_ALIGN_TOP_LEFT, 2, y + 12);
 
-    component->value_label = vb_create_label(g_vb_runtime.root, component->value, FONT_SMALL, LV_COLOR_WHITE);
+    component->value_label = vb_create_label(parent, component->value, FONT_SMALL, LV_COLOR_WHITE);
     lv_obj_set_width(component->value_label, 170);
-    lv_obj_align(component->value_label, LV_ALIGN_TOP_LEFT, 188, y);
+    lv_obj_align(component->value_label, LV_ALIGN_TOP_LEFT, 158, y + 12);
 }
 
 static void vb_runtime_request_manager_refresh(const char *message)
@@ -12464,9 +12480,17 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
 
     if (g_vb_runtime.component_count > 0)
     {
+        lv_obj_t *component_list = lv_obj_create(g_vb_runtime.root);
+        lv_obj_set_size(component_list, VB_SCREEN_SAFE_WIDTH, 278);
+        lv_obj_align(component_list, LV_ALIGN_TOP_MID, 0, 136);
+        lv_obj_set_style_bg_opa(component_list, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(component_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_all(component_list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_scroll_dir(component_list, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(component_list, LV_SCROLLBAR_MODE_AUTO);
         for (i = 0; i < g_vb_runtime.component_count; i++)
         {
-            vb_render_component(&g_vb_runtime.components[i], i);
+            vb_render_component(component_list, &g_vb_runtime.components[i], i);
         }
     }
     else
@@ -12482,19 +12506,22 @@ static void vb_render_runtime_ui(int manifest_loaded, int main_lua_present)
         lv_obj_center(panel_text);
     }
 
-    g_vb_runtime.clock_label = vb_create_label(g_vb_runtime.root, "tick=0", FONT_SMALL, lv_color_hex(0xfbbf24));
-    lv_obj_align(g_vb_runtime.clock_label, LV_ALIGN_BOTTOM_MID, 0, -64);
+    if (g_vb_runtime.component_count == 0)
+    {
+        g_vb_runtime.clock_label = vb_create_label(g_vb_runtime.root, "tick=0", FONT_SMALL, lv_color_hex(0xfbbf24));
+        lv_obj_align(g_vb_runtime.clock_label, LV_ALIGN_BOTTOM_MID, 0, -64);
 
-    g_vb_runtime.flow_label = vb_create_label(g_vb_runtime.root, "flow ready: waiting for phone", FONT_SMALL, lv_color_hex(0xbfdbfe));
-    lv_obj_set_width(g_vb_runtime.flow_label, 350);
-    lv_obj_set_style_text_align(g_vb_runtime.flow_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_vb_runtime.flow_label, LV_ALIGN_BOTTOM_MID, 0, -38);
-    vb_runtime_flow_update_label();
+        g_vb_runtime.flow_label = vb_create_label(g_vb_runtime.root, "flow ready: waiting for phone", FONT_SMALL, lv_color_hex(0xbfdbfe));
+        lv_obj_set_width(g_vb_runtime.flow_label, 330);
+        lv_obj_set_style_text_align(g_vb_runtime.flow_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(g_vb_runtime.flow_label, LV_ALIGN_BOTTOM_MID, 0, -38);
+        vb_runtime_flow_update_label();
 
-    g_vb_runtime.status_label = vb_create_label(g_vb_runtime.root, "serial bridge ready", FONT_SMALL, lv_color_hex(0xa7f3d0));
-    lv_obj_set_width(g_vb_runtime.status_label, 350);
-    lv_obj_set_style_text_align(g_vb_runtime.status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -14);
+        g_vb_runtime.status_label = vb_create_label(g_vb_runtime.root, "serial bridge ready", FONT_SMALL, lv_color_hex(0xa7f3d0));
+        lv_obj_set_width(g_vb_runtime.status_label, 330);
+        lv_obj_set_style_text_align(g_vb_runtime.status_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(g_vb_runtime.status_label, LV_ALIGN_BOTTOM_MID, 0, -14);
+    }
 }
 
 static int vb_load_active_package(void)
@@ -12779,6 +12806,23 @@ static int vb_runtime_install_bulk_flush(void)
     return RT_EOK;
 }
 
+static int vb_runtime_install_bulk_sync_close(void)
+{
+    int result = RT_EOK;
+    if (g_vb_runtime.install_fd < 0) return -RT_ERROR;
+    if (fsync(g_vb_runtime.install_fd) != 0)
+    {
+        rt_kprintf("[vb_runtime] bulk sync failed: %s\n",
+                   g_vb_runtime.install_path[0] ? g_vb_runtime.install_path : "--");
+        result = -RT_ERROR;
+    }
+    if (close(g_vb_runtime.install_fd) != 0) result = -RT_ERROR;
+    g_vb_runtime.install_fd = -1;
+    g_vb_runtime.install_path[0] = '\0';
+    g_vb_runtime.install_offset = 0;
+    return result;
+}
+
 static int vb_runtime_install_bulk_append(const uint8_t *data, rt_size_t len)
 {
     while (len > 0)
@@ -12811,6 +12855,7 @@ static int vb_runtime_install_bulk_begin(const char *app_id, const char *path,
     char *id_end = RT_NULL;
     unsigned long size;
     unsigned long transfer_id;
+    int result;
 
     if (!vb_is_safe_app_id(app_id) || !vb_is_runtime_package_path(path) ||
         !size_text || !id_text)
@@ -12821,15 +12866,24 @@ static int vb_runtime_install_bulk_begin(const char *app_id, const char *path,
     if (!size_end || *size_end || !id_end || *id_end || transfer_id == 0 ||
         size > VB_RUNTIME_INSTALL_BLOB_MAX_BYTES || transfer_id > UINT32_MAX)
         return -RT_EINVAL;
+    rt_snprintf(file_path, sizeof(file_path), "%s/%s%s/%s", VIBEBOARD_APP_ROOT,
+                VIBEBOARD_STAGING_PREFIX, app_id, path);
+    file_path[sizeof(file_path) - 1] = '\0';
     if (g_vb_runtime.install_bulk_active)
     {
+        if (g_vb_runtime.install_bulk_id == (uint32_t)transfer_id &&
+            g_vb_runtime.install_bulk_expected == (uint32_t)size &&
+            rt_strcmp(g_vb_runtime.install_path, file_path) == 0)
+        {
+            rt_kprintf("[vb_runtime] bulk begin duplicate: %s/%s id=%lu offset=%lu\n",
+                       app_id, path, transfer_id,
+                       (unsigned long)g_vb_runtime.install_bulk_received);
+            return RT_EOK;
+        }
         if (!g_vb_runtime.install_bulk_complete) return -RT_EBUSY;
         vb_runtime_install_bulk_reset();
     }
     if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
-    rt_snprintf(file_path, sizeof(file_path), "%s/%s%s/%s", VIBEBOARD_APP_ROOT,
-                VIBEBOARD_STAGING_PREFIX, app_id, path);
-    file_path[sizeof(file_path) - 1] = '\0';
     vb_safe_copy(dir_path, sizeof(dir_path), file_path);
     slash = strrchr(dir_path, '/');
     if (slash)
@@ -12858,7 +12912,15 @@ static int vb_runtime_install_bulk_begin(const char *app_id, const char *path,
     g_vb_runtime.install_bulk_buffered = 0;
     g_vb_runtime.install_bulk_active = 1;
     g_vb_runtime.install_bulk_complete = size == 0;
-    if (size == 0) vb_runtime_install_close_file();
+    if (size == 0)
+    {
+        result = vb_runtime_install_bulk_sync_close();
+        if (result != RT_EOK)
+        {
+            vb_runtime_install_bulk_reset();
+            return result;
+        }
+    }
     rt_kprintf("[vb_runtime] bulk begin: %s/%s bytes=%lu id=%lu\n",
                app_id, path, size, transfer_id);
     return RT_EOK;
@@ -12922,9 +12984,9 @@ static int vb_runtime_install_bulk_packet(const uint8_t *packet, rt_size_t packe
             if (g_vb_runtime.install_bulk_received == g_vb_runtime.install_bulk_expected)
             {
                 result = vb_runtime_install_bulk_flush();
+                if (result == RT_EOK) result = vb_runtime_install_bulk_sync_close();
                 if (result == RT_EOK)
                 {
-                    vb_runtime_install_close_file();
                     if (g_vb_runtime.install_bulk_buffer)
                     {
                         rt_free(g_vb_runtime.install_bulk_buffer);
@@ -12977,6 +13039,11 @@ static int vb_runtime_install_begin_app(const char *app_id)
     if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
     if (g_vb_runtime.install_app[0])
     {
+        if (rt_strcmp(g_vb_runtime.install_app, app_id) == 0)
+        {
+            rt_kprintf("[vb_runtime] install begin duplicate: %s\n", app_id);
+            return RT_EOK;
+        }
         cleanup = vb_runtime_install_abort_app(g_vb_runtime.install_app);
         if (cleanup != RT_EOK) return cleanup;
     }

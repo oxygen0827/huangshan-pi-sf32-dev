@@ -14,6 +14,242 @@
 - 后续规则：以后写同类 App 要怎么避免。
 - 验证方式：用什么命令或真机操作确认。
 
+## 2026-07-24：Codex Pet 显示已连接但运行状态不更新
+
+### 日期 / App
+
+2026-07-24，Codex Pet Companion / Desktop Monitor。
+
+### 现象
+
+Codex Desktop 中的任务正在持续思考并调用工具，但板端 Codex Pet 一直显示 connected，
+任务数保持为 0，没有进入 running。Companion `/v1/status` 同时显示 `codex.bound=true`、
+板子已连接，因此页面看起来没有故障。
+
+### 容易误判的方向
+
+这个现象很容易被误判为 BLE 丢包、`pet.tasks` 发送失败、板端 UI 定时器停止，或者宠物包的
+running 帧与 idle 帧相同。仅检查“Bridge 进程存在”“蓝牙已连接”和“Hooks 已绑定”也会得到
+假健康结果，因为这些检查都没有证明 Codex 实际允许运行 Hook。
+
+### 真正原因
+
+最后一个能正常产生 Hook 的 Desktop 会话使用 `Codex 0.146.0-alpha.3`；当前异常会话使用
+`0.146.0-alpha.3.1`，版本切换发生在最后一次正常 Hook 和第一个异常任务之间。`hooks.json`
+和 `codex_pet_hook.py` 在这个时间窗口内没有变化，但新版本启动 `/hooks` 时明确报告六个 Hook
+为 new or changed。
+
+通过当前版本 App Server 的官方 `hooks/list` 接口复核，六条 Companion Hook 的
+`trustStatus` 全部是 `modified`。旧版本保存在 `config.toml [hooks.state]` 中的信任哈希不再匹配
+新版本计算的 `currentHash`，所以 Codex 会静默跳过 `SessionStart / UserPromptSubmit /
+PreToolUse / PostToolUse / PermissionRequest / Stop`。
+
+旧 Companion 的 `bound=true` 只遍历 `hooks.json`，确认命令存在，不检查 Codex runtime 的
+信任状态，因此把“配置存在”误报成了“状态链路可用”。Monitor 又完全依赖这些 Hook 更新任务
+注册表，最终只能反复发布空任务快照。
+
+诊断时向同一个 Unix Socket 注入合成 `UserPromptSubmit` 后，板端约一秒内从
+`connected/tasks=0` 切到 `running/tasks=1`，指示灯变蓝、`uiTicks` 前进且
+`droppedFlows=0`。这排除了 Monitor 后半段、BLE、板端状态机和硬件瓶颈。
+
+### 修复方式
+
+- Companion 使用 Codex App Server 的 `hooks/list` 读取每条 Hook 的 `enabled` 和
+  `trustStatus`，不复制 Codex 内部哈希算法。
+- `/v1/status` 保留 `codex.bound` 表示配置完整，新增 `codex.trusted`、
+  `codex.trustStatus`、`codex.untrustedEvents`、`codex.trustError` 和结构化
+  `codex.remediation`。
+- 只有 `bound=true && trusted=true` 才把 Codex 显示为绿色并开放部署；`unknown` 也按未就绪
+  处理，避免再次出现假健康。
+- Companion 页面在 `modified / untrusted / disabled / incomplete` 时显示全宽项目告警，
+  告知用户状态不会更新，并给出 `/hooks` 修复步骤。
+- 探测结果缓存 60 秒；Hook 配置、Codex 配置或 Codex 可执行文件变化时立即重新检查，用户
+  完成信任后无需等待整个缓存周期。
+
+现场恢复步骤：
+
+1. 在 Codex CLI 输入 `/hooks`。
+2. 核对六条命令都指向当前仓库的 `scripts/codex_pet_hook.py --companion-managed`。
+3. 选择 `Trust all and continue`。
+4. 重启 Codex Desktop 或新建任务。
+
+不要让 Companion 自动改写 `trusted_hash`，也不要把
+`--dangerously-bypass-hook-trust` 当作日常启动参数。Hook 能在 sandbox 外执行，重新信任必须
+保留为用户可见的安全确认。
+
+### 后续规则
+
+1. 健康检查必须分别表达 configured、authorized/trusted、observed 和 delivered，不能用一个
+   `bound` 布尔值覆盖整条链路。
+2. 依赖外部工具安全状态时，优先调用该工具的公开状态接口；不要复制私有哈希、缓存格式或
+   版本相关实现。
+3. 外部工具升级后，先检查 Hook/插件/MCP 的信任和启用状态，再排查 BLE 或硬件。
+4. `unknown` 不能自动提升为 healthy。状态来源不可验证时，UI 应明确告警并关闭依赖该状态
+   的危险或误导性动作。
+5. 真机状态不更新时，用可自动清理的合成事件逐段验证：事件入口、Monitor 注册表、Bridge、
+   BLE Flow、板端 reducer。在哪一段第一次不变，根因就优先位于那一段之前。
+6. Companion 的“绑定”操作只负责写配置，不能替用户完成 Codex 的安全信任决定。
+
+### 验证方式
+
+离线回归：
+
+```bash
+.venv/bin/python scripts/codex_pet_companion.py --self-test
+node scripts/codex_pet_web_test.js
+PYTHONPYCACHEPREFIX=/private/tmp/huangshan-pycache \
+  .venv/bin/python -m py_compile scripts/codex_pet_companion.py scripts/codex_pet_appserver.py
+```
+
+运行 Companion 后检查真实状态：
+
+```bash
+curl -s http://127.0.0.1:8790/v1/status
+```
+
+未处理事故现场时应看到 `bound=true`、`trusted=false`、`trustStatus=modified` 和六个
+`untrustedEvents`；完成 `/hooks` 信任并重启任务后，应变为 `trusted=true`、
+`trustStatus=trusted`。再启动一个 Codex 任务，板端应进入 running，任务结束后进入 ready。
+
+## 2026-07-24：Petdex 九状态只预览未部署，且两帧动画不流畅
+
+### 日期 / App
+
+2026-07-24，Codex Pet / Petdex `.hpet` / Huangshan Pi 原生宠物 UI。
+
+### 现象
+
+Companion 图库已经能预览 Petdex 的九行动作，但部署到板子上的旧包仍只有五种任务状态，每种
+固定两帧、180 ms 一帧。`Run Right / Run Left / Jumping / Review` 不会进入板子，长动作也被
+裁成前两帧，实机看起来明显卡顿。
+
+### 容易误判的方向
+
+- 不能把源图行数等同于板端已部署状态数；旧转换器虽然读取九行 contract，仍只抽取五行。
+- 不能通过把 `FRAMES_PER_STATE` 从 2 改到 8 后一次性全解压来解决。2B 的九状态共有
+  `6/8/8/4/5/8/6/6/6`，合计 57 帧；160x173 RGB565A 每帧 83040 字节，全部常驻需要
+  4733280 字节，超过当前 2.1 MiB 图像 PSRAM 池。
+- 逐帧在 UI tick 中从 SD 读取也不可接受；会让 LVGL 卡顿，并与音频和 Runtime 安装争用同一
+  TF 卡总线。
+- 相邻帧做 RGB565 字节异或再 zlib 并不一定更小。2B 实测从 1.09 MiB 放大到 1.47 MiB，原因是
+  移动区域的异或结果熵更高。
+
+### 真正原因
+
+旧 `VBPC v1` 的 header 固定声明 5 个状态、每状态 2 帧，板端结构也把十帧全部解压常驻。
+`.hpet` manifest、Companion ready gate 和串口诊断又把 `frames=2`、`frameMs=180`、
+`preloadedBytes=830400` 写死，因此网页九状态与物理板实际能力发生了分叉。
+
+另一个限制是 Runtime 单文件安装上限 1 MiB。57 帧逐帧 zlib 的 2B `preload.bin` 为
+1091073 字节，不能通过 BLE install blob 校验。仅提高 `.hpet` ZIP 上限不能解决板端单文件限制。
+
+### 修复方式
+
+- `VBPC v2` 固定九个 Petdex 状态，但每个状态记录独立的 `frameCount/offset/length`；帧数允许
+  2..8，不再强制相同。
+- 每个状态把全部 RGB565A 帧组成一个连续 `zlib-state-block`。板端切换状态时只做一次读取和
+  一次解压，播放期间不访问 SD。
+- 板端分配两个缓存槽，每槽最多 8 帧，共 1328640 字节。当前槽只供 LVGL 读取，后台
+  `vbpetld` 线程在另一个槽持有共享 storage mutex 完成加载，GUI tick 收到完成序号后才切换。
+- v2 使用 120 ms 帧周期，2B 保留全部 57 帧；透明像素统一清零，alpha 量化为 16 级，签名
+  `.hpet` 中的完整 `preload.bin` 为 980403 字节，同时保留平滑透明边缘。
+- 真机首次仍以一个 `preload.bin` 传输时，在 BLE bulk `seq=1283`、`offset=282480` 处表面断开。
+  因此 Companion 在合成 Runtime 包时把已签名的 v2 文件拆成 124 字节目录和
+  `state0.bin` 到 `state8.bin` 九个状态块；每个文件重新开始 transfer id、offset 和 sequence，
+  同时绕过 Runtime 1 MiB 单文件上限。板端兼容拆分布局、v2 单文件和旧 v1 包。
+- 分文件后继续使用四包突发窗口，真机仍会在累计约 105 个 BLE 包后进入半开 GATT 状态：能重连，
+  但 `status` 只返回旧值，必须完整重启才能恢复。最小对照把窗口降为 1 后，真实前六个文件和
+  abort 全部通过。因此 bulk v2 现在每帧都请求板端 ACK，用板端 mailbox/SD 已处理完成作为
+  背压信号；吞吐略降，但不再让 CoreBluetooth 的“写入已接受”超前于板端消费能力。
+- 完整服务复测又捕获到最后一帧成功 ACK 丢失：板端已经报告 `next=25 offset=5484`，重试时返回
+  `rc=-7`（`-RT_EBUSY`）。主机现在仅在 transfer id、next、offset 全部精确命中且错误码恰为
+  `-RT_EBUSY` 时按“已应用”继续；CRC、乱序、偏移或其他错误仍失败。这个规则让完成帧重试
+  幂等，不以放宽完整性校验换成功率。
+- 单用途探针的新 BLE 客户端稳定，而常驻 Companion 连接在先承载 heartbeat/任务 flow、再进入
+  bulk 后仍容易丢通知。安装事务现在先置 `_installing` 暂停所有发布者，再关闭并新建一个加密
+  GATT 客户端；这个专用会话完成传输、commit 和严格 ready gate 后才恢复快照同步。
+- 连接恢复代码原先把 `disconnect_pause` 放在 CoreBluetooth `__aexit__` 之前，实际效果是先等
+  0.8 秒、再断开、随后立即重连，板端来不及处理 disconnect event。顺序已改为停止 notify、
+  实际断开、清理本地队列、等待冷却、再允许扫描重连，并用事件顺序测试锁定。
+- “单连接累计约 103 个包就退化”后来被真机反证，它是通知 ACK 丢失造成的表象，不是连接寿命
+  上限。曾尝试在 18 个文件之间主动断开，反而重复触发扫描、加密和 CCCD 订阅竞态；最终实现
+  删除文件边界重连，只在真实控制/数据 ACK 失败时最多执行三轮冷却、重连和 Runtime 验证。
+- 实机捕获到 `install_begin` 已确认，紧接着的 `install_bulk` 在 CoreBluetooth 侧“写入成功”却
+  没有业务 ACK，只能反复读到旧 `install_begin`。把控制文本改成 Write Request 仍会复现，说明
+  ATT 完成不是板端 worker 完成。最终协议让 `install_begin/install_bulk` 在 ACK 超时后重连并以
+  相同参数最多重发三次；板端把同 staging path、size、transfer id 的重复 bulk begin 在任意已接收
+  offset（包括已完成）都视为幂等成功，重复的同名 `install_begin` 也不再中止并重建 staging。
+  其他 busy 冲突仍拒绝。`install_end` 保持提交结果不确定后的状态验证，不能盲目重发或 abort。
+- 最终根因在板端通知发送：`sibles_write_value()` 使用有限 TX packet pool，队列满时会返回 0；旧
+  代码忽略返回值，因此 worker 已写入 SD 并更新 `next/offset`，业务 ACK 却静默消失。固件现在
+  检查返回值，以 5 ms 间隔最多重试 20 次，耗尽才打印 `status notify dropped`；通知先复制本地
+  快照，避免共享 status 在重试期间被其他回调改写。
+- 每次订阅 status characteristic 时，旧 CCCD 回调还会把共享状态改写为 `ok notify=1` 并主动
+  通知，延迟到达后污染 `status/install_begin` 响应。最终固件只记录 CCCD 状态，不再生成这条
+  非请求响应；主机仍会清空旧固件的 marker 以保持兼容。安装控制文本与 bulk 帧继续使用 Write
+  Command，可靠性由幂等业务 ACK 和精确进度字段保证；普通非安装控制命令仍使用 Write Request。
+- 监控器曾把完全相同的 `pet.tasks` 在每轮轮询中重复发布。失败现场在真正安装前已累计
+  `flow=50` 和 `flow=91`，白白消耗 GATT 写入与通知预算，并更容易把常驻会话推入半开状态。
+  `DeviceSession` 现在只在任务快照内容变化时发送；相同内容只刷新本地快照时间，首次连接和
+  重连仍会重放最新值，heartbeat 继续独立承担连接保活。
+- Petdex 源图临时不可达时，Companion 只对 `fetch failed` 启用本地缓存回退。缓存包必须重新
+  通过 Ed25519 验签，slug 一致，且明确是九状态、120 ms 的 v2 包；转换、格式或签名错误仍
+  直接失败，不能用旧缓存掩盖。
+- 保留 `VBPC v1` 读取兼容。旧五状态包在九状态语义下回退为相近动作，但严格的新宠物部署
+  gate 只接受 `preloadVersion=2` 和 `assetStates=9`。
+- 状态映射为：idle -> `idle`，running/transcribing -> `running`，ready/recording -> `waving`，
+  needs_input -> `waiting`，blocked -> `failed`，审批 -> `review`。左/右滑分别临时播放
+  `runLeft/runRight`，点击宠物和部署后首次启动播放一轮 `jumping`，然后回到最新任务状态。
+- `pet.preview` flow 可按名字锁定九种动作，供真机自动验收；发送 `auto` 恢复任务语义。状态
+  JSON 新增 `assetState`、`requestedAssetState`、`assetStates` 和 `preloadVersion`。
+- 2026-07-24 最终真机任务 `pet-d21912b1f01c52ce` 在单条加密 BLE 会话内完成 18 个文件、
+  1009703 字节和 4621 个步骤，未发生重连或进度回退。ready gate 返回 `pet=nier-2b`、
+  `preloadVersion=2`、`assetStates=9`、`frameMs=120`、`preloadedBytes=1328640`、
+  `loaderPhase=0`、`droppedFlows=0`。
+
+### 后续规则
+
+1. 图库预览 contract、转换器、包清单、固件状态枚举和 ready gate 必须同时表达九状态；不能只
+   改网页标签。
+2. 动画内存预算按“单帧字节数 x 最大帧数 x 缓存槽数”计算，不按包的总帧数计算；播放函数
+   必须保持零 SD I/O。
+3. 可变帧格式必须把每状态帧数写入包目录和 manifest，不能用全局 `framesPerState` 猜测。
+4. 压缩策略必须用真实复杂宠物测量，并同时检查 `.hpet` 总大小、Runtime 单文件上限和板端
+   解压峰值；理论上相似不代表异或差分一定更小。
+5. BLE write-without-response 只表示主机栈接受了写入，不表示板端 mailbox 和 SD 已消费。窗口
+   大小必须由真机长传输决定；当前稳定基线是二进制 bulk window=1，未经完整包压力测试不能
+   调大。事务控制文本必须等 Runtime status ACK，并且仅在板端具备明确幂等条件时才能重发。
+6. 后台加载线程不能调用 LVGL。非活动缓存覆写前由 GUI 线程失效图像缓存，完成后按 sequence
+   原子接管，旧请求完成时不得覆盖更新的状态请求。
+7. “部署完成”必须验证九状态 v2、当前状态至少两帧、120 ms、resident cache 非零和
+   `uiTicks` 前进；仅看到文件传输 100% 不算成功。
+
+### 验证方式
+
+离线与构建：
+
+```bash
+node scripts/build_hpet_petdex.js --self-test
+.venv/bin/python scripts/hpet_package.py --self-test
+.venv/bin/python scripts/runtime_install_serial.py --self-test
+.venv/bin/python scripts/codex_pet_companion.py --self-test
+.venv/bin/python scripts/runtime_architecture_audit.py --self-test
+./scripts/build.sh
+```
+
+暂停 Companion 发布者后，在同一串口连接内运行（CH340 每次重新打开可能重启板子，不能把发送
+和读取拆成两个进程）：
+
+```bash
+.venv/bin/python scripts/runtime_install_serial.py /dev/cu.usbserial-13220 \
+  --codex-pet-sweep --ready-timeout 12 --no-echo
+```
+
+工具逐个发送 `idle/runRight/runLeft/waving/jumping/failed/waiting/running/review`，完成后发送 `auto`。
+2B 真机帧数应为 `6/8/8/4/5/8/6/6/6`；每次要求 `requestedAssetState` 等于 `assetState`、
+`frame` 前进、`loaderPhase=0`、`uiTicks` 增长且 `droppedFlows=0`。切换期间串口不得出现
+`spi sem timeout`、zlib 解压错误、assert 或 hard fault；动画稳定播放时不得产生 SD 读取日志。
+
 ## 2026-07-05：2048 滑动不灵敏
 
 ### 日期 / App
@@ -400,6 +636,12 @@ Petdex 页面资源、仓库导入配置、Runtime 包中的 catalog/preload 和
 #### 修复方式
 
 - 导入器先验证源帧，再生成 `scripts/petdex_pets.json`、catalog 和 preload 资源。
+- Petdex 标准前九行固定为 `Idle / Run Right / Run Left / Waving / Jumping / Failed /
+  Waiting / Running / Review`。图库必须完整展示九种动作，不能把前五行直接重命名成业务状态。
+- 板端五个任务状态必须从九行动作中按语义抽取：`idle=0`、`ready/waving=3`、
+  `blocked/failed=5`、`needs/waiting=6`、`running=7`。
+- `scripts/petdex_state_contract.json` 是唯一映射源；Companion、`.hpet` 构建器和批量导入器
+  必须共同读取它，不能复制常量。
 - 当前产品策略明确为单一 active 宠物；导入新宠物时替换 active 资源，而不是让板端同时
   预存无限宠物。
 - Runtime 包校验器检查 manifest、路径、状态帧、包大小和目录安全性；安装后由串口/BLE
@@ -411,7 +653,8 @@ Petdex 页面资源、仓库导入配置、Runtime 包中的 catalog/preload 和
 
 1. 新宠物验收顺序固定为：源站帧校验 -> Runtime 包校验 -> 安装 -> `.active` -> 冷启动日志
    -> 五状态真机观察。
-2. 任何状态帧缺失都应在导入或包校验阶段失败，不要等到真机运行时才回退。
+2. 任何状态帧缺失都应在导入或包校验阶段失败，不要等到真机运行时才回退；禁止另写一套
+   `0/1/2/3/4` 映射覆盖导入器已经验证过的 Petdex 行约定。
 3. 记录当前 active 宠物名称和包校验结果，避免“电脑端喜欢的宠物”和“板端实际运行的宠物”
    混淆。
 
@@ -423,7 +666,8 @@ node scripts/extract_codex_rocky.js --check
 python3 scripts/runtime_package.py --all
 ```
 
-板端确认 `active=codex_pet`、`preloaded pets=1`，并逐个触发 idle/running/done/error。
+网页逐个确认九种 Petdex 动作；板端确认 `active=codex_pet`、`preloaded pets=1`，并逐个触发
+idle/running/done/needs/error。
 
 ### 问题四：任务数量、`1 active` 和宠物动画没有随 Codex 任务更新
 
@@ -721,8 +965,9 @@ BLE GATT 写入、板端 SD 写入和每条 ACK 的累积延迟。网页预览�
   单一 transport worker 串行发送，心跳不插入安装队列。超时只在动态预算耗尽后触发，不能用固定 180 秒截断大包。
 - 网页加载 spritesheet 后用 Canvas 检测每个状态行的非透明列，只循环可见帧；状态切换重置帧索引，
   用 `requestAnimationFrame` 驱动连续动画。检测失败时回退到第 0 帧，不显示透明列。
-- 回归必须记录：slug、运行时文件总字节、命令数、最大命令长度、动态 deadline、`frames=2`、
-  `frameMs=180`、`preloadedBytes=830400`，并在真实板子上连续部署至少 10 次后再发布。
+- 回归必须记录：slug、运行时文件总字节、命令数、最大命令长度、动态 deadline、
+  `preloadVersion/assetStates/frames/frameMs/preloadedBytes`，并在真实板子上连续部署至少 10 次后
+  再发布。v2 包要求九状态和 120 ms，不再沿用旧 v1 的固定两帧数值。
 
 ### 问题十一：临时 CCCD 值会遮住真正的 BLE status 通知
 
@@ -1100,9 +1345,9 @@ Runtime transport method 'install_package' exceeded its deadline
   BLE 回调线程；若要下调栈，必须先加入 stack watermark 证据。
 - BLE 安装单独使用 `max_command_chars=255` 和 96 bytes payload；串口仍保留自己的 FinSH
   250 字符限制，不能让两个 transport 共享一个“看起来安全”的上限。
-- BLE 安装命令使用 ATT Write Command（无 ATT write response），随后严格等待 Runtime status
-  characteristic 的 `install_begin/file/end` ACK。这样不会让 ATT 写响应和 worker 的 SD/SPI
-  工作互相竞态；普通状态和控制命令继续使用原来的 Write Request。
+- BLE 安装控制文本和二进制 bulk 帧都使用 Write Command，并严格等待 Runtime status ACK；控制
+  命令靠有限重连重发和板端参数幂等，bulk 帧靠 transfer id、sequence、offset、CRC 和逐帧 ACK
+  提供幂等与背压。普通非安装控制命令仍使用 Write Request。
 - Companion 安装锁和 transport worker 保持单一 owner；安装期间不发送 heartbeat/task flow，
   成功后只回放最新快照。失败后的 `install_abort` 只能在明确未提交时执行，`install_end` ACK
   丢失必须走提交结果不确定的重连验证路径。
@@ -1117,7 +1362,8 @@ Runtime transport method 'install_package' exceeded its deadline
 | BLE 文件 payload | 96 bytes | 每块完成后等待板端 ACK |
 | 串口 FinSH | 250 chars | 仅适用于 serial transport，不与 BLE 共用 |
 | BLE worker 栈 | 8192 bytes | 覆盖 install、路径处理和 staging 清理调用链 |
-| BLE 安装写入 | Write Command | 可靠性由 Runtime status ACK 提供 |
+| BLE 安装控制文本 | Write Command | 有限重连重发 + 参数幂等 + Runtime status ACK |
+| BLE bulk 帧 | Write Command | transfer/sequence/offset/CRC + 逐帧 Runtime ACK |
 
 旧文档中“BLE 224 bytes / 511 chars”的数值只能作为早期实验记录；本轮实机数据已经证明它在
 持续文件写入下仍会掉链，后续实现和验收以本节参数为准。
@@ -1163,8 +1409,8 @@ node scripts/codex_pet_web_test.js
 ```
 
 真机安装必须同时满足：任务 `status=done/progress=100`、目标宠物 `state=running`、
-`frames=2`、`preloadedBytes>0`、`queuedFlows=0`、`droppedFlows=0`，并且串口无 SPI/BLE
-故障关键字。
+`preloadVersion=2`、`assetStates=9`、`frames>=2`、`frameMs=120`、`preloadedBytes>0`、
+`queuedFlows=0`、`droppedFlows=0`，并且串口无 SPI/BLE 故障关键字。
 
 以上一键部署实现和接口详见
 [`codex-pet-one-click-deploy.md`](codex-pet-one-click-deploy.md)。
@@ -1206,6 +1452,148 @@ Codex Pet 普通状态不再常驻显示底部 `< / >` 任务按钮。宠物保�
 
 底部按钮对象只在真实一次性审批存在时临时显示为 `Allow / Deny`。普通任务浏览完全隐藏，
 但审批仍使用明确按钮，不把有副作用的允许/拒绝动作绑定到容易误触的滑动手势。
+
+## 2026-07-24：Codex Pet 点击跳跃在缓存命中后卡死
+
+### 现象
+
+宠物首次启动会正常播放一轮 `jumping`。稍后在屏幕上点击宠物时，图像进入跳跃状态，但可能
+停在其中一帧，持续显示 `jumping`，不会自动回到当前任务对应状态；在跳跃过程中再次点击更容易
+稳定复现。Companion、BLE 和 UI tick 此时仍然存活，因此这不是连接断开或 GUI 线程停摆。
+
+### 根因
+
+九状态实现使用两个 PSRAM 缓存槽。首次启动已经把 `jumping` 留在第二个缓存槽，后续点击会直接
+命中缓存，不经过后台加载完成回调。旧代码只在异步加载完成回调里设置
+`transient_started=1`，所以缓存命中的跳跃虽然被激活，却没有被标记为可结束；帧循环回卷时的
+退出条件永远不成立。动画中再次点击还会重置瞬态状态，但同状态渲染不会重新激活缓存，进一步
+放大这个问题。
+
+### 修复
+
+- `vb_pet_begin_transient()` 在选择缓存前统一设置瞬态状态和 `transient_started`，缓存命中和异步
+  加载走同一套生命周期。
+- 当前已经处于相同瞬态动作时，再次点击会把帧索引重置为 0、刷新首帧并重建下一帧 deadline；
+  因此重复点击表示“从头再播放一轮”，不会把动画卡在中间。
+- 异步加载完成回调不再单独负责启动瞬态，避免生命周期依赖某一种缓存路径。
+
+### 回归方法
+
+`runtime_install_serial.py --codex-pet-click-test` 通过 `pet.preview tap` 调用与物理点击相同的
+`vb_pet_begin_transient()`。测试先建立非跳跃基线，再验证跳跃帧推进，在动画尚未结束时追加一次
+点击，最后要求状态自动退出 `jumping`。这条测试必须使用 80 ms 的低延迟串口采样；普通
+`codex_pet()` 状态读取为完整诊断预留 2 秒等待，会错过约 600 ms 的整轮跳跃动画并造成假失败。
+
+真机修复前，回归稳定报：
+
+```text
+Codex Pet click test remained stuck in jumping after a repeated tap
+```
+
+修复固件刷入后，同一块板子实测为 `idle -> jumping(frame=2) -> idle`；随后九状态 sweep 全部
+通过，帧数保持 `6/8/8/4/5/8/6/6/6`，`loaderPhase=0`、`droppedFlows=0`。
+
+```bash
+.venv/bin/python scripts/runtime_install_serial.py /dev/cu.usbserial-13220 \
+  --codex-pet-click-test --ready-timeout 8 --no-echo
+.venv/bin/python scripts/runtime_install_serial.py /dev/cu.usbserial-13220 \
+  --codex-pet-sweep --ready-timeout 12 --no-echo
+```
+
+以后所有短暂动作都必须覆盖三条路径：首次异步加载、已加载缓存命中、动作尚未结束时重复触发。
+只测试长期固定的 preview 状态无法发现这一类瞬态生命周期错误。
+
+## 2026-07-25：三遍全量审查新增经验
+
+本轮按“静态与自测、变更与高风险链路逐行审查、最终回归与运行态核对”执行三遍检查。重点不是
+重复运行同一条命令，而是让三遍覆盖不同失效面：第一遍寻找语法、构建和协议错误；第二遍沿
+`.hpet -> Companion -> BLE -> Runtime -> PSRAM/LVGL` 数据流检查边界；第三遍重新运行完整回归、
+固件构建、历史包兼容和当前服务状态检查。
+
+### 问题二十七：重复 loader 唤醒可能覆盖正在显示的缓存槽
+
+#### 现象与根因
+
+点击宠物或快速切换任务状态时，第一轮跳跃可以启动，但中途可能卡在一帧或出现撕裂。除了此前
+已修复的“缓存命中没有启动瞬态生命周期”问题，异步加载路径还存在另一条独立竞态：状态变化
+期间可以连续释放 loader semaphore。worker 完成一次加载后若直接领取一个陈旧 token，会按新
+快照再次选择缓存槽；此时这个槽可能已经被 LVGL 激活，后台解压便会与前台读帧重叠。
+
+#### 修复与回归
+
+- loader 被唤醒后先用 `RT_WAITING_NO` 清空已排队 token，再读取一次最新目标状态，多个旧请求
+  合并为一次实际加载。
+- 合并后再次检查 stop 标志，避免退出阶段继续访问缓存。
+- `runtime_architecture_audit.py --self-test` 固定检查非阻塞 drain，防止以后把 worker 改回逐 token
+  执行。
+- 瞬态动画仍必须同时覆盖首次异步加载、缓存命中和动画中重复点击三条路径；semaphore 合并不能
+  替代瞬态生命周期测试。
+
+### 问题二十八：主机曾允许签名结构损坏的 `VBPC v2`
+
+#### 现象与根因
+
+旧的 `.hpet` 校验只核对魔数、总长度和摘要。状态目录即使包含重叠块、尾随数据、损坏 zlib 或
+与帧数不一致的解压长度，也可能先被主机签名并通过 BLE 传输，最后才在板端安装或加载阶段失败。
+这会把本应毫秒级发现的转换错误伪装成耗时很长的部署失败。
+
+#### 修复与回归
+
+- v2 固定要求单宠物、160x173、9 状态，并要求状态块从目录末尾开始严格连续，禁止空洞、重叠
+  和尾随数据。
+- 使用有输出上限的 zlib 流式校验，要求 `eof`、无未消费/额外数据且解压长度精确匹配帧数。
+- manifest 的逐状态帧数、总帧数和最大帧数必须与 `preload.bin` 目录逐项一致，不能分别合法却
+  互相矛盾。
+- 构建器在签名前校验，读取器在验签和 catalog 校验后再次校验；不能因为签名正确就信任内部
+  二进制布局。
+- 自测先用重叠、尾随和损坏 zlib 样本证明旧实现确实接受，再固定为拒绝回归。现有缓存中的
+  6 个 `.hpet`（含 1 个九状态 v2）全部通过新校验和 Runtime 合成。
+
+### 问题二十九：素材主机白名单可被 HTTP 重定向绕过
+
+#### 现象与根因
+
+JS 转换器和 Python Companion 只检查最初的 `assets.petdex.dev` URL，底层 HTTP 客户端会自动
+跟随重定向。合法首跳因此可以把下载带到任意主机；带用户名密码或非标准端口的 URL 也没有被
+明确拒绝。这既扩大了网络访问边界，也让不同实现的安全行为不一致。
+
+#### 修复与回归
+
+- URL 必须是 HTTPS、精确主机、无凭据、无 fragment 且使用默认 443 端口。
+- JS 最多手动跟随 4 次重定向，每一跳先解析相对地址再重新检查；Python 使用自定义 redirect
+  handler，在 `urllib` 发出下一跳请求前执行同一策略。
+- 两侧自测都覆盖凭据、端口和跨主机跳转。网络失败仍允许使用已经校验过的 v2 摘要缓存，但
+  安全策略拒绝不能降级为缓存命中。
+
+### 问题三十：旧 `mainmenu.py` 已不能可靠生成菜单数据
+
+脚本仍使用 Python 2 的 `print` 语法，在当前 Python 3 工具链中不能执行；同时 `r == 0` 分支只
+计算 `2**12` 却没有 append，生成列表永远少一个元素。修复后所有分支统一追加数据，脚本改为
+Python 3，并增加 `--self-test` 检查长度、零值路径和发射输出。以后即使脚本不是默认构建入口，
+仓库级 Python 编译也必须覆盖它，不能把“目前没调用”当成语法和数据错误的豁免。
+
+### 问题三十一：兜底 UI 和专用页面仍有物理屏安全区偏差
+
+真机是 390x450 圆角 AMOLED，可用安全区固定为 `x=30..360`、`y=36..414`。本轮审计发现：
+Codex Pet 连接文字右缘越过 x=360；Thunder Wing 暂停键不足 44x44；IMU 校准键低于 y=414；
+Pager 多处文字从 x=20 开始且错误提示位于 y=410；通用 manifest action 仅高 34 px。
+
+修复后专用页面全部收回安全区，交互目标至少 44x44。通用 manifest 组件改放在
+`330x278` 的纵向滚动容器中，最多 8 项仍可访问，action 为 300x44；有 manifest 组件时不再让
+底部诊断文字与组件重叠。静态审计仍会报告少量小型装饰对象、恰好落在安全边界的文字，以及
+`#if 0` 中已停用的旧 App Manager；这些对象不承担触控，不是当前可达页面的裁切问题。新增或
+重新启用停用页面时，必须重新按 390x450 实机规范审查，不能沿用这次豁免。
+
+### 本轮验证结果与边界
+
+- `runtime_deep_check.py` 全部通过，包括 22 个 Runtime 包、63 个 package case、完整可靠性组和
+  Swift 47 项测试。
+- `.hpet`、Petdex 转换、Companion、Web、Bridge、transport、架构审计和全部 tracked Python
+  编译分别通过；固件从清洁依赖状态完成全量链接。
+- 当前 `127.0.0.1:8790` 服务仍显示 Companion/Codex/板子全部连接，只有一个 Monitor/BLE owner。
+- 为避免中断用户正在使用的板子，本轮没有擅自刷写新固件。loader 合并和最后一轮 UI 修改目前
+  的证据是自测、架构审计和完整固件构建；下次获准刷写后仍需补跑 click test、九状态 sweep 和
+  3 分钟 exercise soak，不能把这部分写成已完成实机验证。
 
 ## 待继续沉淀的问题
 

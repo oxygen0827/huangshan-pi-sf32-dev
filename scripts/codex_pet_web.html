@@ -91,6 +91,26 @@
       font-weight: 740;
     }
     .compact-button { min-height: 32px; padding: 0 11px; background: var(--surface-2); border-color: var(--line); color: var(--text); }
+    .hook-alert {
+      border-top: 1px solid color-mix(in srgb, var(--coral) 58%, var(--line));
+      border-bottom: 1px solid color-mix(in srgb, var(--coral) 58%, var(--line));
+      background: #2b1918;
+    }
+    .hook-alert[data-severity="warning"] { border-color: #79642c; background: #282314; }
+    .hook-alert[hidden] { display: none; }
+    .hook-alert-row {
+      min-height: 82px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+      padding: 13px 0;
+    }
+    .hook-alert-title { font-size: 14px; font-weight: 780; }
+    .hook-alert-detail { margin-top: 4px; color: #e1b8b3; font-size: 12px; line-height: 1.45; }
+    .hook-alert[data-severity="warning"] .hook-alert-detail { color: #d8c98f; }
+    .hook-alert-solution { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .hook-alert-solution code { color: var(--text); font-weight: 760; }
     main { padding: 26px 0 104px; }
     .gallery-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
     .gallery-head h2 { margin: 0; font-size: 19px; }
@@ -132,7 +152,7 @@
     .author { margin: 5px 0 12px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .states {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 3px;
       padding: 3px;
       margin-bottom: 13px;
@@ -140,7 +160,7 @@
       border-radius: 6px;
       background: #141614;
     }
-    .state-button { min-width: 0; min-height: 30px; padding: 0 4px; color: var(--muted); background: transparent; font-size: 11px; }
+    .state-button { min-width: 0; min-height: 34px; padding: 0 5px; color: var(--muted); background: transparent; font-size: 11px; }
     .state-button.active { background: var(--surface-2); color: var(--text); }
     .actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
     .primary-button { min-height: 40px; padding: 0 14px; background: var(--green); color: #092012; }
@@ -186,6 +206,7 @@
       .connection { border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 0; }
       .connection:last-child { border-bottom: 0; }
       .connections { position: static; }
+      .hook-alert-row { align-items: flex-start; flex-direction: column; gap: 7px; }
       .job-row { grid-template-columns: 1fr auto; padding: 14px 0; }
       .job-row .progress { grid-row: 2; grid-column: 1 / -1; }
     }
@@ -236,6 +257,20 @@
     </div>
   </header>
 
+  <section id="codexWarning" class="hook-alert" data-severity="error" role="alert" hidden>
+    <div class="shell hook-alert-row">
+      <div>
+        <div id="codexWarningTitle" class="hook-alert-title">Codex Hooks 未信任</div>
+        <div id="codexWarningDetail" class="hook-alert-detail">状态事件不会发送到 Companion。</div>
+      </div>
+      <div class="hook-alert-solution">
+        在 Codex CLI 输入 <code>/hooks</code>，核对 6 条 Companion 命令后选择 Trust all and continue，
+        然后重启 Codex Desktop 或新建任务。
+      </div>
+      <button id="copyHooksCommand" class="compact-button" type="button">复制 /hooks</button>
+    </div>
+  </section>
+
   <main class="shell">
     <div class="gallery-head">
       <h2>宠物图库</h2>
@@ -280,7 +315,21 @@
     let nextAnimationAt = 0;
     const SPRITE_COLUMNS = 8;
     const SPRITE_FRAME_MS = 180;
-    const stateLabels = { idle: "待机", running: "运行", ready: "完成", needs: "等待", blocked: "错误" };
+    const stateLabels = {
+      idle: "待机",
+      runRight: "向右跑",
+      runLeft: "向左跑",
+      waving: "挥手",
+      jumping: "跳跃",
+      failed: "失败",
+      waiting: "等待",
+      running: "运行",
+      review: "审阅",
+    };
+    const stateTitles = {
+      idle: "Idle", runRight: "Run Right", runLeft: "Run Left", waving: "Waving",
+      jumping: "Jumping", failed: "Failed", waiting: "Waiting", running: "Running", review: "Review",
+    };
     const stageLabels = {
       queued: "排队中", download: "下载源动画", verify: "校验宠物包", transfer: "蓝牙传输",
       restart: "重启应用", complete: "部署完成", failed: "部署失败", pair: "连接板子",
@@ -312,20 +361,45 @@
       $(id).className = `dot${ok ? " ok" : bad ? " bad" : ""}`;
     }
 
+    function isCodexReady(codex) {
+      return Boolean(codex?.bound && codex?.trusted === true);
+    }
+
+    function hookTrustNeedsAction(codex) {
+      return Boolean(codex?.bound && ["modified", "untrusted", "disabled", "incomplete"].includes(codex?.trustStatus));
+    }
+
     function renderStatus() {
       const value = state.status || {};
       const companion = Boolean(value.companion?.connected);
-      const codex = Boolean(value.codex?.bound);
+      const codexState = value.codex || {};
+      const bound = Boolean(codexState.bound);
+      const codex = isCodexReady(codexState);
+      const trustNeedsAction = hookTrustNeedsAction(codexState);
+      const trustUnknown = bound && codexState.trustChecked && codexState.trustStatus === "unknown";
       const board = Boolean(value.board?.connected);
       setDot("companionDot", companion, !companion);
-      setDot("codexDot", codex, value.codex?.detected === false);
+      setDot("codexDot", codex, trustNeedsAction || codexState.detected === false);
       setDot("boardDot", board, false);
       $("companionDetail").textContent = companion ? `本地服务 v${value.companion?.version || 1}` : "未连接";
-      $("codexDetail").textContent = codex ? `${value.codex?.events?.length || 0} 个 Hooks 已绑定` : (value.codex?.detected ? "尚未绑定" : "未检测到 Codex");
+      $("codexDetail").textContent = codex
+        ? `${codexState.events?.length || 0} 个 Hooks 已绑定并信任`
+        : (trustNeedsAction
+          ? `${codexState.untrustedEvents?.length || codexState.events?.length || 0} 个 Hooks 未信任`
+          : (bound
+            ? (trustUnknown ? "无法确认 Hooks 信任状态" : "正在检查 Hooks 信任状态")
+            : (codexState.detected ? "尚未绑定" : "未检测到 Codex")));
       $("boardDetail").textContent = board
         ? `${value.board?.name || "VibeBoard"} · ${value.board?.bleInstall ? "Runtime BLE" : "已加密"}`
         : "等待蓝牙连接";
-      $("codexAction").textContent = codex ? "解绑" : "绑定";
+      const showTrustWarning = trustNeedsAction || trustUnknown;
+      $("codexWarning").hidden = !showTrustWarning;
+      $("codexWarning").dataset.severity = trustNeedsAction ? "error" : "warning";
+      $("codexWarningTitle").textContent = trustNeedsAction ? "Codex Hooks 未信任" : "无法确认 Codex Hooks 信任状态";
+      $("codexWarningDetail").textContent = trustNeedsAction
+        ? `${codexState.untrustedEvents?.length || codexState.events?.length || 0} 条状态 Hook 被 Codex 跳过，Codex Pet 不会更新运行状态。`
+        : "Companion 无法读取 Codex hooks/list；在确认信任状态前不会把 Codex 标记为可用。";
+      $("codexAction").textContent = !bound ? "绑定" : (codex ? "解绑" : "解决");
       $("codexAction").disabled = state.jobActive;
       $("boardAction").textContent = state.jobActive ? "安装中" : (board ? "已连接" : "连接");
       $("boardAction").disabled = board || state.jobActive;
@@ -353,7 +427,7 @@
 
     function cardTemplate(pet) {
       const buttons = Object.keys(stateLabels).map(name =>
-        `<button type="button" class="state-button${name === "idle" ? " active" : ""}" data-state="${name}">${stateLabels[name]}</button>`
+        `<button type="button" class="state-button${name === "idle" ? " active" : ""}" data-state="${name}" title="Petdex · ${stateTitles[name]}">${stateLabels[name]}</button>`
       ).join("");
       return `<article class="pet-card" data-slug="${esc(pet.slug)}">
         <div class="pet-preview"><div class="pet-sprite" data-row="0" data-rows="9" data-src="${esc(pet.previewUrl)}" data-fallback="${esc(String(pet.displayName || pet.slug).slice(0, 1).toUpperCase())}"></div></div>
@@ -567,8 +641,8 @@
     }
 
     async function deploy(slug, digest = null) {
-      if (!state.status?.codex?.bound) {
-        showToast("请先绑定 Codex");
+      if (!isCodexReady(state.status?.codex)) {
+        showToast(state.status?.codex?.bound ? "请先信任 Codex Hooks" : "请先绑定 Codex");
         return;
       }
       if (!state.status?.board?.connected) {
@@ -595,10 +669,10 @@
       const intent = state.pendingInstall;
       state.deepLinkHandled = true;
       document.querySelector(`[data-slug="${CSS.escape(intent.slug)}"]`)?.scrollIntoView({ block: "center" });
-      if (state.status.codex?.bound && state.status.board?.connected) {
+      if (isCodexReady(state.status.codex) && state.status.board?.connected) {
         deploy(intent.slug, intent.digest);
       } else {
-        showToast("已找到该宠物，请先绑定 Codex 并连接 VibeBoard");
+        showToast("已找到该宠物，请先完成 Codex Hooks 信任并连接 VibeBoard");
       }
     }
 
@@ -633,7 +707,14 @@
     }
 
     async function bindCodex() {
-      const bound = Boolean(state.status?.codex?.bound);
+      const codex = state.status?.codex || {};
+      const bound = Boolean(codex.bound);
+      if (bound && !isCodexReady(codex)) {
+        $("codexWarning").hidden = false;
+        $("codexWarning").scrollIntoView({ behavior: "smooth", block: "center" });
+        showToast("请在 Codex CLI 输入 /hooks 完成信任");
+        return;
+      }
       try {
         await api(bound ? "/v1/codex/unbind" : "/v1/codex/bind", { method: "POST", body: "{}" });
         await refreshStatus();
@@ -674,6 +755,14 @@
     $("boardAction").addEventListener("click", pairBoard);
     $("loadMore").addEventListener("click", () => loadPets({ append: true }));
     $("jobClose").addEventListener("click", () => { $("jobPanel").hidden = true; });
+    $("copyHooksCommand").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText("/hooks");
+        showToast("已复制 /hooks");
+      } catch (_) {
+        showToast("请在 Codex CLI 中输入 /hooks");
+      }
+    });
     $("search").addEventListener("input", event => {
       state.query = event.target.value.trim();
       window.clearTimeout(state.searchTimer);
