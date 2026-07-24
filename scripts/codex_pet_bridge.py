@@ -29,7 +29,15 @@ from codex_pet_protocol import (
 from codex_pet_console import CodexPetConsole
 from codex_pet_status import CodexPetStatusService, QUOTA_CHANNEL
 from codex_pet_voice import CodexPetVoiceService, GLMASRTranscriber, open_codex_thread
-from runtime_transport import BLETransport, BLETransportOptions, DEFAULT_DEVICE_NAME, RuntimeTransportError
+from runtime_transport import (
+    BLE_RUNTIME_STATUS_API,
+    CAPABILITIES_API,
+    BLETransport,
+    BLETransportOptions,
+    DEFAULT_DEVICE_NAME,
+    InstallCommitUncertain,
+    RuntimeTransportError,
+)
 from voice_bridge_common import truncate_utf8
 
 
@@ -46,8 +54,14 @@ MCP_MESSAGE_CHANNEL = "codex.mcp"
 HEARTBEAT_INTERVAL_SECONDS = 10.0
 PET_READY_TIMEOUT_SECONDS = 30.0
 TRANSPORT_COMMAND_TIMEOUT_SECONDS = 15.0
-TRANSPORT_CONNECT_TIMEOUT_SECONDS = 40.0
+TRANSPORT_CONNECT_TIMEOUT_SECONDS = 60.0
 TRANSPORT_CLOSE_TIMEOUT_SECONDS = 8.0
+TRANSPORT_INSTALL_TIMEOUT_SECONDS = 360.0
+TRANSPORT_INSTALL_TIMEOUT_MAX_SECONDS = 900.0
+TRANSPORT_INSTALL_CHUNK_BUDGET_SECONDS = 0.45
+# Keep BLE writes short enough for CoreBluetooth backpressure while the board's
+# BLE worker performs sustained filesystem writes and sends one ACK per chunk.
+CODEX_PET_INSTALL_CHUNK_BYTES = 96
 MAX_PROMPT_CHARS = 8_000
 MAX_IPC_LINE_BYTES = 16_384
 MAX_HARDWARE_RESULT_BYTES = 12_000
@@ -64,6 +78,16 @@ class BridgeError(RuntimeError):
 
 class BridgeAlreadyRunning(BridgeError):
     pass
+
+
+def install_timeout_seconds(files: Mapping[str, bytes], chunk_bytes: int) -> float:
+    """Return a bounded deadline that scales with the number of BLE chunks."""
+    if chunk_bytes <= 0:
+        raise ValueError("install chunk size must be positive")
+    chunks = sum((len(data) + chunk_bytes - 1) // chunk_bytes for data in files.values())
+    command_count = chunks + len(files) + 2
+    estimated = 30.0 + command_count * TRANSPORT_INSTALL_CHUNK_BUDGET_SECONDS
+    return min(TRANSPORT_INSTALL_TIMEOUT_MAX_SECONDS, max(TRANSPORT_INSTALL_TIMEOUT_SECONDS, estimated))
 
 
 class NonFatalTextStream:
@@ -120,6 +144,17 @@ class DeviceTransport(Protocol):
     async def verify_connection(self, *, timeout: float | None = None) -> str: ...
     async def flow_send(self, channel: str, sequence: int, text: str) -> str: ...
     async def next_status_notification(self, *, timeout: float = 0.5) -> str: ...
+    async def capabilities(self) -> str: ...
+    async def codex_pet(self) -> str: ...
+    async def install_package(
+        self,
+        package_id: str,
+        files: dict[str, bytes],
+        *,
+        chunk_bytes: int,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> str: ...
+    async def abort_install(self, app_id: str) -> str: ...
 
 
 class CodexAdapter(Protocol):
@@ -227,7 +262,7 @@ class TransportCommandQueue:
                     raise BridgeError(f"Runtime transport has no method {command.method!r}")
                 result = await asyncio.wait_for(
                     method(*command.args, **command.kwargs),
-                    timeout=self._timeout_for(command.method),
+                    timeout=self._timeout_for(command),
                 )
             except asyncio.CancelledError:
                 if not command.future.done():
@@ -255,11 +290,33 @@ class TransportCommandQueue:
                 if not command.future.done():
                     command.future.set_result(result)
 
-    def _timeout_for(self, method: str) -> float:
+    def _timeout_for(self, command: _TransportCommand) -> float:
+        method = command.method
         if method in {"connect", "verify_connection"}:
+            if method == "connect":
+                # BLE first-pair/replacement flows may include a stale cached
+                # peripheral attempt, a fresh scan, service discovery, and two
+                # CoreBluetooth authentication windows. Let the transport
+                # provide the exact budget instead of cutting it off at 60s.
+                deadline = getattr(self.transport, "connect_deadline_seconds", None)
+                if callable(deadline):
+                    try:
+                        return max(
+                            self.command_timeout,
+                            TRANSPORT_CONNECT_TIMEOUT_SECONDS,
+                            float(deadline()),
+                        )
+                    except (TypeError, ValueError):
+                        pass
             return max(self.command_timeout, TRANSPORT_CONNECT_TIMEOUT_SECONDS)
         if method == "close":
             return min(self.command_timeout, TRANSPORT_CLOSE_TIMEOUT_SECONDS)
+        if method == "install_package":
+            files = command.args[1] if len(command.args) > 1 else {}
+            chunk_bytes = command.kwargs.get("chunk_bytes", CODEX_PET_INSTALL_CHUNK_BYTES)
+            if isinstance(files, Mapping) and isinstance(chunk_bytes, int):
+                return max(self.command_timeout, install_timeout_seconds(files, chunk_bytes))
+            return max(self.command_timeout, TRANSPORT_INSTALL_TIMEOUT_SECONDS)
         return self.command_timeout
 
     def _fail_pending(self, message: str) -> None:
@@ -435,6 +492,10 @@ class DeviceSession:
         self._pet_selection: str | None = None
         self._replay_pending = False
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._connection_lock = asyncio.Lock()
+        self._install_lock = asyncio.Lock()
+        self._installing = False
+        self.runtime_capabilities: dict[str, object] = {}
         self._closed = False
 
     async def start(self, *, run_heartbeat: bool = True) -> None:
@@ -456,20 +517,21 @@ class DeviceSession:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        async with self._connection_lock:
+            await self._mark_transport_failure_unlocked()
+        await self.commands.close()
+
+    async def _mark_transport_failure_unlocked(self) -> None:
+        self.connected = False
         if self._transport_open:
             with contextlib.suppress(Exception):
                 await self.commands.call("close")
             self._transport_open = False
-        self.connected = False
-        await self.commands.close()
 
     async def mark_transport_failure(self) -> None:
         """Force the heartbeat loop to rebuild a half-open BLE session."""
-        self.connected = False
-        if self._transport_open:
-            with contextlib.suppress(Exception):
-                await self.commands.call("close")
-            self._transport_open = False
+        async with self._connection_lock:
+            await self._mark_transport_failure_unlocked()
 
     async def publish_state(
         self,
@@ -502,33 +564,33 @@ class DeviceSession:
             detail,
             envelope.expires_at_ms,
         )
-        if self.connected:
+        if self.connected and not self._installing:
             await self._send(STATE_CHANNEL, envelope)
         return envelope
 
     async def publish_project(self, project: str) -> None:
         self.project_name = truncate_utf8(project, 96) or "workspace"
-        if not self.connected:
+        if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", "pet.project", sequence, self.project_name)
 
     async def publish_resume_available(self) -> None:
         self.resume_available = True
-        if not self.connected:
+        if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", "pet.resume", sequence, "ready")
 
     async def publish_quota(self, payload: str) -> None:
-        if not self.connected:
+        if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", QUOTA_CHANNEL, sequence, payload)
 
     async def publish_approval(self, payload: str) -> None:
         self._approval_snapshot = (payload, self.clock_ms())
-        if not self.connected:
+        if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", APPROVAL_CHANNEL, sequence, payload)
@@ -537,7 +599,7 @@ class DeviceSession:
         if len(payload.encode("utf-8")) > 184:
             raise BridgeError("desktop task snapshot exceeds board transport limit")
         self._tasks_snapshot = (payload, self.clock_ms())
-        if not self.connected:
+        if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", TASKS_CHANNEL, sequence, payload)
@@ -546,13 +608,15 @@ class DeviceSession:
         if _SAFE_PET_SLUG.fullmatch(slug) is None:
             raise BridgeError("invalid pet slug")
         self._pet_selection = slug
-        if not self.connected:
+        if not self.connected or self._installing:
             return json.dumps({"pet": slug}, separators=(",", ":"))
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", PET_SELECTION_CHANNEL, sequence, slug)
         return json.dumps({"pet": slug}, separators=(",", ":"))
 
     async def publish_message(self, text: str) -> str:
+        if self._installing:
+            raise BridgeError("Codex Pet installation is in progress")
         sequence = self.sequencer.next()
         return str(await self.commands.call("flow_send", MCP_MESSAGE_CHANNEL, sequence, text))
 
@@ -564,7 +628,97 @@ class DeviceSession:
         return match.group(1), match.group(2)
 
     async def runtime_call(self, method: str, *args: object, **kwargs: object) -> object:
+        if self._installing and method not in {"codex_pet", "status"}:
+            raise BridgeError("Codex Pet installation is in progress")
         return await self.commands.call(method, *args, **kwargs)
+
+    async def reconnect(self, *, force_fresh: bool = False) -> None:
+        async with self._connection_lock:
+            if self._installing:
+                raise BridgeError("Codex Pet installation is in progress")
+            try:
+                await self._mark_transport_failure_unlocked()
+                if force_fresh:
+                    fresh_scan = getattr(self.commands.transport, "force_fresh_scan", None)
+                    if callable(fresh_scan):
+                        fresh_scan()
+                await self._connect_unlocked()
+                await self.heartbeat_once()
+            except BaseException:
+                await self._mark_transport_failure_unlocked()
+                raise
+
+    async def install_codex_pet(
+        self,
+        files: dict[str, bytes],
+        slug: str,
+        *,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, object]:
+        if _SAFE_PET_SLUG.fullmatch(slug) is None:
+            raise BridgeError("invalid pet slug")
+        async with self._install_lock:
+            async with self._connection_lock:
+                if not self.connected:
+                    raise BridgeError("VibeBoard is disconnected")
+                self._installing = True
+                self._replay_pending = False
+            try:
+                await self.commands.call(
+                    "install_package",
+                    "codex_pet",
+                    files,
+                    chunk_bytes=CODEX_PET_INSTALL_CHUNK_BYTES,
+                    progress=progress,
+                )
+                status = await self._wait_until_pet_ready(expected_slug=slug)
+                await self._replay_snapshot()
+                return status
+            except BaseException as install_error:
+                await self.mark_transport_failure()
+                if isinstance(install_error, InstallCommitUncertain):
+                    last_recovery_error: BaseException = install_error
+                    for attempt in range(4):
+                        try:
+                            await asyncio.sleep(1.5 + attempt)
+                            await self._connect()
+                            status = await self._wait_until_pet_ready(expected_slug=slug)
+                            await self._replay_snapshot()
+                            self._replay_pending = False
+                            print(
+                                "[codex_pet][ble] install commit verified after acknowledgement loss",
+                                flush=True,
+                            )
+                            return status
+                        except Exception as recovery_error:
+                            last_recovery_error = recovery_error
+                            await self.mark_transport_failure()
+                            print(
+                                f"[codex_pet][ble] commit verification {attempt + 1}/4 failed: "
+                                f"{type(recovery_error).__name__}",
+                                flush=True,
+                            )
+                    raise BridgeError(
+                        "VibeBoard disconnected during commit and the installed pet could not be verified"
+                    ) from last_recovery_error
+                if not isinstance(install_error, asyncio.CancelledError):
+                    for attempt in range(3):
+                        try:
+                            await asyncio.sleep(1.0 + attempt)
+                            await self._connect()
+                            await self.commands.call("abort_install", "codex_pet")
+                            print("[codex_pet][ble] interrupted install aborted after reconnect", flush=True)
+                            break
+                        except Exception as abort_error:
+                            print(
+                                f"[codex_pet][ble] abort recovery {attempt + 1}/3 failed: "
+                                f"{type(abort_error).__name__}",
+                                flush=True,
+                            )
+                raise install_error
+            finally:
+                async with self._connection_lock:
+                    self._installing = False
 
     async def heartbeat_once(self) -> PetEnvelope:
         sequence = self.sequencer.next()
@@ -587,39 +741,70 @@ class DeviceSession:
         return envelope
 
     async def _connect(self) -> None:
+        async with self._connection_lock:
+            if self.connected and self._transport_open:
+                return
+            await self._connect_unlocked()
+
+    async def _connect_unlocked(self) -> None:
         started = time.monotonic()
         print("[codex_pet][ble] connect attempt", flush=True)
+        pet_ready = False
         try:
             await self.commands.call("connect")
             self._transport_open = True
-            await self.commands.call("verify_connection", timeout=12.0)
-            await self._wait_until_pet_ready()
+            await self.commands.call("verify_connection", timeout=45.0)
+            capabilities = json.loads(str(await self.commands.call("capabilities")))
+            install = capabilities.get("ins")
+            if (
+                capabilities.get("api") != CAPABILITIES_API
+                or capabilities.get("rt") != "vibeboard-huangshan-runtime/v1"
+                or capabilities.get("ble") != BLE_RUNTIME_STATUS_API
+                or not isinstance(install, dict)
+                or install.get("ble") != 1
+            ):
+                raise BridgeError("VibeBoard Runtime does not advertise the required BLE install capability")
+            self.runtime_capabilities = dict(capabilities)
+            try:
+                status = json.loads(str(await self.commands.call("codex_pet")))
+                pet_ready = (
+                    status.get("active") == 1
+                    and isinstance(status.get("frames"), int)
+                    and status.get("frames", 0) > 0
+                    and isinstance(status.get("uiTicks"), int)
+                )
+            except (BridgeError, RuntimeError, ValueError, json.JSONDecodeError):
+                # A secure Runtime connection is enough to install or repair
+                # Codex Pet. The strict UI gate belongs after install_end.
+                pet_ready = False
         except BaseException as exc:
             self.connected = False
             with contextlib.suppress(Exception):
                 await self.commands.call("close")
             self._transport_open = False
+            detail = " ".join(_public_bridge_error(exc).split())[:200]
             print(
                 f"[codex_pet][ble] connect failed after {int((time.monotonic() - started) * 1000)}ms: "
-                f"{type(exc).__name__}",
+                f"{type(exc).__name__}: {detail}",
                 flush=True,
             )
             raise
         self.connected = True
-        self._replay_pending = True
+        self._replay_pending = pet_ready
         print(
-            f"[codex_pet][ble] connected and ready after {int((time.monotonic() - started) * 1000)}ms",
+            f"[codex_pet][ble] connected after {int((time.monotonic() - started) * 1000)}ms "
+            f"pet_ready={1 if pet_ready else 0}",
             flush=True,
         )
 
-    async def _wait_until_pet_ready(self) -> None:
+    async def _wait_until_pet_ready(self, *, expected_slug: str | None = None) -> dict[str, object]:
         deadline = time.monotonic() + PET_READY_TIMEOUT_SECONDS
         last_ui_ticks: int | None = None
         while time.monotonic() < deadline:
             try:
                 status = json.loads(str(await self.commands.call("codex_pet")))
                 ui_ticks = status.get("uiTicks")
-                if (
+                valid = (
                     status.get("active") == 1
                     and isinstance(status.get("pets"), int)
                     and status.get("pets", 0) > 0
@@ -628,11 +813,19 @@ class DeviceSession:
                     and isinstance(ui_ticks, int)
                     and not isinstance(ui_ticks, bool)
                     and status.get("queuedFlows") == 0
-                ):
+                )
+                if expected_slug is not None:
+                    valid = valid and (
+                        status.get("pet") == expected_slug
+                        and status.get("frames") == 2
+                        and status.get("frameMs") == 180
+                        and status.get("preloadedBytes") == 160 * 173 * 3 * 5 * 2
+                    )
+                if valid:
                     if last_ui_ticks is not None:
                         delta = (ui_ticks - last_ui_ticks) & 0xFFFFFFFF
                         if 0 < delta < 0x80000000:
-                            return
+                            return dict(status)
                     last_ui_ticks = ui_ticks
                 else:
                     last_ui_ticks = None
@@ -688,17 +881,26 @@ class DeviceSession:
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                if not self.connected:
-                    await self._connect()
-                await self.heartbeat_once()
-                delay = self.heartbeat_interval
+                # Hold the connection lock across connect, heartbeat writes,
+                # and failure cleanup. A delayed write from an old session must
+                # not close a new session created by a manual pair/reconnect.
+                async with self._connection_lock:
+                    try:
+                        if not self.connected:
+                            await self._connect_unlocked()
+                        if self._installing:
+                            delay = 0.25
+                            continue
+                        await self.heartbeat_once()
+                        delay = self.heartbeat_interval
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await self._mark_transport_failure_unlocked()
+                        raise
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self.connected = False
-                with contextlib.suppress(Exception):
-                    await self.commands.call("close")
-                self._transport_open = False
                 if self.heartbeat_interval < 1.0:
                     delay = self.heartbeat_interval
                 else:
@@ -1300,6 +1502,9 @@ class FakeDeviceTransport:
         self.audio_stop_delay_reads = 0
         self.audio_stop_pending_reads = 0
         self.pet_ui_ticks = 0
+        self.pet_slug = "shinchan"
+        self.install_calls = 0
+        self.abort_calls = 0
 
     async def _enter(self) -> None:
         self.active_calls += 1
@@ -1370,7 +1575,19 @@ class FakeDeviceTransport:
         return await self._hardware("status")
 
     async def capabilities(self) -> str:
-        return await self._hardware("capabilities")
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            self.hardware_calls.append(("capabilities", None))
+            return json.dumps({
+                "api": CAPABILITIES_API,
+                "rt": "vibeboard-huangshan-runtime/v1",
+                "ble": BLE_RUNTIME_STATUS_API,
+                "ins": {"ble": 1},
+            }, separators=(",", ":"))
+        finally:
+            self._exit()
 
     async def sensors(self) -> str:
         return await self._hardware("sensors")
@@ -1391,14 +1608,57 @@ class FakeDeviceTransport:
             return json.dumps({
                 "api": "vibeboard-huangshan-codex-pet/v1",
                 "active": 1,
-                "pets": 2,
-                "frames": 4,
+                "pets": 1,
+                "pet": self.pet_slug,
+                "frames": 2,
+                "frameMs": 180,
+                "preloadedBytes": 160 * 173 * 3 * 5 * 2,
                 "uiTicks": self.pet_ui_ticks,
                 "queuedFlows": 0,
                 "ok": True,
             }, sort_keys=True, separators=(",", ":"))
         finally:
             self._exit()
+
+    async def install_package(
+        self,
+        package_id: str,
+        files: dict[str, bytes],
+        *,
+        chunk_bytes: int,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> str:
+        await self._enter()
+        try:
+            if not self.connected:
+                raise BridgeError("fake device disconnected")
+            if package_id != "codex_pet" or chunk_bytes != CODEX_PET_INSTALL_CHUNK_BYTES:
+                raise BridgeError("invalid fake install request")
+            catalog = files.get("assets/pets/catalog.txt", b"").decode("utf-8")
+            rows = catalog.splitlines()
+            if len(rows) < 2:
+                raise BridgeError("fake install has no pet catalog")
+            self.install_calls += 1
+            commands = [
+                "vb_runtime_install_begin codex_pet",
+                "vb_runtime_install_file codex_pet assets/pets/preload.bin 0 00",
+                "vb_runtime_install_end codex_pet",
+            ]
+            for index, command in enumerate(commands, start=1):
+                if progress:
+                    progress(command, index, len(commands))
+                await asyncio.sleep(0)
+            self.pet_slug = rows[1].split("|", 1)[0]
+            self.pet_ui_ticks = 0
+            return "ok install_end app=codex_pet active=codex_pet rc=0"
+        finally:
+            self._exit()
+
+    async def abort_install(self, app_id: str) -> str:
+        if app_id != "codex_pet":
+            raise BridgeError("invalid fake abort request")
+        self.abort_calls += 1
+        return "ok install_abort app=codex_pet rc=0"
 
     async def display(self, brightness: int | None = None) -> str:
         return await self._hardware("display", brightness)
@@ -1550,7 +1810,25 @@ def _action(sequence: int, message_id: str, timestamp_ms: int, text: str = "æ£€æ
 
 async def self_test_async() -> None:
     clock = 1_900_000_000_000
+    base_install_deadline = install_timeout_seconds({"payload.bin": b"x" * 240}, 240)
+    large_install_deadline = install_timeout_seconds({"payload.bin": b"x" * 240_000}, 240)
+    assert base_install_deadline == TRANSPORT_INSTALL_TIMEOUT_SECONDS
+    assert large_install_deadline > base_install_deadline
+    assert large_install_deadline <= TRANSPORT_INSTALL_TIMEOUT_MAX_SECONDS
     assert PetSequencer(0xFFFFFFFF).next() == 1
+
+    class DeadlineTransport(FakeDeviceTransport):
+        def connect_deadline_seconds(self) -> float:
+            return 137.5
+
+    deadline_queue = TransportCommandQueue(DeadlineTransport())
+    deadline_command = _TransportCommand(
+        "connect",
+        (),
+        {},
+        asyncio.get_running_loop().create_future(),
+    )
+    assert deadline_queue._timeout_for(deadline_command) == 137.5
 
     class BrokenLogStream:
         def write(self, _value: str) -> int:
@@ -1596,6 +1874,119 @@ async def self_test_async() -> None:
         assert recovered["active"] == 1
     finally:
         await hanging_queue.close()
+
+    class DelayedConnectTransport(FakeDeviceTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = asyncio.Event()
+            self.release_connect = asyncio.Event()
+
+        async def connect(self) -> None:
+            await self._enter()
+            try:
+                self.connect_count += 1
+                self.connect_started.set()
+                await self.release_connect.wait()
+                self.connected = True
+            finally:
+                self._exit()
+
+    delayed_transport = DelayedConnectTransport()
+    delayed_device = DeviceSession(TransportCommandQueue(delayed_transport))
+    await delayed_device.commands.start()
+    first_connect = asyncio.create_task(delayed_device._connect())
+    await delayed_transport.connect_started.wait()
+    second_connect = asyncio.create_task(delayed_device._connect())
+    await asyncio.sleep(0)
+    delayed_transport.release_connect.set()
+    await asyncio.gather(first_connect, second_connect)
+    assert delayed_transport.connect_count == 1
+    assert delayed_device.connected
+    await delayed_device.close()
+
+    race_transport = FakeDeviceTransport()
+    race_device = DeviceSession(TransportCommandQueue(race_transport), heartbeat_interval=10.0)
+    await race_device.start(run_heartbeat=False)
+    heartbeat_started = asyncio.Event()
+    release_heartbeat = asyncio.Event()
+    heartbeat_calls = 0
+    real_heartbeat = race_device.heartbeat_once
+
+    async def stale_heartbeat() -> PetEnvelope:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 1:
+            heartbeat_started.set()
+            await release_heartbeat.wait()
+            raise RuntimeError("stale heartbeat")
+        return await real_heartbeat()
+
+    race_device.heartbeat_once = stale_heartbeat  # type: ignore[method-assign]
+    race_device._heartbeat_task = asyncio.create_task(race_device._heartbeat_loop())
+    await heartbeat_started.wait()
+    reconnect_task = asyncio.create_task(race_device.reconnect())
+    await asyncio.sleep(0)
+    assert not reconnect_task.done()
+    release_heartbeat.set()
+    await asyncio.wait_for(reconnect_task, 2.0)
+    assert race_device.connected and race_transport.connect_count == 2
+    await asyncio.sleep(0)
+    assert race_device.connected
+    await race_device.close()
+
+    install_transport = FakeDeviceTransport()
+    install_device = DeviceSession(TransportCommandQueue(install_transport))
+    await install_device.start(run_heartbeat=False)
+    install_transport.frames.clear()
+    install_task = asyncio.create_task(
+        install_device.install_codex_pet(
+            {"assets/pets/catalog.txt": b"VBPETS1\ntest-pet|Test Pet|VibeBoard\n"},
+            "test-pet",
+        )
+    )
+    while not install_device._installing:
+        await asyncio.sleep(0)
+    try:
+        await install_device.reconnect(force_fresh=True)
+        raise AssertionError("pairing was allowed during an active install")
+    except BridgeError as exc:
+        assert "installation is in progress" in str(exc)
+    await install_device.publish_state("running", task_id="during-install", detail="Latest snapshot")
+    installed_status = await install_task
+    assert installed_status["pet"] == "test-pet"
+    replayed_states = [frame for frame in install_transport.frames if frame[0] == STATE_CHANNEL]
+    assert len(replayed_states) == 1
+    assert isinstance(replayed_states[0][2], PetEnvelope)
+    assert replayed_states[0][2].payload == {"status": "running", "detail": "Latest snapshot"}
+    await install_device.close()
+
+    class CommitUncertainTransport(FakeDeviceTransport):
+        async def install_package(
+            self,
+            package_id: str,
+            files: dict[str, bytes],
+            *,
+            chunk_bytes: int,
+            progress: Callable[[str, int, int], None] | None = None,
+        ) -> str:
+            catalog = files["assets/pets/catalog.txt"].decode("utf-8").splitlines()
+            self.install_calls += 1
+            self.pet_slug = catalog[1].split("|", 1)[0]
+            self.pet_ui_ticks = 0
+            self.connected = False
+            raise InstallCommitUncertain("fake install_end acknowledgement lost")
+
+    uncertain_transport = CommitUncertainTransport()
+    uncertain_device = DeviceSession(TransportCommandQueue(uncertain_transport))
+    await uncertain_device.start(run_heartbeat=False)
+    uncertain_status = await uncertain_device.install_codex_pet(
+        {"assets/pets/catalog.txt": b"VBPETS1\nrecovered-pet|Recovered Pet|VibeBoard\n"},
+        "recovered-pet",
+    )
+    assert uncertain_status["pet"] == "recovered-pet"
+    assert uncertain_transport.connect_count == 2
+    assert uncertain_transport.abort_calls == 0
+    await uncertain_device.close()
 
     with tempfile.TemporaryDirectory(prefix="codex-pet-bridge-") as temporary:
         root = Path(temporary)
@@ -1751,7 +2142,11 @@ async def self_test_async() -> None:
             "params": {"name": "huangshan_capabilities", "arguments": {}},
         })
         assert mcp_result and mcp_result["result"]["isError"] is False  # type: ignore[index]
-        assert mcp_result["result"]["structuredContent"]["ok"] is True  # type: ignore[index]
+        mcp_capabilities = mcp_result["result"]["structuredContent"]  # type: ignore[index]
+        assert mcp_capabilities["api"] == CAPABILITIES_API
+        assert mcp_capabilities["rt"] == "vibeboard-huangshan-runtime/v1"
+        assert mcp_capabilities["ble"] == BLE_RUNTIME_STATUS_API
+        assert mcp_capabilities["ins"]["ble"] == 1
         mcp_pet_status = await mcp.handle({
             "jsonrpc": "2.0",
             "id": 21,
@@ -1997,8 +2392,6 @@ async def self_test_async() -> None:
 
 
 async def run_service(args: argparse.Namespace) -> None:
-    if args.mode == "monitor" and not args.address:
-        raise BridgeError("monitor mode requires a pinned BLE peripheral address")
     options = BLETransportOptions(
         name=args.name,
         address=args.address,
@@ -2044,11 +2437,30 @@ async def run_service(args: argparse.Namespace) -> None:
         )
         await service.start()
         device.project_name = None
+        companion_server = None
+        if not args.no_companion:
+            from codex_pet_companion import CompanionServer, CompanionState
+
+            companion_state = CompanionState(
+                loop=asyncio.get_running_loop(),
+                device=device,
+                state_dir=args.companion_state_dir,
+                hooks_path=args.hooks_path,
+                ble_cache=args.ble_cache,
+            )
+            companion_server = CompanionServer(
+                companion_state,
+                port=args.companion_port,
+                open_browser=not args.companion_no_open,
+            )
+            companion_server.start()
         print(f"Codex Pet monitor ready: {args.socket}")
         print("Watching Codex Desktop tasks through global Hooks; voice submission is disabled.")
         try:
             await wait_for_shutdown_signal()
         finally:
+            if companion_server is not None:
+                await asyncio.to_thread(companion_server.close)
             await service.close()
         return
 
@@ -2125,6 +2537,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ble-cache", type=Path, default=Path.home() / ".vibeboard" / "codex_pet_ble.json")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--echo", action="store_true")
+    parser.add_argument("--no-companion", action="store_true", help="Disable the local Codex Pet web Companion.")
+    parser.add_argument("--companion-port", type=int, default=8790)
+    parser.add_argument("--companion-no-open", action="store_true")
+    parser.add_argument("--companion-state-dir", type=Path, default=Path.home() / ".vibeboard" / "companion")
+    parser.add_argument("--hooks-path", type=Path, default=Path.home() / ".codex" / "hooks.json")
     parser.add_argument("--asr-model", default="glm-asr-2512")
     parser.add_argument("--asr-prompt")
     parser.add_argument("--save-voice-captures", action="store_true")

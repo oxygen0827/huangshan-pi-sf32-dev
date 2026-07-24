@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="390" height="450" viewBox="0 0 390 450">
+  <title>Huangshan Pi 390x450 screen guide</title>
+  <desc>Photo-calibrated review contour, Runtime safe area, focal zone, and center lines.</desc>
+
+  <defs>
+    <path id="panel-contour"
+          d="M72 0H318A72 72 0 0 1 390 72V378A72 72 0 0 1 318 450H72A72 72 0 0 1 0 378V72A72 72 0 0 1 72 0Z"/>
+    <clipPath id="panel-clip">
+      <use href="#panel-contour"/>
+    </clipPath>
+  </defs>
+
+  <!-- Red marks pixels likely hidden by the physical rounded outline. -->
+  <path d="M0 0H390V450H0Z
+           M72 0H318A72 72 0 0 1 390 72V378A72 72 0 0 1 318 450H72A72 72 0 0 1 0 378V72A72 72 0 0 1 72 0Z"
+        fill="#ef4444" fill-opacity="0.28" fill-rule="evenodd"/>
+
+  <!-- Amber is visible but outside the Runtime critical-safe rectangle. -->
+  <path d="M0 0H390V450H0Z M30 36H360V414H30Z"
+        fill="#f59e0b" fill-opacity="0.12" fill-rule="evenodd"
+        clip-path="url(#panel-clip)"/>
+
+  <use href="#panel-contour" fill="none" stroke="#ef4444"
+       stroke-width="1" stroke-dasharray="5 4"/>
+  <rect x="30.5" y="36.5" width="329" height="377"
+        fill="none" stroke="#22d3ee" stroke-width="1"/>
+  <rect x="48.5" y="64.5" width="293" height="321"
+        fill="none" stroke="#34d399" stroke-width="1"
+        stroke-dasharray="4 3"/>
+  <path d="M195 0V450M0 225H390" fill="none" stroke="#e5e7eb"
+        stroke-width="0.5" stroke-opacity="0.55" stroke-dasharray="2 4"/>
+
+  <g font-family="Arial, sans-serif" font-size="10" font-weight="700"
+     letter-spacing="0">
+    <text x="195" y="17" text-anchor="middle" fill="#ef4444">390 x 450 / review radius 72</text>
+    <text x="38" y="52" fill="#22d3ee">Runtime safe 330 x 378</text>
+    <text x="56" y="80" fill="#34d399">Focal zone 294 x 322</text>
+  </g>
+</svg>

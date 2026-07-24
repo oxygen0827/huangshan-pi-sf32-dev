@@ -48,7 +48,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 RUNTIME_APPS_DIR = ROOT_DIR / "scripts" / "runtime_apps"
 FLASH_SCRIPT = ROOT_DIR / "scripts" / "flash.py"
 PAGER_VOICE_ACTIVE_FILE = Path.home() / ".vibeboard" / "pager-voice-active"
-APP_ORDER = ["thunder_wing", "imu_lab", "breakout", "pomodoro", "weather_pet", "game_2048", "auto_snake", "sensor_stage"]
+APP_ORDER = ["thunder_wing", "imu_lab", "breakout", "jump_jump", "pomodoro", "weather_pet", "game_2048", "auto_snake", "sensor_stage"]
 DEFAULT_CITY = "Nanchang Honggutan"
 DEFAULT_LATITUDE = 28.6986
 DEFAULT_LONGITUDE = 115.8582
@@ -226,6 +226,11 @@ APP_META = {
     "breakout": {
         "summary": "拖动霓虹挡板，弹回小球并清空整面砖墙。",
         "accent": "#47d7ac",
+        "requiresWeather": False,
+    },
+    "jump_jump": {
+        "summary": "按住蓄力、松手起跳，落在平台中心 +2 分的霓虹跳一跳。",
+        "accent": "#5db7ff",
         "requiresWeather": False,
     },
     "pomodoro": {
@@ -1804,6 +1809,27 @@ def generated_screenshot_png(seed: str, icon_text: str, accent: str = "#5db7ff")
         circle(130, 96, 34, (239, 68, 68))
         circle(170, 96, 34, (34, 197, 94))
         circle(150, 134, 34, (59, 130, 246))
+    elif "jump" in app_key:
+        night = (5, 11, 20)
+        mint = (71, 215, 172)
+        amber = (251, 191, 36)
+        blue = (93, 183, 255)
+        rect(48, 30, 272, 196, night)
+        for index in range(8):
+            circle(60 + (index * 29) % 200, 42 + (index * 23) % 60, 1, muted if index & 1 else white)
+        rect(196, 82, 240, 100, mix(amber, night, 0.55))
+        rect(200, 86, 236, 96, amber)
+        for step in range(11):
+            u = step / 10.0
+            dot_x = int(118 + (206 - 118) * u)
+            dot_y = int(128 + (74 - 128) * u - 22 * 4 * u * (1 - u))
+            circle(dot_x, dot_y, 1, blue)
+        rect(82, 148, 140, 168, mix(mint, night, 0.55))
+        rect(86, 152, 136, 164, mint)
+        circle(110, 140, 10, mix(blue, night, 0.45))
+        circle(110, 140, 8, white)
+        rect(60, 182, 260, 190, (30, 41, 59))
+        rect(60, 182, 198, 190, amber)
     else:
         rect(72, 54, 248, 82, mix(accent_rgb, white, 0.15))
         rect(72, 96, 208, 114, mix(accent_rgb, white, 0.35))
@@ -2516,7 +2542,15 @@ class StoreState:
 
         job.progress = max(job.progress, 28)
         job.message = "connected"
-        status = run_transport_operation(run_sync, run_async, timeout=90.0)
+        if TRANSPORT_KIND == "serial":
+            install_timeout = 90.0
+        else:
+            chunks = sum(
+                (len(data) + BLE_INSTALL_CHUNK_BYTES - 1) // BLE_INSTALL_CHUNK_BYTES
+                for data in files.values()
+            ) + len(files) + 2
+            install_timeout = max(90.0, min(900.0, 30.0 + chunks * 0.45))
+        status = run_transport_operation(run_sync, run_async, timeout=install_timeout)
         job.append(status)
         job.progress = 98
         job.message = "confirmed active"

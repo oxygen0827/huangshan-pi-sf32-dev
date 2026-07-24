@@ -25,7 +25,6 @@ const STATE_PACK_HEADER_SIZE = 16;
 const PRELOAD_PACK_MAGIC = 0x43504256; // VBPC
 const PRELOAD_PACK_VERSION = 1;
 const PRELOAD_PACK_HEADER_SIZE = 16;
-const PRELOAD_STATES = ["idle", "running"];
 const PRELOAD_FRAMES_PER_STATE = 2;
 const PRELOAD_PATH = path.join(OUTPUT_ROOT, "preload.bin");
 const FRAME_MS = 180;
@@ -40,6 +39,7 @@ const STATE_ROWS = [
   ["needs", 6],
   ["running", 7],
 ];
+const PRELOAD_STATES = STATE_ROWS.map(([state]) => state);
 
 function loadConfig() {
   const value = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
@@ -55,7 +55,26 @@ function loadConfig() {
     if (seen.has(pet.slug)) throw new Error(`Duplicate Petdex slug: ${pet.slug}`);
     seen.add(pet.slug);
   }
-  return value.pets;
+  const activeSlug = value.activeSlug || value.pets[0].slug;
+  if (!seen.has(activeSlug)) throw new Error(`Unknown activeSlug in petdex_pets.json: ${activeSlug}`);
+  return { pets: value.pets, activeSlug };
+}
+
+function selectedPets(pets, activeSlug) {
+  const override = process.argv.find((arg) => arg.startsWith("--active="));
+  const slug = override ? override.slice("--active=".length) :
+    (process.env.CODEX_PET_ACTIVE_SLUG || activeSlug);
+  const pet = pets.find((candidate) => candidate.slug === slug);
+  if (!pet) throw new Error(`Unknown active pet: ${slug}`);
+  return [pet];
+}
+
+function writeActiveCatalog(pets) {
+  fs.writeFileSync(path.join(OUTPUT_ROOT, "catalog.txt"), [
+    "VBPETS1",
+    ...pets.map((pet) => `${pet.slug}|${pet.name}|${pet.author}`),
+    "",
+  ].join("\n"), "utf8");
 }
 
 function loadSharp() {
@@ -425,7 +444,8 @@ async function importPet(sharp, pet) {
 }
 
 async function main() {
-  const pets = loadConfig();
+  const { pets, activeSlug } = loadConfig();
+  const activePets = selectedPets(pets, activeSlug);
   if (CHECK_CONFIG_ONLY) {
     console.log(`Validated ${pets.length} Petdex import entries in ${CONFIG_PATH}`);
     return;
@@ -435,14 +455,16 @@ async function main() {
       upgradeLegacyPet(pet);
       console.log(`Upgraded ${pet.slug} to VPST v2 raw frames`);
     }
-    buildPreloadPack(pets);
-    verifyPreloadPack(pets);
+    buildPreloadPack(activePets);
+    verifyPreloadPack(activePets);
+    writeActiveCatalog(activePets);
     return;
   }
   if (BUILD_PRELOAD) {
     for (const pet of pets) verifyPet(pet);
-    buildPreloadPack(pets);
-    verifyPreloadPack(pets);
+    buildPreloadPack(activePets);
+    verifyPreloadPack(activePets);
+    writeActiveCatalog(activePets);
     console.log(`Generated ${PRELOAD_PATH}`);
     return;
   }
@@ -451,26 +473,25 @@ async function main() {
     if (catalog.split("\n")[0] !== "VBPETS1") throw new Error("Invalid pet catalog header");
     for (const pet of pets) {
       verifyPet(pet);
-      if (!catalog.includes(`\n${pet.slug}|${pet.name}|${pet.author}\n`)) {
-        throw new Error(`Pet catalog is missing ${pet.slug}`);
-      }
     }
-    verifyPreloadPack(pets);
-    console.log(`Verified ${pets.length} Petdex pets in ${OUTPUT_ROOT}`);
+    if (catalog !== ["VBPETS1", ...activePets.map((pet) =>
+        `${pet.slug}|${pet.name}|${pet.author}`), ""].join("\n")) {
+      throw new Error(`Pet catalog must contain only active pet ${activePets[0].slug}`);
+    }
+    verifyPreloadPack(activePets);
+    console.log(`Verified ${pets.length} source pets; active=${activePets[0].slug}`);
     return;
   }
   const sharp = loadSharp();
   fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
-  const catalog = ["VBPETS1"];
   for (const pet of pets) {
     const counts = await importPet(sharp, pet);
-    catalog.push(`${pet.slug}|${pet.name}|${pet.author}`);
     console.log(`Imported ${pet.slug}: ${STATE_ROWS.map(([state]) => `${state}=${counts[state]}`).join(" ")}`);
   }
-  fs.writeFileSync(path.join(OUTPUT_ROOT, "catalog.txt"), catalog.join("\n") + "\n", "utf8");
-  buildPreloadPack(pets);
-  verifyPreloadPack(pets);
-  console.log(`Generated ${pets.length} board-ready Petdex pets in ${OUTPUT_ROOT}`);
+  buildPreloadPack(activePets);
+  verifyPreloadPack(activePets);
+  writeActiveCatalog(activePets);
+  console.log(`Generated ${pets.length} source pets; active=${activePets[0].slug}`);
 }
 
 main().catch((error) => {

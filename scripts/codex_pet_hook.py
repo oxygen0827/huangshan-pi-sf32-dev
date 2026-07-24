@@ -149,6 +149,7 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero when diagnostic hook delivery fails")
     parser.add_argument("--print-ack", action="store_true", help="Print the safe pet/v1 ACK for diagnostics")
+    parser.add_argument("--companion-managed", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.self_test:
         self_test()

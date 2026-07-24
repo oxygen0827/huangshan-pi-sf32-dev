@@ -285,7 +285,7 @@ def audit_codex_pet_bridge() -> None:
     for token in (
         "VB_PET_RECONNECT_AFTER_MS",
         '"Reconnecting %lus"',
-        '"Approval needed"',
+        '"Approval required"',
         '\\"recentTasks\\"',
         "vb_pet_ticks_to_ms",
     ):
@@ -328,6 +328,20 @@ def audit_codex_pet_bridge() -> None:
         fail("codex_pet_bridge", "BLE flow ingress must enqueue work for the LVGL thread")
     if "g_pet." in receive_body:
         fail("codex_pet_bridge", "BLE flow ingress must not mutate LVGL-owned pet state")
+    status_start = helper.find("static const char *vb_pet_status_text(void)")
+    state_name_start = helper.find("static const char *vb_pet_state_name", status_start)
+    status_body = helper[status_start:state_name_start] if status_start >= 0 and state_name_start > status_start else ""
+    if 'strstr(g_pet.task_detail, "approval")' in status_body or \
+       'strstr(g_pet.task_detail, "Approval")' in status_body:
+        fail("codex_pet_bridge", "approval status must not be inferred from task detail text")
+    for token in (
+        "vb_pet_detail_is_approval",
+        "!approval && vb_pet_detail_is_approval(g_pet.task_detail)",
+        "lv_obj_add_flag(g_pet.transcript_label, LV_OBJ_FLAG_HIDDEN)",
+        "VB_PET_TASK_LABEL_COMPACT_Y",
+    ):
+        if token not in helper:
+            fail("codex_pet_bridge", f"approval duplicate suppression is missing {token!r}")
     for token in ("vb_pet_drain_flows", "preloaded_data", "vb_pet_publish_status"):
         if token not in helper:
             fail("codex_pet_bridge", f"board pet concurrency guard is missing {token!r}")
@@ -376,12 +390,13 @@ def audit_codex_pet_bridge() -> None:
         "vb_pet_fill_preloaded_assets_unlocked",
         "vb_pet_activate_preloaded_state",
         "VB_PET_PRELOAD_MAGIC 0x43504256u",
-        "VB_PET_PRELOAD_PACK_STATE_COUNT 2",
-        "VB_PET_PRELOAD_STATE_COUNT 1",
-        "VB_PET_PRELOAD_MAX_BYTES (600000u)",
+        "VB_PET_MAX_ASSETS 1",
+        "VB_PET_PRELOAD_PACK_STATE_COUNT VB_PET_ASSET_STATE_COUNT",
+        "VB_PET_PRELOAD_STATE_COUNT VB_PET_ASSET_STATE_COUNT",
+        "VB_PET_PRELOAD_MAX_BYTES (900000u)",
         "VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)",
         "VB_PET_RUNTIME_FRAME_LIMIT 2",
-        "VB_PET_MIN_FRAME_MS 600",
+        "VB_PET_NATIVE_FRAME_MS 180",
         "preloaded_frames",
         "uncompress(cursor",
         "lv_img_set_zoom(g_pet.pet_image",
@@ -392,6 +407,10 @@ def audit_codex_pet_bridge() -> None:
     ):
         if token not in helper:
             fail("codex_pet_bridge", f"pet assets must remain startup-preloaded: {token!r}")
+    if "VB_PET_IMAGE_RUNNING_ZOOM" in helper or "VB_PET_IMAGE_RUNNING_RAISED_Y" in helper:
+        fail("codex_pet_bridge", "custom pet animation must not animate zoom or position")
+    if "VB_PET_NATIVE_FRAME_MS" not in helper or "g_pet.custom_frame_ms = VB_PET_NATIVE_FRAME_MS;" not in helper:
+        fail("codex_pet_bridge", "custom pet states must use native frame timing")
     for forbidden in ("vb_pet_custom_loader", 'rt_thread_create("vbpetload"'):
         if forbidden in helper:
             fail("codex_pet_bridge", f"runtime pet SD loading must stay removed: {forbidden!r}")
@@ -443,8 +462,9 @@ def audit_codex_pet_voice_app() -> None:
         ("src/gui_apps/VibeBoard_Runtime/main.c", "static void vb_runtime_clear_root_children(void)"),
         ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_runtime_clear_root_children();"),
         ("src/gui_apps/VibeBoard_Runtime/main.c", "volatile int reload_in_progress;"),
-        ("src/gui_apps/VibeBoard_Runtime/main.c", '"[vb_runtime] app already running: %s\\n"'),
-        ("src/gui_apps/VibeBoard_Runtime/main.c", '"[vb_runtime] reload already in progress: %s\\n"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", '"[vb_runtime] app launch already pending/running: %s\\n"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", '"[vb_runtime] app transition already pending: %s\\n"'),
+        ("src/gui_apps/VibeBoard_Runtime/main.c", "g_vb_runtime.pending_reload || g_vb_runtime.reload_in_progress"),
         ("src/gui_apps/VibeBoard_Runtime/main.c", "vb_codex_pet_rgb_set"),
         ("src/gui_apps/VibeBoard_Runtime/vb_runtime_lua.c", '"vibe_codex_pet"'),
         ("scripts/runtime_package.py", '"vibe_codex_pet"'),
@@ -466,6 +486,20 @@ def audit_codex_pet_voice_app() -> None:
             fail("codex_pet_voice_app", f"{rel} does not contain {token!r}")
     main = read("src/gui_apps/VibeBoard_Runtime/main.c")
     helper = read("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c")
+    start_body = main[main.find("static void on_start(void)"):main.find("static void on_stop(void)")]
+    for token in ("g_vb_runtime.reload_in_progress = 1;", "vb_load_active_package();",
+                  "g_vb_runtime.reload_in_progress = 0;"):
+        if token not in start_body:
+            fail("codex_pet_voice_app", f"Runtime startup transition guard is missing {token!r}")
+    reload_start = main.rfind("static void vb_runtime_request_reload(void)")
+    reload_body = main[
+        reload_start:
+        main.find("static int vb_runtime_select_app", reload_start)
+    ]
+    if "g_vb_runtime.pending_reload = 1;" not in reload_body:
+        fail("codex_pet_voice_app", "Runtime reload no longer publishes a GUI-thread request")
+    if re.search(r"\blv_timer_ready\s*[(]", reload_body):
+        fail("codex_pet_voice_app", "Runtime reload touches an LVGL timer from BLE/shell worker threads")
     for token in ("vb_runtime_install_blob", "VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES 4096u",
                   "encoding=base64"):
         if token not in main:
@@ -473,6 +507,10 @@ def audit_codex_pet_voice_app() -> None:
     serial_transport = read("scripts/runtime_transport.py")
     if "def install_package_binary(" not in serial_transport or "base64.b64encode" not in serial_transport:
         fail("codex_pet_voice_app", "desktop binary serial installer is missing")
+    provisioning = read("scripts/provision_codex_pet_board.sh")
+    for token in ("--binary-install", "--codex-pet-only", "--final-wait 3", "--ready-timeout 90"):
+        if token not in provisioning:
+            fail("codex_pet_voice_app", f"new-board provisioning is missing {token!r}")
     rocky_extractor = read("scripts/extract_codex_rocky.js")
     if "static void vb_pet_begin_voice(void)" in main:
         fail("codex_pet_voice_app", "Codex Pet business state leaked into Runtime main.c")
@@ -482,7 +520,10 @@ def audit_codex_pet_voice_app() -> None:
     for token in ("pet.quota", "vb_pet_rgb_tick", "rgb_set"):
         if token not in helper and token not in main:
             fail("codex_pet_voice_app", f"Codex Pet status/RGB flow is missing {token!r}")
-    for token in ('rt_strcmp(channel, "pet.tasks")', '"Allow" : "<"', '"Deny" : ">"',
+    for token in ('rt_strcmp(channel, "pet.tasks")',
+                  'lv_label_set_text(g_pet.new_label, "Allow")',
+                  'lv_label_set_text(g_pet.continue_label, "Deny")',
+                  "vb_pet_handle_horizontal_swipe", "LV_OBJ_FLAG_GESTURE_BUBBLE",
                   "VB_PET_VOICE_UI_ENABLED 0", "g_pet.task_state", "VB_PET_HEARTBEAT_TTL_MS"):
         if token not in helper:
             fail("codex_pet_voice_app", f"monitor-first board UI is missing {token!r}")
@@ -512,11 +553,18 @@ def audit_codex_pet_voice_app() -> None:
         if token not in helper:
             fail("codex_pet_voice_app", f"Rocky board renderer is missing {token!r}")
     pet_importer = read("scripts/import_petdex_pets.js")
+    pet_ignore = read("scripts/runtime_apps/codex_pet/.runtimeignore")
+    for token in ("assets/pets/*/*", "assets/rocky/*"):
+        if token not in pet_ignore:
+            fail("codex_pet_voice_app", f"Codex Pet package must exclude desktop-only resource {token!r}")
     for token in (
         "STATE_PACK_VERSION = 2",
         "encodeRawFrame",
         "upgradeLegacyPet",
         "PRELOAD_PACK_MAGIC",
+        "PRELOAD_STATES = STATE_ROWS.map",
+        "activeSlug",
+        "writeActiveCatalog",
         "buildPreloadPack",
         "verifyPreloadPack",
         "zlib.deflateSync",
@@ -531,11 +579,18 @@ def audit_codex_pet_voice_app() -> None:
         "connection_manager_get_enc_state",
         "connection_manager_set_bond_cnf_sec",
         "connection_manager_set_link_security",
-        "security requested idx=%u level=no_mitm_bond",
+        "security_requested[VB_BLE_TRACKED_CONNECTIONS]",
+        "vb_ble_request_link_security",
+        "already_pending",
+        '(ind->conn_idx, "raw")',
+        '(ind->conn_idx, "manager")',
+        "g_vb_ble.security_requested[ind->conn_idx] = 0",
         "secure=%d",
     ):
         if token not in main:
             fail("codex_pet_voice_app", f"encrypted BLE gate is missing {token!r}")
+    if main.count("connection_manager_set_link_security(") != 1:
+        fail("codex_pet_voice_app", "BLE security must have one guarded request helper")
     transport = read("scripts/runtime_transport.py")
     for token in (
         "def validate_ble_runtime_status(status: str) -> None:",

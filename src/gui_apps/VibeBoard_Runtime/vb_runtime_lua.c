@@ -448,6 +448,7 @@ static void vb_lua_register_host_api(lua_State *L)
         "vibe_audio_play", "vibe_audio_tone", "vibe_audio_stop", "vibe_audio_volume",
         "vibe_audio_label", "vibe_audio_tone_button", "vibe_audio_stop_button",
         "vibe_snake_autoplay", "vibe_2048_game", "vibe_breakout_game", "vibe_thunder_wing", "vibe_imu_lab",
+        "vibe_jump_game",
         "vibe_pomodoro", "vibe_weather_pet", RT_NULL
     };
     static const char *const align_constants[] = {

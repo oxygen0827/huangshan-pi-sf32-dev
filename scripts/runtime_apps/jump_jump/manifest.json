@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "kind": "huangshan-runtime-app-manifest",
+  "id": "jump_jump",
+  "name": "跳一跳",
+  "description": "A charge-and-release jumping game on Huangshan Runtime.",
+  "category": "Games",
+  "icon": "gamepad-2",
+  "author": "Huangshan Runtime Team",
+  "entry": "main.lua",
+  "runtimeProfile": "huangshan-pi",
+  "capabilities": ["display", "touch", "game"],
+  "components": [
+    {
+      "type": "status",
+      "capability": "game",
+      "label": "Mode",
+      "value": "playable jump"
+    },
+    {
+      "type": "status",
+      "capability": "touch.gesture",
+      "label": "Control",
+      "value": "press and hold"
+    }
+  ]
+}

@@ -329,7 +329,6 @@ async def wait_board(
 
 async def run_storage_stress(args: argparse.Namespace) -> int:
     caller = BridgeCaller(DEFAULT_SOCKET)
-    pets = ("boxcat", "boba", "shinchan")
     cues = ("done", "submitted", "needs_input", "error", "listening")
     max_queued = 0
     initial = await wait_board(
@@ -342,6 +341,9 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
     )
     if int(initial.get("preloadedBytes", 0) or 0) <= 0:
         raise RuntimeError(f"pet assets are not preloaded: {initial}")
+    active_pet = str(initial.get("pet") or "")
+    if not active_pet:
+        raise RuntimeError(f"active pet is missing: {initial}")
     initial_ticks = int(initial.get("uiTicks", 0) or 0)
     initial = await wait_board(
         caller,
@@ -352,7 +354,7 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
     )
     baseline_dropped = int(initial.get("droppedFlows", 0) or 0)
     for cycle in range(args.storage_stress_cycles):
-        target = pets[cycle % len(pets)]
+        target = active_pet
         cue = cues[cycle % len(cues)]
         before = json.loads(await caller("pet_status", {}))
         before_ticks = int(before.get("uiTicks", 0) or 0)
@@ -458,6 +460,9 @@ async def exercise_cycle(
     baseline_active = int(baseline.get("activeTasks", 0) or 0)
     target_active = max(2, baseline_active + 1)
     baseline_state = str(baseline.get("state", "ready"))
+    active_pet = str(baseline.get("pet") or "")
+    if not active_pet:
+        raise RuntimeError(f"active pet is missing: {baseline}")
     if baseline_active == 0 and baseline_state in {"connected", "disconnected"}:
         baseline_state = "ready"
     first = f"{run_id}-a"
@@ -511,9 +516,7 @@ async def exercise_cycle(
         )
         if needs.get("approval") != 0:
             metrics.state_errors += 1
-        await select_and_wait("boxcat")
-        await select_and_wait("boba")
-        await select_and_wait("shinchan")
+        await select_and_wait(active_pet)
         stopped = [
             await deliver_hook("Stop", first, turn, workspace),
             await deliver_hook("Stop", second, turn, workspace),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fnmatch
 import hashlib
 import io
 import json
@@ -324,6 +325,7 @@ LUA_SUPPORTED_CALLS = {
     "vibe_snake_autoplay",
     "vibe_2048_game",
     "vibe_breakout_game",
+    "vibe_jump_game",
     "vibe_thunder_wing",
     "vibe_imu_lab",
     "vibe_pomodoro",
@@ -642,10 +644,19 @@ def load_package_from_dir(package_dir: Path, app_id: str | None) -> tuple[str, d
     package_id = safe_package_id(app_id or package_dir.name)
     files: dict[str, bytes] = {}
     seen: set[str] = set()
+    ignore_path = package_dir / ".runtimeignore"
+    ignore_patterns = tuple(
+        line.strip() for line in ignore_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ) if ignore_path.is_file() else ()
     for path in sorted(package_dir.rglob("*")):
         if not path.is_file():
             continue
         raw_rel = path.relative_to(package_dir).as_posix()
+        if raw_rel == ".runtimeignore" or any(
+            fnmatch.fnmatchcase(raw_rel, pattern) for pattern in ignore_patterns
+        ):
+            continue
         rel = safe_package_path(raw_rel)
         if rel in seen:
             fail(f"Duplicate package path after normalization: {rel!r}")
@@ -673,7 +684,15 @@ def load_package_from_json(package_json: Path, app_id: str | None) -> tuple[str,
     return validate_package(package_id, files)
 
 
-def build_install_commands(package_id: str, files: dict[str, bytes], chunk_bytes: int) -> list[str]:
+def build_install_commands(
+    package_id: str,
+    files: dict[str, bytes],
+    chunk_bytes: int,
+    *,
+    max_command_chars: int = INSTALL_COMMAND_MAX_CHARS,
+) -> list[str]:
+    if max_command_chars <= 0:
+        raise RuntimePackageError("Runtime install command limit must be positive")
     commands = [f"vb_runtime_install_begin {package_id}"]
     for path, data in sorted(files.items()):
         if not data:
@@ -682,7 +701,7 @@ def build_install_commands(package_id: str, files: dict[str, bytes], chunk_bytes
         offset = 0
         while offset < len(data):
             prefix = f"vb_runtime_install_file {package_id} {path} {offset} "
-            safe_chunk_bytes = min(chunk_bytes, (INSTALL_COMMAND_MAX_CHARS - len(prefix)) // 2)
+            safe_chunk_bytes = min(chunk_bytes, (max_command_chars - len(prefix)) // 2)
             if safe_chunk_bytes <= 0:
                 raise RuntimePackageError(f"Runtime package path is too long for serial install: {path!r}")
             chunk = data[offset : offset + safe_chunk_bytes]
@@ -940,6 +959,24 @@ def run_self_test() -> int:
             load_package_from_dir(package_dir, None)
 
     expect_fail("package dir duplicate path", duplicate_dir_package, "Duplicate package path")
+
+    def runtime_ignore_package() -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-package-ignore-test-") as temp_dir:
+            package_dir = Path(temp_dir) / "test_app"
+            pet_dir = package_dir / "assets" / "pets" / "source_pet"
+            pet_dir.mkdir(parents=True)
+            (package_dir / "main.lua").write_text("", encoding="utf-8")
+            (package_dir / "app.info").write_text("test_app", encoding="utf-8")
+            (package_dir / ".runtimeignore").write_text("assets/pets/*/*\n", encoding="utf-8")
+            (package_dir / "assets" / "pets" / "preload.bin").write_bytes(b"active")
+            (pet_dir / "idle.bin").write_bytes(b"source")
+            _, files = load_package_from_dir(package_dir, None)
+            if "assets/pets/preload.bin" not in files or "assets/pets/source_pet/idle.bin" in files:
+                raise RuntimePackageError(".runtimeignore did not exclude desktop-only pet sources")
+            if ".runtimeignore" in files:
+                raise RuntimePackageError(".runtimeignore leaked into the Runtime package")
+
+    expect_ok("package dir runtime ignore", runtime_ignore_package)
 
     def bounded_install_commands() -> None:
         path = "assets/pets/long_pet_name/blocked.bin"

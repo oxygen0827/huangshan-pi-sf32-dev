@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="cache-control" content="no-store">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://assets.petdex.dev data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
+  <title>Codex Pet</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111311;
+      --surface: #1b1e1b;
+      --surface-2: #242824;
+      --line: #3a403a;
+      --text: #f4f5ef;
+      --muted: #aab0a7;
+      --green: #65d68a;
+      --yellow: #f4c95d;
+      --coral: #ff7a6c;
+      --blue: #72a7ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button, input { font: inherit; letter-spacing: 0; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.42; }
+    .shell { width: min(1220px, calc(100% - 40px)); margin: 0 auto; }
+    header {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      background: color-mix(in srgb, var(--bg) 94%, transparent);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--line);
+    }
+    .header-row {
+      min-height: 78px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .brand { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+    h1 { margin: 0; font-size: 28px; line-height: 1; font-weight: 780; }
+    .brand span { color: var(--muted); font-size: 13px; }
+    .search {
+      width: min(390px, 42vw);
+      height: 42px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      outline: none;
+    }
+    .search:focus { border-color: var(--blue); }
+    .connections { border-bottom: 1px solid var(--line); background: #151815; }
+    .connection-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      min-height: 66px;
+    }
+    .connection {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 11px 18px;
+      border-right: 1px solid var(--line);
+      min-width: 0;
+    }
+    .connection:first-child { padding-left: 0; }
+    .connection:last-child { border-right: 0; padding-right: 0; }
+    .connection-copy { min-width: 0; }
+    .connection-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 760; }
+    .connection-detail { margin-top: 3px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--yellow); flex: 0 0 auto; }
+    .dot.ok { background: var(--green); }
+    .dot.bad { background: var(--coral); }
+    .compact-button, .secondary-button, .primary-button, .state-button {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-weight: 740;
+    }
+    .compact-button { min-height: 32px; padding: 0 11px; background: var(--surface-2); border-color: var(--line); color: var(--text); }
+    main { padding: 26px 0 104px; }
+    .gallery-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
+    .gallery-head h2 { margin: 0; font-size: 19px; }
+    #galleryMeta { color: var(--muted); font-size: 12px; }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .pet-card {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .pet-preview {
+      height: 238px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: #e9e9e2;
+      border-bottom: 1px solid var(--line);
+    }
+    .pet-sprite {
+      width: 192px;
+      height: 208px;
+      flex: 0 0 auto;
+      background-repeat: no-repeat;
+      background-size: 800% 900%;
+      background-position: 0 0;
+      image-rendering: pixelated;
+    }
+    .pet-sprite.failed { display: grid; place-items: center; background: #d7d8d0; color: #565b54; font-size: 44px; font-weight: 800; }
+    .pet-body { padding: 15px; }
+    .pet-title { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+    .pet-title h3 { margin: 0; font-size: 18px; line-height: 1.2; overflow-wrap: anywhere; }
+    .kind { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .author { margin: 5px 0 12px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .states {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 3px;
+      padding: 3px;
+      margin-bottom: 13px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #141614;
+    }
+    .state-button { min-width: 0; min-height: 30px; padding: 0 4px; color: var(--muted); background: transparent; font-size: 11px; }
+    .state-button.active { background: var(--surface-2); color: var(--text); }
+    .actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .primary-button { min-height: 40px; padding: 0 14px; background: var(--green); color: #092012; }
+    .secondary-button { min-height: 40px; min-width: 88px; padding: 0 12px; background: transparent; border-color: var(--line); color: var(--text); }
+    .empty { grid-column: 1 / -1; min-height: 260px; display: grid; place-items: center; color: var(--muted); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .load-row { display: flex; justify-content: center; margin-top: 22px; }
+    #loadMore { min-width: 132px; }
+    .job-panel {
+      position: fixed;
+      z-index: 40;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #202420;
+      border-top: 1px solid var(--line);
+      box-shadow: 0 -18px 45px rgba(0, 0, 0, 0.38);
+    }
+    .job-panel[hidden] { display: none; }
+    .job-row { min-height: 88px; display: grid; grid-template-columns: 1fr minmax(220px, 420px) auto; align-items: center; gap: 22px; }
+    .job-title { font-size: 14px; font-weight: 760; }
+    .job-message { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .progress { height: 7px; overflow: hidden; background: #0f110f; border-radius: 3px; }
+    .progress div { width: 0; height: 100%; background: var(--yellow); transition: width 180ms ease; }
+    #jobClose { width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--text); background: transparent; }
+    .toast {
+      position: fixed;
+      z-index: 60;
+      right: 20px;
+      top: 160px;
+      max-width: min(360px, calc(100vw - 40px));
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--coral);
+      border-radius: 6px;
+      background: #252925;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .toast[hidden] { display: none; }
+    @media (max-width: 920px) {
+      .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .connection-row { grid-template-columns: 1fr; }
+      .connection { border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 0; }
+      .connection:last-child { border-bottom: 0; }
+      .connections { position: static; }
+      .job-row { grid-template-columns: 1fr auto; padding: 14px 0; }
+      .job-row .progress { grid-row: 2; grid-column: 1 / -1; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, 1220px); }
+      .header-row { align-items: stretch; flex-direction: column; padding: 15px 0; }
+      .brand { justify-content: space-between; }
+      .search { width: 100%; }
+      .gallery { grid-template-columns: 1fr; }
+      .pet-preview { height: 226px; }
+      .gallery-head { align-items: start; flex-direction: column; }
+      .job-row { gap: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell header-row">
+      <div class="brand"><h1>Codex Pet</h1><span>VibeBoard</span></div>
+      <input id="search" class="search" type="search" placeholder="搜索宠物、作者或 slug" autocomplete="off">
+    </div>
+    <div class="connections">
+      <div class="shell connection-row">
+        <div class="connection">
+          <div class="connection-copy">
+            <div class="connection-label"><i id="companionDot" class="dot"></i>Companion</div>
+            <div id="companionDetail" class="connection-detail">正在连接</div>
+          </div>
+        </div>
+        <div class="connection">
+          <div class="connection-copy">
+            <div class="connection-label"><i id="codexDot" class="dot"></i>Codex</div>
+            <div id="codexDetail" class="connection-detail">正在检查</div>
+          </div>
+          <button id="codexAction" class="compact-button" type="button">绑定</button>
+        </div>
+        <div class="connection">
+          <div class="connection-copy">
+            <div class="connection-label"><i id="boardDot" class="dot"></i>VibeBoard</div>
+            <div id="boardDetail" class="connection-detail">正在检查</div>
+          </div>
+          <button id="boardAction" class="compact-button" type="button">连接</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <div class="gallery-head">
+      <h2>宠物图库</h2>
+      <div id="galleryMeta">正在同步 Petdex</div>
+    </div>
+    <section id="gallery" class="gallery" aria-live="polite"></section>
+    <div class="load-row"><button id="loadMore" class="secondary-button" type="button" hidden>加载更多</button></div>
+  </main>
+
+  <aside id="jobPanel" class="job-panel" hidden aria-live="polite">
+    <div class="shell job-row">
+      <div>
+        <div id="jobTitle" class="job-title">准备宠物</div>
+        <div id="jobMessage" class="job-message">等待</div>
+      </div>
+      <div class="progress"><div id="jobProgress"></div></div>
+      <button id="jobClose" type="button" aria-label="关闭">×</button>
+    </div>
+  </aside>
+  <div id="toast" class="toast" hidden></div>
+
+  <script>
+    "use strict";
+    const $ = id => document.getElementById(id);
+    const state = {
+      token: "",
+      status: null,
+      pets: [],
+      total: 0,
+      offset: 0,
+      limit: 24,
+      query: "",
+      frame: 0,
+      timer: 0,
+      searchTimer: 0,
+      pendingInstall: null,
+      deepLinkHandled: false,
+      jobActive: false,
+    };
+    let spriteObserver = null;
+    let animationFrameId = 0;
+    let nextAnimationAt = 0;
+    const SPRITE_COLUMNS = 8;
+    const SPRITE_FRAME_MS = 180;
+    const stateLabels = { idle: "待机", running: "运行", ready: "完成", needs: "等待", blocked: "错误" };
+    const stageLabels = {
+      queued: "排队中", download: "下载源动画", verify: "校验宠物包", transfer: "蓝牙传输",
+      restart: "重启应用", complete: "部署完成", failed: "部署失败", pair: "连接板子",
+    };
+    const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[ch]);
+
+    async function api(path, options = {}, retrySession = true) {
+      const headers = { ...(options.headers || {}) };
+      if (options.body !== undefined) headers["content-type"] = "application/json";
+      if (state.token) headers.authorization = `Bearer ${state.token}`;
+      const response = await fetch(path, { ...options, headers, cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401 && retrySession && path !== "/v1/session") {
+        state.token = "";
+        state.token = (await api("/v1/session", { method: "POST", body: "{}" }, false)).token;
+        return api(path, options, false);
+      }
+      if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+      return data;
+    }
+
+    function showToast(message) {
+      $("toast").textContent = message;
+      $("toast").hidden = false;
+      window.setTimeout(() => { $("toast").hidden = true; }, 4200);
+    }
+
+    function setDot(id, ok, bad = false) {
+      $(id).className = `dot${ok ? " ok" : bad ? " bad" : ""}`;
+    }
+
+    function renderStatus() {
+      const value = state.status || {};
+      const companion = Boolean(value.companion?.connected);
+      const codex = Boolean(value.codex?.bound);
+      const board = Boolean(value.board?.connected);
+      setDot("companionDot", companion, !companion);
+      setDot("codexDot", codex, value.codex?.detected === false);
+      setDot("boardDot", board, false);
+      $("companionDetail").textContent = companion ? `本地服务 v${value.companion?.version || 1}` : "未连接";
+      $("codexDetail").textContent = codex ? `${value.codex?.events?.length || 0} 个 Hooks 已绑定` : (value.codex?.detected ? "尚未绑定" : "未检测到 Codex");
+      $("boardDetail").textContent = board
+        ? `${value.board?.name || "VibeBoard"} · ${value.board?.bleInstall ? "Runtime BLE" : "已加密"}`
+        : "等待蓝牙连接";
+      $("codexAction").textContent = codex ? "解绑" : "绑定";
+      $("codexAction").disabled = state.jobActive;
+      $("boardAction").textContent = state.jobActive ? "安装中" : (board ? "已连接" : "连接");
+      $("boardAction").disabled = board || state.jobActive;
+      $("jobClose").disabled = state.jobActive;
+      document.querySelectorAll("[data-deploy]").forEach(button => {
+        button.disabled = state.jobActive || !(board && codex);
+        button.textContent = state.jobActive
+          ? "处理中"
+          : (!codex ? "先绑定 Codex" : (!board ? "先连接板子" : "部署到板子"));
+      });
+      document.querySelectorAll("[data-download]").forEach(button => {
+        button.disabled = state.jobActive || !companion;
+      });
+    }
+
+    async function refreshStatus() {
+      try {
+        state.status = await api("/v1/status");
+        renderStatus();
+      } catch (error) {
+        setDot("companionDot", false, true);
+        $("companionDetail").textContent = "服务不可用";
+      }
+    }
+
+    function cardTemplate(pet) {
+      const buttons = Object.keys(stateLabels).map(name =>
+        `<button type="button" class="state-button${name === "idle" ? " active" : ""}" data-state="${name}">${stateLabels[name]}</button>`
+      ).join("");
+      return `<article class="pet-card" data-slug="${esc(pet.slug)}">
+        <div class="pet-preview"><div class="pet-sprite" data-row="0" data-rows="9" data-src="${esc(pet.previewUrl)}" data-fallback="${esc(String(pet.displayName || pet.slug).slice(0, 1).toUpperCase())}"></div></div>
+        <div class="pet-body">
+          <div class="pet-title"><h3>${esc(pet.displayName)}</h3><span class="kind">${esc(pet.kind)}</span></div>
+          <div class="author">${esc(pet.submittedBy)}</div>
+          <div class="states">${buttons}</div>
+          <div class="actions">
+            <button type="button" class="primary-button" data-deploy="${esc(pet.slug)}">部署到板子</button>
+            <button type="button" class="secondary-button" data-download="${esc(pet.slug)}">保存 .hpet</button>
+          </div>
+        </div>
+      </article>`;
+    }
+
+    function visibleSpriteFrames(pixels, width, height, rows, columns = SPRITE_COLUMNS) {
+      const safeRows = Math.max(1, Math.floor(rows));
+      const safeColumns = Math.max(1, Math.floor(columns));
+      const fallback = Array.from({ length: safeRows }, () => [0]);
+      const frameWidth = Math.floor(width / safeColumns);
+      const frameHeight = Math.floor(height / safeRows);
+      if (!pixels || frameWidth <= 0 || frameHeight <= 0 || pixels.length < width * height * 4) {
+        return fallback;
+      }
+
+      const result = [];
+      for (let row = 0; row < safeRows; row += 1) {
+        const rowFrames = [];
+        const top = row * frameHeight;
+        const bottom = top + frameHeight;
+        for (let column = 0; column < safeColumns; column += 1) {
+          const left = column * frameWidth;
+          const right = left + frameWidth;
+          let visible = false;
+          for (let y = top; y < bottom && !visible; y += 1) {
+            for (let x = left; x < right; x += 1) {
+              if (pixels[(y * width + x) * 4 + 3] > 8) {
+                visible = true;
+                break;
+              }
+            }
+          }
+          if (visible) rowFrames.push(column);
+        }
+        result.push(rowFrames.length ? rowFrames : [0]);
+      }
+      return result;
+    }
+
+    function loadSprite(card) {
+      if (card.dataset.spriteLoaded === "1") return;
+      card.dataset.spriteLoaded = "1";
+      const sprite = card.querySelector(".pet-sprite");
+      const url = sprite.dataset.src;
+      const image = new Image();
+      image.onload = () => {
+        const rows = Math.max(1, Math.round(image.naturalHeight / 208));
+        sprite.dataset.rows = String(rows);
+        sprite.style.backgroundSize = `800% ${rows * 100}%`;
+        sprite.style.backgroundImage = `url(${JSON.stringify(url)})`;
+        let visibleFrames = Array.from({ length: rows }, () => [0]);
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = image.naturalWidth;
+          canvas.height = image.naturalHeight;
+          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (context) {
+            context.drawImage(image, 0, 0);
+            const pixels = context.getImageData(0, 0, image.naturalWidth, image.naturalHeight).data;
+            visibleFrames = visibleSpriteFrames(
+              pixels,
+              image.naturalWidth,
+              image.naturalHeight,
+              rows,
+            );
+          }
+        } catch (_) {
+          // A decoded cross-origin image may deny pixel reads; use its first frame.
+        }
+        sprite.dataset.frames = JSON.stringify(visibleFrames);
+        sprite.dataset.frameIndex = "0";
+        renderSpriteFrame(sprite);
+      };
+      image.onerror = () => {
+        sprite.classList.add("failed");
+        sprite.textContent = sprite.dataset.fallback || "P";
+      };
+      image.src = url;
+    }
+
+    function bindCards() {
+      if (spriteObserver) spriteObserver.disconnect();
+      spriteObserver = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+          if (!entry.isIntersecting) return;
+          loadSprite(entry.target);
+          spriteObserver.unobserve(entry.target);
+        });
+      }, { rootMargin: "320px 0px" }) : null;
+      document.querySelectorAll(".pet-card").forEach(card => {
+        const pet = state.pets.find(item => item.slug === card.dataset.slug);
+        if (spriteObserver) spriteObserver.observe(card);
+        else loadSprite(card);
+        card.querySelectorAll("[data-state]").forEach(button => button.addEventListener("click", () => {
+          card.querySelectorAll("[data-state]").forEach(item => item.classList.toggle("active", item === button));
+          const sprite = card.querySelector(".pet-sprite");
+          sprite.dataset.row = String(pet?.stateRows?.[button.dataset.state] ?? 0);
+          sprite.dataset.frameIndex = "0";
+          renderSpriteFrame(sprite);
+        }));
+      });
+      document.querySelectorAll("[data-deploy]").forEach(button => button.addEventListener("click", () => deploy(button.dataset.deploy)));
+      document.querySelectorAll("[data-download]").forEach(button => button.addEventListener("click", () => downloadPackage(button.dataset.download)));
+      renderStatus();
+    }
+
+    function renderPets() {
+      $("gallery").innerHTML = state.pets.length ? state.pets.map(cardTemplate).join("") : `<div class="empty">没有匹配的宠物</div>`;
+      $("galleryMeta").textContent = `${state.total} 只宠物`;
+      $("loadMore").hidden = state.pets.length >= state.total;
+      bindCards();
+    }
+
+    async function loadPets({ append = false } = {}) {
+      const offset = append ? state.pets.length : 0;
+      if (!append) $("gallery").innerHTML = `<div class="empty">正在同步宠物</div>`;
+      try {
+        const data = await api(`/api/pets?query=${encodeURIComponent(state.query)}&offset=${offset}&limit=${state.limit}`);
+        state.pets = append ? [...state.pets, ...data.pets] : data.pets;
+        state.total = data.total;
+        renderPets();
+        maybeRunDeepLink();
+        if (!data.live && data.error) $("galleryMeta").textContent += " · 本地缓存";
+      } catch (error) {
+        $("gallery").innerHTML = `<div class="empty">图库暂时不可用</div>`;
+        showToast(error.message);
+      }
+    }
+
+    function renderSpriteFrame(sprite) {
+      const rows = Number(sprite.dataset.rows || 9);
+      const row = Math.max(0, Math.min(rows - 1, Number(sprite.dataset.row || 0)));
+      let frameRows = [];
+      try { frameRows = JSON.parse(sprite.dataset.frames || "[]"); } catch (_) { frameRows = []; }
+      const frames = Array.isArray(frameRows[row]) && frameRows[row].length ? frameRows[row] : [0];
+      const index = Number(sprite.dataset.frameIndex || 0) % frames.length;
+      const column = Number(frames[index]) || 0;
+      sprite.style.backgroundPosition = `${column * 100 / (SPRITE_COLUMNS - 1)}% ${rows > 1 ? row * 100 / (rows - 1) : 0}%`;
+    }
+
+    function animateSprites(timestamp = performance.now()) {
+      if (timestamp >= nextAnimationAt) {
+        document.querySelectorAll(".pet-sprite").forEach(sprite => {
+          const rows = Number(sprite.dataset.rows || 9);
+          let frameRows = [];
+          try { frameRows = JSON.parse(sprite.dataset.frames || "[]"); } catch (_) { frameRows = []; }
+          const row = Math.max(0, Math.min(rows - 1, Number(sprite.dataset.row || 0)));
+          const frames = Array.isArray(frameRows[row]) && frameRows[row].length ? frameRows[row] : [0];
+          sprite.dataset.frameIndex = String((Number(sprite.dataset.frameIndex || 0) + 1) % frames.length);
+          renderSpriteFrame(sprite);
+        });
+        nextAnimationAt = timestamp + SPRITE_FRAME_MS;
+      }
+      animationFrameId = window.requestAnimationFrame(animateSprites);
+    }
+
+    function showJob(title) {
+      state.jobActive = true;
+      $("jobPanel").hidden = false;
+      $("jobTitle").textContent = title;
+      $("jobMessage").textContent = "准备中";
+      $("jobProgress").style.width = "0%";
+      renderStatus();
+    }
+
+    function jobStageLabel(job) {
+      if (job.stage === "complete") {
+        if (job.kind === "build") return "保存完成";
+        if (job.kind === "pair") return "连接完成";
+        return "部署完成";
+      }
+      if (job.stage === "failed") {
+        if (job.kind === "build") return "保存失败";
+        if (job.kind === "pair") return "连接失败";
+        return "部署失败";
+      }
+      return stageLabels[job.stage] || job.stage;
+    }
+
+    async function pollJob(jobId, { download = false } = {}) {
+      while (true) {
+        const job = await api(`/v1/jobs/${encodeURIComponent(jobId)}`);
+        $("jobTitle").textContent = `${jobStageLabel(job)} · ${job.slug}`;
+        $("jobMessage").textContent = job.message;
+        $("jobProgress").style.width = `${job.progress || 0}%`;
+        if (job.status === "done") {
+          await refreshStatus();
+          if (download && job.downloadUrl) {
+            const link = document.createElement("a");
+            link.href = job.downloadUrl;
+            link.download = `${job.slug}.hpet`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          }
+          return job;
+        }
+        if (job.status === "failed") throw new Error(job.message || "任务失败");
+        await new Promise(resolve => setTimeout(resolve, 650));
+      }
+    }
+
+    async function deploy(slug, digest = null) {
+      if (!state.status?.codex?.bound) {
+        showToast("请先绑定 Codex");
+        return;
+      }
+      if (!state.status?.board?.connected) {
+        showToast("请先连接 VibeBoard");
+        return;
+      }
+      showJob(`部署 ${slug}`);
+      try {
+        const body = digest ? { slug, digest } : { slug };
+        const value = await api("/v1/pets/install", { method: "POST", body: JSON.stringify(body) });
+        await pollJob(value.jobId);
+      } catch (error) {
+        $("jobTitle").textContent = "部署失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        renderStatus();
+      }
+    }
+
+    function maybeRunDeepLink() {
+      if (state.deepLinkHandled || !state.pendingInstall || !state.status) return;
+      const intent = state.pendingInstall;
+      state.deepLinkHandled = true;
+      document.querySelector(`[data-slug="${CSS.escape(intent.slug)}"]`)?.scrollIntoView({ block: "center" });
+      if (state.status.codex?.bound && state.status.board?.connected) {
+        deploy(intent.slug, intent.digest);
+      } else {
+        showToast("已找到该宠物，请先绑定 Codex 并连接 VibeBoard");
+      }
+    }
+
+    function consumeInstallDeepLink(params) {
+      const installSlug = params.get("install");
+      const source = params.get("source");
+      const digest = params.get("digest");
+      const valid = source === "petdex"
+        && /^[a-z0-9][a-z0-9-]{0,23}$/.test(installSlug || "")
+        && (!digest || /^[0-9a-f]{64}$/.test(digest));
+      if (!valid) return;
+
+      const navigation = performance.getEntriesByType("navigation")[0];
+      const isReload = navigation?.type === "reload";
+      history.replaceState(null, "", `${location.pathname}${location.hash}`);
+      if (!isReload) state.pendingInstall = { slug: installSlug, digest: digest || null };
+    }
+
+    async function downloadPackage(slug) {
+      showJob(`保存 ${slug}.hpet`);
+      try {
+        const value = await api(`/api/packages/${encodeURIComponent(slug)}`, { method: "POST", body: "{}" });
+        await pollJob(value.jobId, { download: true });
+      } catch (error) {
+        $("jobTitle").textContent = "保存失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        renderStatus();
+      }
+    }
+
+    async function bindCodex() {
+      const bound = Boolean(state.status?.codex?.bound);
+      try {
+        await api(bound ? "/v1/codex/unbind" : "/v1/codex/bind", { method: "POST", body: "{}" });
+        await refreshStatus();
+      } catch (error) { showToast(error.message); }
+    }
+
+    async function pairBoard() {
+      showJob("连接 VibeBoard");
+      try {
+        const value = await api("/v1/board/pair", { method: "POST", body: "{}" });
+        await pollJob(value.jobId);
+      } catch (error) {
+        $("jobTitle").textContent = "连接失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        renderStatus();
+      }
+    }
+
+    async function boot() {
+      const params = new URLSearchParams(location.search);
+      consumeInstallDeepLink(params);
+      try {
+        state.token = (await api("/v1/session", { method: "POST", body: "{}" })).token;
+      } catch (error) {
+        showToast("Companion 会话创建失败");
+        return;
+      }
+      await Promise.all([refreshStatus(), loadPets()]);
+      maybeRunDeepLink();
+      if (!animationFrameId) animationFrameId = window.requestAnimationFrame(animateSprites);
+      window.setInterval(refreshStatus, 5000);
+    }
+
+    $("codexAction").addEventListener("click", bindCodex);
+    $("boardAction").addEventListener("click", pairBoard);
+    $("loadMore").addEventListener("click", () => loadPets({ append: true }));
+    $("jobClose").addEventListener("click", () => { $("jobPanel").hidden = true; });
+    $("search").addEventListener("input", event => {
+      state.query = event.target.value.trim();
+      window.clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(() => loadPets(), 240);
+    });
+    boot();
+  </script>
+</body>
+</html>

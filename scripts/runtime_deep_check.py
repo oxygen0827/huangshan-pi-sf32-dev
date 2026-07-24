@@ -191,6 +191,7 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
         Check("pass1-architecture", "Codex pet soak self-test", [PYTHON, "scripts/codex_pet_soak.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet audio policy self-test", [PYTHON, "scripts/codex_pet_audio.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet cue assets", [PYTHON, "scripts/generate_codex_pet_cues.py", "--check"]),
+        Check("pass1-architecture", "Codex Pet web self-test", ["node", "scripts/codex_pet_web_test.js"]),
         Check("pass1-architecture", "Codex Petdex import configuration", ["node", "scripts/import_petdex_pets.js", "--check-config"]),
         Check("pass1-architecture", "Codex Rocky pet assets", ["node", "scripts/extract_codex_rocky.js", "--check"]),
         Check("pass1-architecture", "Pager voice bridge self-test", [PYTHON, "scripts/pager_voice_bridge.py", "--self-test"]),

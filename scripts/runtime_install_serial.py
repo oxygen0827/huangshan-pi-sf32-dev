@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
 
 from runtime_package import RuntimePackageError, build_install_commands, fail, load_package_from_dir, load_package_from_json, safe_package_id
 from runtime_transport import (
+    CODEX_PET_API,
     INSTALL_CHUNK_BYTES,
     MAX_INSTALL_CHUNK_BYTES,
+    SERIAL_BLOB_CHUNK_BYTES,
     RuntimeTransportError,
     SerialTransport,
     SerialTransportOptions,
@@ -23,6 +26,41 @@ def validate_flow_output(output: str, channel: str, sequence: int, payload: str,
         validate_flow_roundtrip_output(output, channel, sequence, payload, expected_total)
     except RuntimeTransportError as exc:
         fail("Info flow validation failed: " + str(exc) + "\nLast output:\n" + output[-2000:])
+
+
+def validate_codex_pet_ready(output: str) -> dict[str, object]:
+    try:
+        value = json.loads(output)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeTransportError(f"Codex Pet returned invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeTransportError("Codex Pet status must be a JSON object")
+    expected = {
+        "api": CODEX_PET_API,
+        "active": 1,
+        "frames": 2,
+        "frameMs": 180,
+        "preloadedBytes": 160 * 173 * 3 * 5 * 2,
+    }
+    for key, wanted in expected.items():
+        if value.get(key) != wanted:
+            raise RuntimeTransportError(
+                f"Codex Pet {key} mismatch: expected {wanted}, got {value.get(key)!r}"
+            )
+    pet = value.get("pet")
+    ui_ticks = value.get("uiTicks")
+    if not isinstance(pet, str) or not pet:
+        raise RuntimeTransportError("Codex Pet status has no active pet slug")
+    if not isinstance(ui_ticks, int) or isinstance(ui_ticks, bool):
+        raise RuntimeTransportError("Codex Pet status has no numeric uiTicks")
+    return value
+
+
+def codex_pet_ticks_advanced(previous: dict[str, object], current: dict[str, object]) -> bool:
+    before = int(previous["uiTicks"])
+    after = int(current["uiTicks"])
+    delta = (after - before) & 0xFFFFFFFF
+    return 0 < delta < 0x80000000
 
 
 def serial_transport_options(args: argparse.Namespace) -> SerialTransportOptions:
@@ -49,6 +87,7 @@ def validate_flow_persistence(args: argparse.Namespace, sequence: int, payload: 
 def has_standard_transport_command(args: argparse.Namespace) -> bool:
     return any((
         args.status_only,
+        args.codex_pet_only,
         args.capabilities_only,
         args.sensors_only,
         args.power_only,
@@ -82,6 +121,7 @@ def require_app_id_for_abort(args: argparse.Namespace) -> None:
 def run_self_test() -> None:
     base = argparse.Namespace(
         status_only=False,
+        codex_pet_only=False,
         capabilities_only=False,
         sensors_only=False,
         power_only=False,
@@ -110,6 +150,24 @@ def run_self_test() -> None:
     status_args = argparse.Namespace(**vars(base))
     status_args.status_only = True
     assert has_standard_transport_command(status_args)
+    pet_args = argparse.Namespace(**vars(base))
+    pet_args.codex_pet_only = True
+    assert has_standard_transport_command(pet_args)
+    first_pet = validate_codex_pet_ready(
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":2,"frameMs":180,"preloadedBytes":830400,"uiTicks":9}}'
+    )
+    second_pet = validate_codex_pet_ready(
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":2,"frameMs":180,"preloadedBytes":830400,"uiTicks":10}}'
+    )
+    assert codex_pet_ticks_advanced(first_pet, second_pet)
+    try:
+        validate_codex_pet_ready(
+            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","frames":1,"frameMs":180,"preloadedBytes":830400,"uiTicks":10}}'
+        )
+    except RuntimeTransportError as exc:
+        assert "frames mismatch" in str(exc)
+    else:
+        raise AssertionError("incomplete Codex Pet preload must fail readiness")
     package_args = argparse.Namespace(**vars(base))
     assert not has_standard_transport_command(package_args)
     raw_args = argparse.Namespace(**vars(base))
@@ -141,6 +199,28 @@ def run_standard_transport_command(args: argparse.Namespace) -> int | None:
         with SerialTransport(serial_transport_options(args)) as transport:
             if args.status_only:
                 print(transport.status().strip())
+            elif args.codex_pet_only:
+                deadline = time.monotonic() + max(4.0, args.ready_timeout)
+                previous: dict[str, object] | None = None
+                latest: dict[str, object] | None = None
+                last_error = "no status received"
+                while time.monotonic() < deadline:
+                    try:
+                        latest = validate_codex_pet_ready(transport.codex_pet())
+                        last_error = "uiTicks did not advance"
+                        if previous is not None and codex_pet_ticks_advanced(previous, latest):
+                            print(json.dumps(latest, sort_keys=True, separators=(",", ":")))
+                            return 0
+                        previous = latest
+                    except (RuntimePackageError, RuntimeTransportError) as exc:
+                        last_error = str(exc)
+                        previous = None
+                    time.sleep(0.5)
+                fail(
+                    "Codex Pet readiness check timed out; expected active=1, frames=2, "
+                    "frameMs=180, preloadedBytes=830400 and advancing uiTicks; "
+                    f"last_error={last_error}"
+                )
             elif args.capabilities_only:
                 print(transport.capabilities())
             elif args.sensors_only:
@@ -205,6 +285,7 @@ def main() -> int:
     source.add_argument("--package-dir", type=Path, help="Directory containing manifest.json/app.info, main.lua, and assets")
     source.add_argument("--package-json", type=Path, help="VibeBoard runtime package JSON with app.packageId and files")
     source.add_argument("--status-only", action="store_true", help="Read Runtime serial status and exit")
+    source.add_argument("--codex-pet-only", action="store_true", help="Validate Codex Pet preloaded frames and advancing UI ticks")
     source.add_argument("--capabilities-only", action="store_true", help="Read Runtime capability JSON and exit")
     source.add_argument("--sensors-only", action="store_true", help="Read built-in sensor JSON and exit")
     source.add_argument("--power-only", action="store_true", help="Read Runtime power JSON and exit")
@@ -239,7 +320,7 @@ def main() -> int:
     parser.add_argument("--write-chunk-pause", type=float, default=0.012,
                         help="Pause between 24-byte UART writes; lower only with per-command ACK checks enabled")
     parser.add_argument("--binary-install", action="store_true",
-                        help="Transfer package files as acknowledged 4 KiB binary blocks")
+                        help=f"Transfer package files as acknowledged {SERIAL_BLOB_CHUNK_BYTES}-byte raw / 4096-byte base64 blocks")
     parser.add_argument("--stop-before-end", action="store_true", help="Write package chunks but do not commit; used to verify staging safety")
     parser.add_argument("--no-echo", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="Run offline CLI routing checks and exit")
@@ -252,6 +333,7 @@ def main() -> int:
         args.package_dir,
         args.package_json,
         args.status_only,
+        args.codex_pet_only,
         args.capabilities_only,
         args.sensors_only,
         args.power_only,
@@ -371,7 +453,18 @@ def main() -> int:
             print(f"Install completed but active app was not confirmed as {package_id}", file=sys.stderr)
             print(output[-4000:], file=sys.stderr)
             return 1
-        print(f"installed {package_id}: {len(files)} files, {len(commands)} commands, chunk={chunk_bytes} bytes, {elapsed:.1f}s")
+        if args.binary_install:
+            raw_chunks = sum(
+                (len(data) + SERIAL_BLOB_CHUNK_BYTES - 1) // SERIAL_BLOB_CHUNK_BYTES
+                for data in files.values()
+            )
+            print(
+                f"installed {package_id}: {len(files)} files, mode=binary, "
+                f"rawChunk={SERIAL_BLOB_CHUNK_BYTES} bytes, "
+                f"dataChunks={raw_chunks}, elapsed={elapsed:.1f}s"
+            )
+        else:
+            print(f"installed {package_id}: {len(files)} files, {len(commands)} commands, chunk={chunk_bytes} bytes, {elapsed:.1f}s")
         return 0
 
     if args.abort_only:

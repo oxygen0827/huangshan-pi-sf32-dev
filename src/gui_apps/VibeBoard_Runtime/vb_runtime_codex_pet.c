@@ -28,7 +28,7 @@
 #define VB_PET_ROCKY_DIR "/sdcard/apps/codex_pet/assets/rocky"
 #define VB_PET_ASSET_ROOT "/sdcard/apps/codex_pet/assets/pets"
 #define VB_PET_CATALOG_PATH VB_PET_ASSET_ROOT "/catalog.txt"
-#define VB_PET_MAX_ASSETS 8
+#define VB_PET_MAX_ASSETS 1
 #define VB_PET_MAX_ASSET_FRAMES 8
 #define VB_PET_ASSET_SLUG_MAX 33
 #define VB_PET_ASSET_NAME_MAX 33
@@ -42,32 +42,37 @@
 #define VB_PET_PRELOAD_MAGIC 0x43504256u
 #define VB_PET_PRELOAD_VERSION 1u
 #define VB_PET_PRELOAD_HEADER_SIZE 16u
-#define VB_PET_PRELOAD_PACK_STATE_COUNT 2
-#define VB_PET_PRELOAD_STATE_COUNT 1
+#define VB_PET_PRELOAD_PACK_STATE_COUNT VB_PET_ASSET_STATE_COUNT
+#define VB_PET_PRELOAD_STATE_COUNT VB_PET_ASSET_STATE_COUNT
 #define VB_PET_PRELOAD_FRAMES_PER_STATE 2
-#define VB_PET_SELECTION_RETRY_MS 500
-#define VB_PET_SELECTION_MAX_ATTEMPTS 12
 #define VB_PET_STATUS_API "vibeboard-huangshan-codex-pet/v1"
 #define VB_PET_PRELOAD_STORAGE_WAIT_MS 3000
-#define VB_PET_PRELOAD_MAX_BYTES (600000u)
+#define VB_PET_PRELOAD_MAX_BYTES (900000u)
 #define VB_PET_PRELOAD_MAX_COMPRESSED_BYTES (128u * 1024u)
 #define VB_PET_FLOW_QUEUE_SIZE 16
 #define VB_PET_FLOW_CHANNEL_MAX 25
 #define VB_PET_FLOW_PAYLOAD_MAX 193
 #define VB_PET_RUNTIME_FRAME_LIMIT 2
 #define VB_PET_PRELOAD_IO_CHUNK_BYTES (8u * 1024u)
-#define VB_PET_MIN_FRAME_MS 600
-#define VB_PET_IMAGE_X 105
-#define VB_PET_IMAGE_Y 82
-#define VB_PET_IMAGE_RUNNING_RAISED_Y 78
-#define VB_PET_IMAGE_RUNNING_LOWERED_Y 84
-#define VB_PET_IMAGE_ZOOM 312
-#define VB_PET_IMAGE_RUNNING_ZOOM 324
-#define VB_PET_ACTION_Y 370
+#define VB_PET_NATIVE_FRAME_MS 180
+#define VB_PET_IMAGE_X 115
+#define VB_PET_IMAGE_Y 115
+#define VB_PET_IMAGE_ZOOM 360
+#define VB_PET_ACTION_Y 369
 #define VB_PET_ACTION_WIDTH 150
 #define VB_PET_ACTION_HEIGHT 44
 #define VB_PET_ACTION_LEFT_X 35
 #define VB_PET_ACTION_RIGHT_X 205
+#define VB_PET_STATUS_Y 324
+#define VB_PET_TRANSCRIPT_Y 346
+#define VB_PET_TRANSCRIPT_HEIGHT 40
+#define VB_PET_TASK_LABEL_FULL_Y 392
+#define VB_PET_TASK_LABEL_COMPACT_Y 346
+#define VB_PET_SWIPE_ZONE_TOP 80
+#define VB_PET_SWIPE_ZONE_BOTTOM 324
+#define VB_PET_SWIPE_MIN_DX 28
+#define VB_PET_SWIPE_MAX_DY 96
+#define VB_PET_EDGE_BACK_X 72
 
 static const char *const g_vb_pet_rocky_paths[5][2] = {
     {VB_PET_ROCKY_DIR "/idle0.rle", VB_PET_ROCKY_DIR "/idle1.rle"},
@@ -136,6 +141,9 @@ typedef struct
     int pending_pet_attempts;
     uint32_t custom_next_frame_at;
     uint32_t pending_pet_retry_at;
+    int touch_press_x;
+    int touch_press_y;
+    int touch_swipe_consumed;
     char rgb_color[8];
     char project[VB_PET_PROJECT_MAX];
     char quota[VB_PET_QUOTA_MAX];
@@ -510,6 +518,8 @@ static int vb_pet_asset_state_index(void)
 {
     switch (g_pet.state)
     {
+    case VB_PET_RECORDING: return 3;
+    case VB_PET_TRANSCRIBING: return 4;
     case VB_PET_RUNNING: return 4;
     case VB_PET_NEEDS_INPUT: return 3;
     case VB_PET_READY: return 1;
@@ -520,8 +530,7 @@ static int vb_pet_asset_state_index(void)
 
 static int vb_pet_preload_state_index(int asset_state)
 {
-    (void)asset_state;
-    return 0;
+    return asset_state >= 0 && asset_state < VB_PET_PRELOAD_STATE_COUNT ? asset_state : -1;
 }
 
 static void vb_pet_release_preloaded_assets(void)
@@ -683,22 +692,13 @@ static void vb_pet_update_custom_frame(void)
         g_pet.custom_frame_index = 0;
     if (g_pet.custom_displayed_frame == g_pet.custom_frame_index) return;
     preload_state = vb_pet_preload_state_index(g_pet.custom_state);
+    if (preload_state < 0) return;
     image = &g_pet.preloaded_frames[g_pet.pet_index][preload_state]
                                          [g_pet.custom_frame_index];
     if (!image->data) return;
     lv_img_set_src(g_pet.pet_image, image);
-    if (g_pet.state == VB_PET_RUNNING)
-    {
-        lv_obj_set_y(g_pet.pet_image, g_pet.custom_frame_index ?
-                     VB_PET_IMAGE_RUNNING_RAISED_Y : VB_PET_IMAGE_RUNNING_LOWERED_Y);
-        lv_img_set_zoom(g_pet.pet_image, g_pet.custom_frame_index ?
-                        VB_PET_IMAGE_RUNNING_ZOOM : VB_PET_IMAGE_ZOOM);
-    }
-    else
-    {
-        lv_obj_set_y(g_pet.pet_image, VB_PET_IMAGE_Y);
-        lv_img_set_zoom(g_pet.pet_image, VB_PET_IMAGE_ZOOM);
-    }
+    /* Native Petdex frames define the action. Keep the image geometry stable. */
+    lv_obj_set_pos(g_pet.pet_image, VB_PET_IMAGE_X, VB_PET_IMAGE_Y);
     lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);
     g_pet.custom_displayed_frame = g_pet.custom_frame_index;
 }
@@ -710,6 +710,7 @@ static int vb_pet_activate_preloaded_state(int index, int state)
     if (!g_pet.preloaded_data || index < 0 || index >= g_pet.pet_count ||
         state < 0 || state >= VB_PET_ASSET_STATE_COUNT) return 0;
     preload_state = vb_pet_preload_state_index(state);
+    if (preload_state < 0) return 0;
     frame_count = g_pet.preloaded_frame_counts[index][preload_state];
     if (frame_count < 1 || frame_count > VB_PET_RUNTIME_FRAME_LIMIT ||
         !g_pet.preloaded_frames[index][preload_state][0].data) return 0;
@@ -720,7 +721,7 @@ static int vb_pet_activate_preloaded_state(int index, int state)
     g_pet.custom_frame_count = frame_count;
     g_pet.custom_frame_index = 0;
     g_pet.custom_displayed_frame = -1;
-    g_pet.custom_frame_ms = state == 4 ? VB_PET_MIN_FRAME_MS : 1200;
+    g_pet.custom_frame_ms = VB_PET_NATIVE_FRAME_MS;
     g_pet.custom_next_frame_at = rt_tick_get() +
         rt_tick_from_millisecond(g_pet.custom_frame_ms);
     g_pet.custom_available = 1;
@@ -804,6 +805,11 @@ static lv_obj_t *vb_pet_button(lv_obj_t *parent, const char *text,
     return button;
 }
 
+static int vb_pet_detail_is_approval(const char *detail)
+{
+    return detail && (strstr(detail, "approval") || strstr(detail, "Approval"));
+}
+
 static const char *vb_pet_status_text(void)
 {
     switch (g_pet.state)
@@ -812,8 +818,7 @@ static const char *vb_pet_status_text(void)
     case VB_PET_TRANSCRIBING: return "Transcribing";
     case VB_PET_RUNNING: return "Running";
     case VB_PET_NEEDS_INPUT:
-        if (g_pet.approval_pending || strstr(g_pet.task_detail, "approval") ||
-            strstr(g_pet.task_detail, "Approval")) return "Approval needed";
+        if (g_pet.approval_pending) return "Approval required";
         if (strstr(g_pet.task_detail, "credential") ||
             strstr(g_pet.task_detail, "Credential")) return "Credential on Mac";
         return "Input needed on Mac";
@@ -1043,12 +1048,88 @@ static void vb_pet_apply_mode_style(void)
                               LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
+static void vb_pet_navigate_task(int direction)
+{
+    const char *action;
+    int result;
+    if (g_pet.approval_pending || !g_pet.ops.send_action) return;
+    action = direction < 0 ? "prev" : "next";
+    result = g_pet.ops.send_action(action, "tasks");
+    if (result != RT_EOK)
+        vb_pet_copy(g_pet.error, sizeof(g_pet.error), "Bridge unavailable");
+    else
+        g_pet.error[0] = '\0';
+    g_pet.dirty = 1;
+}
+
+static int vb_pet_swipe_start_allowed(int x, int y)
+{
+    if (x < 30 || x > 359 || y < VB_PET_SWIPE_ZONE_TOP ||
+        y > VB_PET_SWIPE_ZONE_BOTTOM) return 0;
+    /* Preserve the Runtime left-edge right-swipe home gesture. */
+    if (x <= VB_PET_EDGE_BACK_X) return 0;
+    return 1;
+}
+
+static int vb_pet_handle_horizontal_swipe(int dx, int dy)
+{
+    if (g_pet.touch_swipe_consumed || g_pet.approval_pending ||
+        !vb_pet_swipe_start_allowed(g_pet.touch_press_x, g_pet.touch_press_y) ||
+        abs(dx) < VB_PET_SWIPE_MIN_DX || abs(dx) < abs(dy) + 12 ||
+        abs(dy) > VB_PET_SWIPE_MAX_DY) return 0;
+    g_pet.touch_swipe_consumed = 1;
+    /* A left swipe advances; a right swipe returns to the previous task. */
+    vb_pet_navigate_task(dx < 0 ? 1 : -1);
+    rt_kprintf("[vb_runtime][codex_pet] task swipe %s dx=%d dy=%d\n",
+               dx < 0 ? "next" : "prev", dx, dy);
+    return 1;
+}
+
+static void vb_pet_touch_event(lv_event_t *event)
+{
+    lv_event_code_t code;
+    lv_indev_t *indev;
+    lv_point_t point = {0, 0};
+    int dx;
+    int dy;
+    if (!event || !g_pet.active) return;
+    code = lv_event_get_code(event);
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_PRESSING &&
+        code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST &&
+        code != LV_EVENT_CLICKED && code != LV_EVENT_GESTURE) return;
+    indev = lv_event_get_indev(event);
+    if (!indev) indev = lv_indev_get_act();
+    if (indev) lv_indev_get_point(indev, &point);
+    if (code == LV_EVENT_PRESSED)
+    {
+        g_pet.touch_press_x = point.x;
+        g_pet.touch_press_y = point.y;
+        g_pet.touch_swipe_consumed = 0;
+        return;
+    }
+    dx = point.x - g_pet.touch_press_x;
+    dy = point.y - g_pet.touch_press_y;
+    if (code == LV_EVENT_GESTURE)
+    {
+        lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
+        if (dir == LV_DIR_LEFT) dx = -VB_PET_SWIPE_MIN_DX;
+        else if (dir == LV_DIR_RIGHT) dx = VB_PET_SWIPE_MIN_DX;
+        else return;
+        dy = 0;
+    }
+    if (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED ||
+        code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CLICKED ||
+        code == LV_EVENT_GESTURE)
+        (void)vb_pet_handle_horizontal_swipe(dx, dy);
+}
+
 static void vb_pet_render(void)
 {
     uint32_t color;
     uint32_t now;
     uint32_t sync_age_ms;
     int recent_count;
+    int show_task_detail = 1;
     const char *task_text;
     if (!g_pet.active || !g_pet.root) return;
     now = rt_tick_get();
@@ -1100,9 +1181,23 @@ static void vb_pet_render(void)
         lv_label_set_text(g_pet.pet_name_label, g_pet.pet_name[0] ? g_pet.pet_name : "Rocky");
     if (g_pet.error[0]) task_text = g_pet.error;
     else if (g_pet.approval_pending)
-        task_text = g_pet.approval_summary[0] ? g_pet.approval_summary : "Approval requested";
+    {
+        /* The status row is the single source of truth for a real approval. */
+        task_text = "";
+        show_task_detail = 0;
+    }
+    else if (!g_pet.approval_pending && vb_pet_detail_is_approval(g_pet.task_detail))
+    {
+        /* PermissionRequest hooks can be informational under auto-approval. */
+        task_text = "";
+        show_task_detail = 0;
+    }
     else task_text = g_pet.task_detail[0] ? g_pet.task_detail : "No active Codex tasks";
     lv_label_set_text(g_pet.transcript_label, task_text);
+    if (show_task_detail)
+        lv_obj_clear_flag(g_pet.transcript_label, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(g_pet.transcript_label, LV_OBJ_FLAG_HIDDEN);
     if (g_pet.task_count > 0)
     {
         recent_count = g_pet.task_count - g_pet.active_task_count;
@@ -1110,6 +1205,8 @@ static void vb_pet_render(void)
         lv_label_set_text_fmt(g_pet.task_label, "%d active  |  %d recent  |  %d/%d",
                               g_pet.active_task_count, recent_count,
                               g_pet.task_index, g_pet.task_count);
+        lv_obj_set_pos(g_pet.task_label, 30,
+                       show_task_detail ? VB_PET_TASK_LABEL_FULL_Y : VB_PET_TASK_LABEL_COMPACT_Y);
         lv_obj_clear_flag(g_pet.task_label, LV_OBJ_FLAG_HIDDEN);
     }
     else
@@ -1117,10 +1214,18 @@ static void vb_pet_render(void)
     lv_obj_set_style_text_color(g_pet.task_label, lv_color_hex(0x94a3b8),
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
     vb_pet_apply_mode_style();
-    lv_label_set_text(g_pet.new_label, g_pet.approval_pending ? "Allow" : "<");
-    lv_label_set_text(g_pet.continue_label, g_pet.approval_pending ? "Deny" : ">");
-    lv_obj_clear_flag(g_pet.new_button, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(g_pet.continue_button, LV_OBJ_FLAG_HIDDEN);
+    if (g_pet.approval_pending)
+    {
+        lv_label_set_text(g_pet.new_label, "Allow");
+        lv_label_set_text(g_pet.continue_label, "Deny");
+        lv_obj_clear_flag(g_pet.new_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(g_pet.continue_button, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(g_pet.new_button, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_pet.continue_button, LV_OBJ_FLAG_HIDDEN);
+    }
 
     if (!g_pet.rocky_available)
     {
@@ -1301,10 +1406,7 @@ static void vb_pet_new_event(lv_event_t *event)
         g_pet.dirty = 1;
         return;
     }
-    result = g_pet.ops.send_action ? g_pet.ops.send_action("prev", "tasks") : -RT_ENOSYS;
-    if (result != RT_EOK)
-        vb_pet_copy(g_pet.error, sizeof(g_pet.error), "Bridge unavailable");
-    g_pet.dirty = 1;
+    vb_pet_navigate_task(-1);
 }
 
 static void vb_pet_continue_event(lv_event_t *event)
@@ -1327,10 +1429,7 @@ static void vb_pet_continue_event(lv_event_t *event)
         g_pet.dirty = 1;
         return;
     }
-    result = g_pet.ops.send_action ? g_pet.ops.send_action("next", "tasks") : -RT_ENOSYS;
-    if (result != RT_EOK)
-        vb_pet_copy(g_pet.error, sizeof(g_pet.error), "Bridge unavailable");
-    g_pet.dirty = 1;
+    vb_pet_navigate_task(1);
 }
 
 static void vb_pet_image_event(lv_event_t *event)
@@ -1460,7 +1559,10 @@ static void vb_pet_receive_tasks(uint32_t sequence, const char *payload)
     if (vb_pet_json_string(payload, "st", status, sizeof(status)))
     {
         if (rt_strcmp(status, "running") == 0) g_pet.state = VB_PET_RUNNING;
-        else if (rt_strcmp(status, "needs_input") == 0) g_pet.state = VB_PET_NEEDS_INPUT;
+        else if (rt_strcmp(status, "needs_input") == 0)
+            g_pet.state = !approval && vb_pet_detail_is_approval(g_pet.task_detail)
+                              ? VB_PET_RUNNING
+                              : VB_PET_NEEDS_INPUT;
         else if (rt_strcmp(status, "blocked") == 0) g_pet.state = VB_PET_ERROR;
         else if (rt_strcmp(status, "ready") == 0) g_pet.state = VB_PET_READY;
         else if (rt_strcmp(status, "connected") == 0) g_pet.state = VB_PET_IDLE;
@@ -1529,11 +1631,11 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     lv_obj_set_style_text_color(root, lv_color_hex(0xf9fafb), LV_PART_MAIN | LV_STATE_DEFAULT);
 
     label = vb_pet_label(root, "Codex Companion", 0xf9fafb);
-    lv_obj_set_pos(label, 30, 24);
+    lv_obj_set_pos(label, 30, 36);
     g_pet.connection_label = vb_pet_label(root, "Bridge offline", 0x94a3b8);
     lv_obj_set_width(g_pet.connection_label, 150);
     lv_obj_set_style_text_align(g_pet.connection_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(g_pet.connection_label, 220, 52);
+    lv_obj_set_pos(g_pet.connection_label, 220, 62);
 
     g_pet.pet_tail = lv_obj_create(root);
     lv_obj_set_size(g_pet.pet_tail, 64, 24);
@@ -1603,6 +1705,8 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
         lv_img_set_zoom(g_pet.pet_image, VB_PET_IMAGE_ZOOM);
         lv_img_set_antialias(g_pet.pet_image, false);
         lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_EVENT_BUBBLE |
+                         LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_PRESS_LOCK);
         if (g_pet.pet_count > 1)
         {
             lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_CLICKABLE);
@@ -1625,21 +1729,29 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
         g_pet.pet_name[0] ? g_pet.pet_name : "Rocky", 0x94a3b8);
     lv_obj_set_width(g_pet.pet_name_label, 120);
     lv_obj_set_style_text_align(g_pet.pet_name_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(g_pet.pet_name_label, 240, 24);
+    lv_obj_set_pos(g_pet.pet_name_label, 240, 36);
 
     g_pet.status_label = vb_pet_label(root, "Disconnected", 0x94a3b8);
     lv_obj_set_width(g_pet.status_label, 330);
     lv_obj_set_style_text_align(g_pet.status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(g_pet.status_label, 30, 268);
+    lv_obj_set_pos(g_pet.status_label, 30, VB_PET_STATUS_Y);
     g_pet.transcript_label = vb_pet_label(root, "No active Codex tasks", 0xf9fafb);
-    lv_obj_set_size(g_pet.transcript_label, 330, 48);
-    lv_obj_set_pos(g_pet.transcript_label, 30, 292);
+    lv_obj_set_size(g_pet.transcript_label, 330, VB_PET_TRANSCRIPT_HEIGHT);
+    lv_obj_set_pos(g_pet.transcript_label, 30, VB_PET_TRANSCRIPT_Y);
     lv_obj_set_style_text_align(g_pet.transcript_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(g_pet.transcript_label, LV_LABEL_LONG_WRAP);
     g_pet.task_label = vb_pet_label(root, "No active tasks", 0x94a3b8);
     lv_obj_set_width(g_pet.task_label, 330);
     lv_obj_set_style_text_align(g_pet.task_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_pos(g_pet.task_label, 30, 342);
+    lv_obj_set_pos(g_pet.task_label, 30, VB_PET_TASK_LABEL_FULL_Y);
+
+    lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_PRESSED, RT_NULL);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_PRESSING, RT_NULL);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_RELEASED, RT_NULL);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_PRESS_LOST, RT_NULL);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_CLICKED, RT_NULL);
+    lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_GESTURE, RT_NULL);
 
     g_pet.new_button = vb_pet_button(root, "<", VB_PET_ACTION_LEFT_X,
                                      VB_PET_ACTION_Y, VB_PET_ACTION_WIDTH,
@@ -1651,6 +1763,8 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
                                           VB_PET_ACTION_HEIGHT,
                                           0x243244, vb_pet_continue_event);
     g_pet.continue_label = lv_obj_get_child(g_pet.continue_button, 0);
+    lv_obj_add_flag(g_pet.new_button, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(g_pet.continue_button, LV_OBJ_FLAG_HIDDEN);
     vb_pet_render();
     vb_pet_rgb_tick(rt_tick_get());
     vb_pet_reset_flow_queue(1);
@@ -1669,6 +1783,7 @@ void vb_codex_pet_stop(void)
     if ((g_pet.state == VB_PET_RECORDING || g_pet.state == VB_PET_TRANSCRIBING) &&
         g_pet.ops.voice_clear) g_pet.ops.voice_clear();
     g_pet.active = 0;
+    if (g_pet.root) lv_obj_remove_event_cb(g_pet.root, vb_pet_touch_event);
     if (g_pet.ops.rgb_set) (void)g_pet.ops.rgb_set("off");
     vb_pet_detach_custom_image();
     vb_pet_release_preloaded_assets();
@@ -1778,17 +1893,10 @@ void vb_codex_pet_tick(uint32_t now)
         vb_pet_copy(slug, sizeof(slug), g_pet.pending_pet_slug);
         if (!vb_pet_select_slug(slug, 1))
         {
-            g_pet.pending_pet_attempts++;
-            if (g_pet.pending_pet_attempts >= VB_PET_SELECTION_MAX_ATTEMPTS)
-            {
-                g_pet.pending_pet_selection = 0;
-                vb_pet_copy(g_pet.error, sizeof(g_pet.error), "Pet asset unavailable");
-            }
-            else
-            {
-                g_pet.pending_pet_retry_at = now +
-                    rt_tick_from_millisecond(VB_PET_SELECTION_RETRY_MS);
-            }
+            /* The board has one active pet slot; stale desktop selections are ignored. */
+            g_pet.pending_pet_selection = 0;
+            g_pet.pending_pet_attempts = 0;
+            g_pet.pending_pet_retry_at = 0;
         }
         else
         {

@@ -86,6 +86,10 @@ def _safe_text(value: object, default: str, limit: int) -> str:
     return truncate_utf8(text, limit) or default
 
 
+def _is_generic_approval_detail(value: str) -> bool:
+    return value.strip().casefold() in {"approval required", "approval needed"}
+
+
 def _is_soak_session(session_id: str) -> bool:
     return session_id.startswith("soak-")
 
@@ -245,11 +249,21 @@ class DesktopTaskRegistry:
             }
         else:
             ordered = self._ordered_ids()
+            snapshot_status = task.status
+            snapshot_detail = task.detail
+            if (
+                approval_id is None
+                and task.status == "needs_input"
+                and _is_generic_approval_detail(task.detail)
+            ):
+                # PermissionRequest can be informational when desktop auto-approval is active.
+                snapshot_status = "running"
+                snapshot_detail = "Approval handled"
             value = {
                 "v": 1,
                 "p": task.project,
-                "st": task.status,
-                "d": task.detail,
+                "st": snapshot_status,
+                "d": snapshot_detail,
                 "i": ordered.index(task.session_id) + 1,
                 "n": len(ordered),
                 "ac": active_count,
@@ -550,10 +564,12 @@ class CodexDesktopMonitor:
         ):
             request_id = "a:" + hashlib.sha256(request.message_id.encode("utf-8")).hexdigest()[:20]
             self.pending[request_id] = PendingApproval(request_id, session_id, self.clock_ms())
-        elif applied and event == "Stop":
+        elif applied and event in {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}:
+            # A later lifecycle event proves that desktop-side approval is no longer pending.
             self._clear_session_approvals(session_id)
             if _is_soak_session(session_id):
-                self.registry.remove(session_id)
+                if event == "Stop":
+                    self.registry.remove(session_id)
         self._persist_state()
         self._publish_event.set()
         return make_ack(
@@ -851,7 +867,51 @@ async def self_test_async() -> None:
     )
     await sensitive_monitor.handle(sensitive_request)
     await sensitive_monitor.publish_selected()
-    assert not sensitive_monitor.pending and json.loads(device.tasks[-1])["a"] == 0
+    automatic_snapshot = json.loads(device.tasks[-1])
+    assert not sensitive_monitor.pending and automatic_snapshot["a"] == 0
+    assert automatic_snapshot["st"] == "running" and automatic_snapshot["d"] == "Approval handled"
+
+    resumed_device = _FakeDevice()
+    resumed_monitor = CodexDesktopMonitor(
+        device=resumed_device,
+        approval_executor=_FakeApproval(),
+        clock_ms=lambda: clock[0],
+        managed_task=lambda session_id: session_id == "session-resumed",
+    )
+    pending_request = PetEnvelope(
+        kind="action",
+        sequence=11,
+        message_id="hook:11:approval",
+        task_id="session-resumed",
+        timestamp_ms=clock[0],
+        payload={
+            **request.payload,
+            "project": "resumed-project",
+            "turnId": "turn-resumed",
+        },
+    )
+    await resumed_monitor.handle(pending_request)
+    assert resumed_monitor.pending
+    resumed_request = PetEnvelope(
+        kind="action",
+        sequence=12,
+        message_id="hook:12:pretool",
+        task_id="session-resumed",
+        timestamp_ms=clock[0] + 1,
+        payload={
+            "action": "hook_event",
+            "status": "running",
+            "detail": "Using a tool",
+            "project": "resumed-project",
+            "turnId": "turn-resumed",
+            "event": "PreToolUse",
+        },
+    )
+    await resumed_monitor.handle(resumed_request)
+    await resumed_monitor.publish_selected()
+    resumed_snapshot = json.loads(resumed_device.tasks[-1])
+    assert not resumed_monitor.pending and resumed_snapshot["a"] == 0
+    assert resumed_snapshot["st"] == "running" and resumed_snapshot["d"] == "Using a tool"
 
     with tempfile.TemporaryDirectory(prefix="codex-pet-monitor-") as temporary:
         state_path = Path(temporary) / "desktop-state.json"

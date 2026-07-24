@@ -418,6 +418,7 @@ public struct RuntimePackage: Sendable {
         "vibe_snake_autoplay",
         "vibe_2048_game",
         "vibe_breakout_game",
+        "vibe_jump_game",
         "vibe_thunder_wing",
         "vibe_imu_lab",
         "vibe_pomodoro",

@@ -128,12 +128,24 @@
 #define VB_HTTP_FILES_TXT_MAX 4096
 #define VB_BLE_MAX_COMMAND 896
 #define VB_BLE_STATUS_MAX 1024
+#define VB_BLE_THREAD_STACK 8192
 #define VB_RUNTIME_INSTALL_MAX_CHUNK_BYTES 240
 #define VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES 4096u
 #define VB_RUNTIME_INSTALL_BLOB_RAW_CHUNK_BYTES 3072u
 #define VB_RUNTIME_INSTALL_BLOB_MAX_BYTES (1024u * 1024u)
 #define VB_RUNTIME_INSTALL_BLOB_TIMEOUT_MS 10000u
+#define VB_BLE_BULK_V2_MAGIC 0x324b4256u
+#define VB_BLE_BULK_V2_VERSION 2u
+#define VB_BLE_BULK_V2_HEADER_BYTES 24u
+#define VB_BLE_BULK_V2_MAX_PAYLOAD 220u
+#define VB_BLE_BULK_V2_ACK_REQUEST 0x01u
+#define VB_BLE_BULK_V2_WRITE_BUFFER_BYTES 4096u
+#define VB_BLE_WORK_MAGIC 0x324b5756u
+#define VB_BLE_WORK_TEXT 1u
+#define VB_BLE_WORK_BULK 2u
 #define VB_BLE_EVT_RESTART_ADV 0x56524201u
+#define VB_BLE_EVT_RELOAD_APP 0x56524202u
+#define VB_INSTALL_RELOAD_DELAY_MS 1500u
 #define VB_BLE_ADV_RESTART_DELAY_MS 600
 #define VB_BLE_ADV_RESTART_INTERVAL_MS 700
 #define VB_BLE_ADV_RESTART_ATTEMPTS 6
@@ -201,6 +213,32 @@
 #define VB_BREAKOUT_ROWS 4
 #define VB_BREAKOUT_BRICKS (VB_BREAKOUT_COLS * VB_BREAKOUT_ROWS)
 #define VB_BREAKOUT_PERIOD_MS 25
+#define VB_JUMP_PERIOD_MS 25
+#define VB_JUMP_PLATFORM_POOL 4
+#define VB_JUMP_PLATFORM_H 26
+#define VB_JUMP_PLAT_W_START 72
+#define VB_JUMP_PLAT_W_MIN 44
+#define VB_JUMP_CHAR_SIZE 22
+#define VB_JUMP_CHARGE_MAX_MS 800
+#define VB_JUMP_JUMP_FRAMES 17
+#define VB_JUMP_SCROLL_FRAMES 8
+#define VB_JUMP_FALL_FRAMES 10
+#define VB_JUMP_ANCHOR_X 195
+#define VB_JUMP_ANCHOR_Y 300
+#define VB_JUMP_GAP_MIN 90
+#define VB_JUMP_GAP_SPAN 141
+#define VB_JUMP_MAX_DIST 260.0f
+#define VB_JUMP_DIR_COS 0.7071f
+#define VB_JUMP_LAND_PAD 4
+#define VB_JUMP_CENTER_ZONE 10
+#define VB_JUMP_POWER_W 300
+#define VB_JUMP_POWER_Y (LV_VER_RES_MAX - VB_SCREEN_SAFE_BOTTOM - 24)
+#define VB_JUMP_STATE_READY 0
+#define VB_JUMP_STATE_CHARGING 1
+#define VB_JUMP_STATE_JUMPING 2
+#define VB_JUMP_STATE_SCROLLING 3
+#define VB_JUMP_STATE_FALLING 4
+#define VB_JUMP_STATE_OVER 5
 #define VB_THUNDER_ENEMIES 8
 #define VB_THUNDER_PLAYER_BULLETS 24
 #define VB_THUNDER_ENEMY_BULLETS 14
@@ -410,6 +448,40 @@ typedef struct
     lv_obj_t *status_label;
     lv_timer_t *timer;
 } vb_breakout_state_t;
+
+typedef struct
+{
+    int active;
+    int state;
+    int score;
+    int best;
+    uint32_t rng;
+    int charge_ms;
+    int anim_frame;
+    int spawn_count;
+    float jump_from_x, jump_from_y;
+    float jump_dx, jump_dy;
+    float cam_x, cam_y;
+    float cam_from_x, cam_from_y, cam_to_x, cam_to_y;
+    float char_wx, char_wy;
+    float draw_off_y;
+    int plat_wx[VB_JUMP_PLATFORM_POOL];
+    int plat_wy[VB_JUMP_PLATFORM_POOL];
+    int plat_w[VB_JUMP_PLATFORM_POOL];
+    int plat_used[VB_JUMP_PLATFORM_POOL];
+    int cur_plat;
+    int next_plat;
+    lv_obj_t *platforms[VB_JUMP_PLATFORM_POOL];
+    lv_obj_t *character;
+    lv_obj_t *power_bg;
+    lv_obj_t *power_fill;
+    lv_obj_t *score_label;
+    lv_obj_t *status_label;
+    lv_obj_t *over_panel;
+    lv_obj_t *over_title;
+    lv_obj_t *over_text;
+    lv_timer_t *timer;
+} vb_jump_state_t;
 
 typedef struct
 {
@@ -718,6 +790,14 @@ typedef struct
 #if VB_RUNTIME_HAS_BLE_INSTALL
 typedef struct
 {
+    uint32_t magic;
+    uint16_t type;
+    uint16_t len;
+    uint8_t data[];
+} vb_ble_work_item_t;
+
+typedef struct
+{
     int initialized;
     int power_on;
     int service_ready;
@@ -735,6 +815,10 @@ typedef struct
     uint16_t notify_cccd;
     uint16_t voice_cccd;
     uint8_t conn_idx;
+    /* Security requests are emitted by both the raw GAP and connection-manager
+     * callbacks on some SDK builds. Keep one in flight per link so the second
+     * callback cannot restart SMP pairing and force a timeout. */
+    uint8_t security_requested[VB_BLE_TRACKED_CONNECTIONS];
     uint16_t mtu;
     uint16_t mtu_by_conn[VB_BLE_TRACKED_CONNECTIONS];
     sibles_hdl srv_handle;
@@ -839,10 +923,10 @@ typedef struct
     uint32_t script_tick_period_ticks;
     uint32_t script_tick_last_run;
     int script_runtime_active;
-    vb_jump_game_state_t jump;
     vb_snake_state_t snake;
     vb_2048_state_t game2048;
     vb_breakout_state_t breakout;
+    vb_jump_state_t jump;
     vb_thunder_state_t thunder;
     vb_imu_state_t imu;
     vb_pomodoro_state_t pomodoro;
@@ -873,6 +957,14 @@ typedef struct
     long install_offset;
     char install_path[VB_MAX_PATH];
     char install_app[VB_MAX_APP_ID];
+    uint8_t *install_bulk_buffer;
+    uint32_t install_bulk_id;
+    uint32_t install_bulk_expected;
+    uint32_t install_bulk_received;
+    uint32_t install_bulk_next_sequence;
+    uint16_t install_bulk_buffered;
+    uint8_t install_bulk_active;
+    uint8_t install_bulk_complete;
     uint32_t tick_count;
     uint32_t last_clock_update;
     uint32_t flow_seen_total;
@@ -932,8 +1024,16 @@ static int vb_pan_connect_now(void);
 static int vb_pan_forget(void);
 #endif
 static int vb_runtime_install_begin_app(const char *app_id);
+static int vb_runtime_install_session_matches(const char *app_id);
 static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
                                          const char *offset_text, const char *hex);
+#if VB_RUNTIME_HAS_BLE_INSTALL
+static int vb_runtime_install_bulk_begin(const char *app_id, const char *path,
+                                         const char *size_text, const char *id_text);
+static int vb_runtime_install_bulk_packet(const uint8_t *packet, rt_size_t packet_len,
+                                          int *notify_status);
+static void vb_runtime_install_bulk_reset(void);
+#endif
 static int vb_runtime_install_blob_file(const char *app_id, const char *path,
                                         const char *size_text);
 static int vb_runtime_install_end_app(const char *app_id);
@@ -2826,7 +2926,7 @@ static int vb_ble_execute_line(char *line)
     {
         char active[VB_MAX_APP_ID];
         vb_read_active_app(active, sizeof(active));
-        vb_ble_set_status("ok status api=%s active=%s flow=%lu secure=%d", VIBEBOARD_RUNTIME_BLE_API_VERSION,
+        vb_ble_set_status("ok status api=%s active=%s flow=%lu secure=%d bulk=2", VIBEBOARD_RUNTIME_BLE_API_VERSION,
                           active[0] ? active : "(unknown)",
                           (unsigned long)g_vb_flow.total_count,
                           g_vb_ble.encrypted);
@@ -3158,6 +3258,14 @@ static int vb_ble_execute_line(char *line)
                           result);
         return result;
     }
+    if (rt_strcmp(argv[0], "vb_runtime_install_bulk") == 0 && argc >= 5)
+    {
+        int result = vb_runtime_install_bulk_begin(argv[1], argv[2], argv[3], argv[4]);
+        vb_ble_set_status("%s install_bulk app=%s path=%s bytes=%s id=%s rc=%d",
+                          result == RT_EOK ? "ok" : "err",
+                          argv[1], argv[2], argv[3], argv[4], result);
+        return result;
+    }
     if (rt_strcmp(argv[0], "vb_runtime_install_abort") == 0 && argc >= 2)
     {
         int result = vb_runtime_install_abort_app(argv[1]);
@@ -3203,6 +3311,29 @@ static int vb_ble_execute_line(char *line)
 static void vb_ble_receive_bytes(const uint8_t *data, uint16_t len)
 {
     uint16_t i;
+    if (data && len >= 4u &&
+        ((uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+         ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24)) == VB_BLE_BULK_V2_MAGIC)
+    {
+        vb_ble_work_item_t *item = rt_malloc(sizeof(*item) + len);
+        g_vb_ble.rx_len = 0;
+        if (!item)
+        {
+            rt_kprintf("[vb_runtime][ble] bulk allocation failed\n");
+            return;
+        }
+        item->magic = VB_BLE_WORK_MAGIC;
+        item->type = VB_BLE_WORK_BULK;
+        item->len = len;
+        rt_memcpy(item->data, data, len);
+        if (!g_vb_ble.mailbox ||
+            rt_mb_send(g_vb_ble.mailbox, (rt_uint32_t)(uintptr_t)item) != RT_EOK)
+        {
+            rt_free(item);
+            rt_kprintf("[vb_runtime][ble] bulk queue full\n");
+        }
+        return;
+    }
     for (i = 0; i < len; i++)
     {
         char ch = (char)data[i];
@@ -3210,9 +3341,31 @@ static void vb_ble_receive_bytes(const uint8_t *data, uint16_t len)
         {
             if (g_vb_ble.rx_len > 0)
             {
-                g_vb_ble.rx_line[g_vb_ble.rx_len] = '\0';
-                vb_ble_execute_line(g_vb_ble.rx_line);
-                vb_ble_notify_status();
+                vb_ble_work_item_t *item = rt_malloc(sizeof(*item) +
+                                                     (rt_size_t)g_vb_ble.rx_len + 1u);
+                if (item)
+                {
+                    item->magic = VB_BLE_WORK_MAGIC;
+                    item->type = VB_BLE_WORK_TEXT;
+                    item->len = (uint16_t)g_vb_ble.rx_len;
+                    rt_memcpy(item->data, g_vb_ble.rx_line, (rt_size_t)g_vb_ble.rx_len);
+                    item->data[g_vb_ble.rx_len] = '\0';
+                    /*
+                     * GATT write callbacks must stay short. Runtime install
+                     * commands touch the SD/SPI filesystem, so execute the
+                     * complete line on the BLE worker and acknowledge it there.
+                     */
+                    if (!g_vb_ble.mailbox ||
+                        rt_mb_send(g_vb_ble.mailbox, (rt_uint32_t)(uintptr_t)item) != RT_EOK)
+                    {
+                        rt_free(item);
+                        rt_kprintf("[vb_runtime][ble] command queue full\n");
+                    }
+                }
+                else
+                {
+                    rt_kprintf("[vb_runtime][ble] command allocation failed\n");
+                }
                 g_vb_ble.rx_len = 0;
             }
             continue;
@@ -3253,6 +3406,29 @@ static int vb_ble_claim_host_connection(uint8_t conn_idx)
         rt_kprintf("[vb_runtime][ble] host claimed idx=%u secure=1\n", (unsigned)conn_idx);
     }
     return 1;
+}
+
+static uint8_t vb_ble_request_link_security(uint8_t conn_idx, const char *source)
+{
+    uint8_t ret;
+    if (conn_idx >= VB_BLE_TRACKED_CONNECTIONS)
+    {
+        rt_kprintf("[vb_runtime][ble] security request skipped idx=%u source=%s invalid\n",
+                   (unsigned)conn_idx, source ? source : "unknown");
+        return CM_CONN_INDEX_ERROR;
+    }
+    if (g_vb_ble.security_requested[conn_idx])
+    {
+        rt_kprintf("[vb_runtime][ble] security request skipped idx=%u source=%s already_pending\n",
+                   (unsigned)conn_idx, source ? source : "unknown");
+        return CM_STATUS_OK;
+    }
+    ret = connection_manager_set_link_security(conn_idx, LE_SECURITY_LEVEL_NO_MITM_BOND);
+    if (ret == CM_STATUS_OK)
+        g_vb_ble.security_requested[conn_idx] = 1;
+    rt_kprintf("[vb_runtime][ble] security requested idx=%u source=%s rc=%u\n",
+               (unsigned)conn_idx, source ? source : "unknown", (unsigned)ret);
+    return ret;
 }
 
 static uint8_t vb_ble_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
@@ -3535,6 +3711,32 @@ static void vb_ble_worker_entry(void *parameter)
                 rt_thread_mdelay(VB_BLE_ADV_RESTART_INTERVAL_MS);
             }
         }
+        else if (value == VB_BLE_EVT_RELOAD_APP)
+        {
+            /* install_end is acknowledged by the BLE worker after it returns.
+             * Keep reload and SD/PSRAM preload out of that acknowledgement window. */
+            rt_thread_mdelay(VB_INSTALL_RELOAD_DELAY_MS);
+            vb_runtime_request_reload();
+        }
+        else
+        {
+            vb_ble_work_item_t *item = (vb_ble_work_item_t *)(uintptr_t)value;
+            if (item && item->magic == VB_BLE_WORK_MAGIC)
+            {
+                if (item->type == VB_BLE_WORK_TEXT)
+                {
+                    vb_ble_execute_line((char *)item->data);
+                    vb_ble_notify_status();
+                }
+                else if (item->type == VB_BLE_WORK_BULK)
+                {
+                    int notify_status = 0;
+                    (void)vb_runtime_install_bulk_packet(item->data, item->len, &notify_status);
+                    if (notify_status) vb_ble_notify_status();
+                }
+                rt_free(item);
+            }
+        }
     }
 }
 
@@ -3552,7 +3754,7 @@ static int vb_ble_install_init(void)
         rt_kprintf("[vb_runtime][ble] init failed: mailbox\n");
         return -RT_ERROR;
     }
-    thread = rt_thread_create("vb_ble", vb_ble_worker_entry, RT_NULL, 4096,
+    thread = rt_thread_create("vb_ble", vb_ble_worker_entry, RT_NULL, VB_BLE_THREAD_STACK,
                               RT_THREAD_PRIORITY_MIDDLE + 2, RT_THREAD_TICK_DEFAULT);
     if (!thread)
     {
@@ -3604,10 +3806,7 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
              * security at the raw link event as well so protected GATT never races it. */
             if (ind->role == 1)
             {
-                uint8_t security_rc = connection_manager_set_link_security(
-                    ind->conn_idx, LE_SECURITY_LEVEL_NO_MITM_BOND);
-                rt_kprintf("[vb_runtime][ble] raw security requested idx=%u rc=%u\n",
-                           (unsigned)ind->conn_idx, (unsigned)security_rc);
+                (void)vb_ble_request_link_security(ind->conn_idx, "raw");
             }
             if (ind->role == 1)
             {
@@ -3623,10 +3822,7 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
         if (ind)
         {
             /* Initiate Just Works pairing before macOS touches protected GATT. */
-            (void)connection_manager_set_link_security(ind->conn_idx,
-                                                        LE_SECURITY_LEVEL_NO_MITM_BOND);
-            rt_kprintf("[vb_runtime][ble] security requested idx=%u level=no_mitm_bond\n",
-                       (unsigned)ind->conn_idx);
+            (void)vb_ble_request_link_security(ind->conn_idx, "manager");
         }
         break;
     }
@@ -3636,7 +3832,10 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
         if (!ind) break;
         g_vb_ble.link_active = 0;
         if (ind->conn_idx < VB_BLE_TRACKED_CONNECTIONS)
+        {
             g_vb_ble.mtu_by_conn[ind->conn_idx] = 0;
+            g_vb_ble.security_requested[ind->conn_idx] = 0;
+        }
         if (ind->conn_idx == g_vb_ble.conn_idx)
         {
             g_vb_ble.connected = 0;
@@ -4362,6 +4561,9 @@ static void vb_build_install_dir(char *dst, rt_size_t cap, const char *prefix, c
 
 static void vb_runtime_install_clear_session(void)
 {
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    vb_runtime_install_bulk_reset();
+#endif
     g_vb_runtime.install_app[0] = '\0';
 }
 
@@ -5069,11 +5271,19 @@ static int vb_runtime_app_launch(const char *app_id)
         vb_runtime_set_app_result(-RT_ERROR, "app not found or incompatible");
         return -RT_ERROR;
     }
-    if (g_vb_runtime.app_running && rt_strcmp(g_vb_runtime.active_app, app_id) == 0)
+    if (rt_strcmp(g_vb_runtime.active_app, app_id) == 0 &&
+        (g_vb_runtime.app_running || g_vb_runtime.pending_reload ||
+         g_vb_runtime.reload_in_progress))
     {
         vb_runtime_set_app_result(RT_EOK, "already running");
-        rt_kprintf("[vb_runtime] app already running: %s\n", app_id);
+        rt_kprintf("[vb_runtime] app launch already pending/running: %s\n", app_id);
         return RT_EOK;
+    }
+    if (g_vb_runtime.pending_stop)
+    {
+        vb_runtime_set_app_result(-RT_EBUSY, "stop in progress");
+        rt_kprintf("[vb_runtime] app launch blocked by stop: %s\n", app_id);
+        return -RT_EBUSY;
     }
     result = vb_runtime_select_app(app_id);
     if (result == RT_EOK)
@@ -7693,33 +7903,483 @@ static int vb_breakout_start(const char *title)
     vb_breakout_reset_game();
     game->timer = lv_timer_create(vb_breakout_timer_cb, VB_BREAKOUT_PERIOD_MS, RT_NULL);
     rt_kprintf("[vb_runtime][breakout] started bricks=%d period=%d\n",
-typedef struct {
-    int initialized;
-    int ready; float x, y, vx, vy; uint8_t state:
-enum {READY=0,CHARGING,RELEASED,FALLING};
-    int score; uint8_t best;
-lv_obj_t *bg,*title,*score_label,*status_label,
-vb_thunder_hide_actor(vb_thunder_state_t actor);
-static void vb_jump_game_start(void)
-{
-g_vb_runtime.jump.initialized = 1;
-g_vb_runtime.jump.ready = 1; g_vb_runtime.jump.x = VB_SCREEN_SAFE_LEFT + VB_SCREEN_SAFE_WIDTH/2.0f - PLAYER_SIZE/2.0f;
-g_vb_runtime.jump.y = VB_SCREEN_SAFE_TOP + VB_SCREEN_SAFE_HEIGHT*3.5f / LV_VER_RES_MAX * (float)LV_VER_RES_MAX; g_vb_runtime.jump.vx = 0.0f; g_vb_runtime.jump.vy = -14.0f;
-} vb_jump_game_state_t;
+               VB_BREAKOUT_BRICKS, VB_BREAKOUT_PERIOD_MS);
     return game->timer ? RT_EOK : -RT_ENOMEM;
-typedef struct {
-    int initialized;
-    int ready; float x, y, vx, vy; uint8_t state:
-enum {READY=0,CHARGING,RELEASED,FALLING};
-    int score; uint8_t best;
-lv_obj_t *bg,*title,*score_label,*status_label,
-vb_thunder_hide_actor(vb_thunder_state_t actor);
-static void vb_jump_game_start(void)
+}
+
+static uint32_t vb_jump_random(void)
 {
-g_vb_runtime.jump.initialized = 1;
-g_vb_runtime.jump.ready = 1; g_vb_runtime.jump.x = VB_SCREEN_SAFE_LEFT + VB_SCREEN_SAFE_WIDTH/2.0f - PLAYER_SIZE/2.0f;
-g_vb_runtime.jump.y = VB_SCREEN_SAFE_TOP + VB_SCREEN_SAFE_HEIGHT*3.5f / LV_VER_RES_MAX * (float)LV_VER_RES_MAX; g_vb_runtime.jump.vx = 0.0f; g_vb_runtime.jump.vy = -14.0f;
-} vb_jump_game_state_t;
+    uint32_t value = g_vb_runtime.jump.rng;
+    if (!value) value = 0x9e3779b9u;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    g_vb_runtime.jump.rng = value;
+    return value;
+}
+
+static float vb_jump_fabsf(float v)
+{
+    return v < 0.0f ? -v : v;
+}
+
+static void vb_jump_update_score_label(void)
+{
+    char buf[48];
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    if (!game->score_label) return;
+    rt_snprintf(buf, sizeof(buf), "得分 %d  最高 %d", game->score, game->best);
+    lv_label_set_text(game->score_label, buf);
+}
+
+static void vb_jump_set_status(const char *text, uint32_t color)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    if (!game->status_label) return;
+    lv_label_set_text(game->status_label, text);
+    lv_obj_set_style_text_color(game->status_label, lv_color_hex(color),
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+static int vb_jump_plat_width(void)
+{
+    int w = VB_JUMP_PLAT_W_START - (g_vb_runtime.jump.score / 10) * 4;
+    return w < VB_JUMP_PLAT_W_MIN ? VB_JUMP_PLAT_W_MIN : w;
+}
+
+static void vb_jump_layout(void)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    int i;
+    for (i = 0; i < VB_JUMP_PLATFORM_POOL; i++)
+    {
+        lv_obj_t *obj;
+        int sx;
+        int sy;
+        if (!game->plat_used[i]) continue;
+        obj = game->platforms[i];
+        if (!obj) continue;
+        sx = (int)((float)game->plat_wx[i] - game->cam_x);
+        sy = (int)((float)game->plat_wy[i] - game->cam_y);
+        if (sx < -140 || sx > LV_HOR_RES_MAX + 140 ||
+            sy < -140 || sy > LV_VER_RES_MAX + 140)
+        {
+            lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+            game->plat_used[i] = 0;
+            continue;
+        }
+        lv_obj_set_pos(obj, sx - game->plat_w[i] / 2, sy - VB_JUMP_PLATFORM_H / 2);
+    }
+    if (game->character)
+    {
+        int cx = (int)(game->char_wx - game->cam_x) - VB_JUMP_CHAR_SIZE / 2;
+        int cy = (int)(game->char_wy - game->cam_y - game->draw_off_y) - VB_JUMP_CHAR_SIZE / 2;
+        lv_obj_set_pos(game->character, cx, cy);
+    }
+}
+
+static void vb_jump_spawn_next(void)
+{
+    static const uint32_t palette[4] = { 0xff5c65, 0xfbbf24, 0x47d7ac, 0x5db7ff };
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    lv_color_t color;
+    int slot = -1;
+    int sign;
+    int gap;
+    int i;
+    for (i = 0; i < VB_JUMP_PLATFORM_POOL; i++)
+    {
+        if (!game->plat_used[i]) { slot = i; break; }
+    }
+    if (slot < 0 || !game->platforms[slot]) return;
+    sign = (vb_jump_random() & 1u) ? 1 : -1;
+    gap = VB_JUMP_GAP_MIN + (int)(vb_jump_random() % VB_JUMP_GAP_SPAN);
+    game->plat_used[slot] = 1;
+    game->plat_w[slot] = vb_jump_plat_width();
+    game->plat_wx[slot] = game->plat_wx[game->cur_plat] +
+                          sign * (int)((float)gap * VB_JUMP_DIR_COS);
+    game->plat_wy[slot] = game->plat_wy[game->cur_plat] -
+                          (int)((float)gap * VB_JUMP_DIR_COS);
+    color = lv_color_hex(palette[game->spawn_count % 4]);
+    game->spawn_count++;
+    lv_obj_set_size(game->platforms[slot], game->plat_w[slot], VB_JUMP_PLATFORM_H);
+    lv_obj_set_style_bg_color(game->platforms[slot], color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_color(game->platforms[slot], color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(game->platforms[slot], LV_OBJ_FLAG_HIDDEN);
+    game->next_plat = slot;
+}
+
+static void vb_jump_place_char_on(int slot)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    game->char_wx = (float)game->plat_wx[slot];
+    game->char_wy = (float)game->plat_wy[slot] - (float)VB_JUMP_PLATFORM_H / 2.0f -
+                    (float)VB_JUMP_CHAR_SIZE / 2.0f;
+    game->draw_off_y = 0.0f;
+}
+
+static void vb_jump_show_over(void)
+{
+    char buf[64];
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    if (!game->over_panel || !game->over_title || !game->over_text) return;
+    rt_snprintf(buf, sizeof(buf), "得分 %d  最高 %d\n点击屏幕重新开始",
+                game->score, game->best);
+    lv_label_set_text(game->over_text, buf);
+    lv_obj_clear_flag(game->over_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(game->over_title, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(game->over_text, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void vb_jump_hide_over(void)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    if (game->over_panel) lv_obj_add_flag(game->over_panel, LV_OBJ_FLAG_HIDDEN);
+    if (game->over_title) lv_obj_add_flag(game->over_title, LV_OBJ_FLAG_HIDDEN);
+    if (game->over_text) lv_obj_add_flag(game->over_text, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void vb_jump_reset_round(void)
+{
+    static const uint32_t first_color = 0x47d7ac;
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    int i;
+    game->score = 0;
+    game->charge_ms = 0;
+    game->anim_frame = 0;
+    game->spawn_count = 0;
+    game->cam_x = 0.0f;
+    game->cam_y = 0.0f;
+    game->draw_off_y = 0.0f;
+    for (i = 0; i < VB_JUMP_PLATFORM_POOL; i++)
+    {
+        game->plat_used[i] = 0;
+        if (game->platforms[i]) lv_obj_add_flag(game->platforms[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    game->cur_plat = 0;
+    game->plat_used[0] = 1;
+    game->plat_w[0] = VB_JUMP_PLAT_W_START;
+    game->plat_wx[0] = VB_JUMP_ANCHOR_X;
+    game->plat_wy[0] = VB_JUMP_ANCHOR_Y + VB_JUMP_PLATFORM_H / 2 + VB_JUMP_CHAR_SIZE / 2;
+    game->spawn_count = 1;
+    if (game->platforms[0])
+    {
+        lv_obj_set_size(game->platforms[0], VB_JUMP_PLAT_W_START, VB_JUMP_PLATFORM_H);
+        lv_obj_set_style_bg_color(game->platforms[0], lv_color_hex(first_color),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_color(game->platforms[0], lv_color_hex(first_color),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(game->platforms[0], LV_OBJ_FLAG_HIDDEN);
+    }
+    vb_jump_place_char_on(0);
+    vb_jump_spawn_next();
+    game->state = VB_JUMP_STATE_READY;
+    vb_jump_update_score_label();
+    vb_jump_set_status("按住蓄力", 0xfbbf24);
+    vb_jump_hide_over();
+    if (game->power_bg) lv_obj_add_flag(game->power_bg, LV_OBJ_FLAG_HIDDEN);
+    if (game->power_fill) lv_obj_add_flag(game->power_fill, LV_OBJ_FLAG_HIDDEN);
+    vb_jump_layout();
+}
+
+static void vb_jump_begin_jump(void)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    float power = (float)game->charge_ms / (float)VB_JUMP_CHARGE_MAX_MS;
+    float dist;
+    float sign;
+    if (power > 1.0f) power = 1.0f;
+    dist = power * VB_JUMP_MAX_DIST;
+    sign = (game->plat_wx[game->next_plat] >= game->plat_wx[game->cur_plat]) ? 1.0f : -1.0f;
+    game->jump_from_x = game->char_wx;
+    game->jump_from_y = game->char_wy;
+    game->jump_dx = dist * VB_JUMP_DIR_COS * sign;
+    game->jump_dy = -dist * VB_JUMP_DIR_COS;
+    game->anim_frame = 0;
+    game->state = VB_JUMP_STATE_JUMPING;
+    if (game->power_bg) lv_obj_add_flag(game->power_bg, LV_OBJ_FLAG_HIDDEN);
+    if (game->power_fill) lv_obj_add_flag(game->power_fill, LV_OBJ_FLAG_HIDDEN);
+    vb_jump_set_status("", 0xfbbf24);
+}
+
+static void vb_jump_land_check(void)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    int slot = game->next_plat;
+    float stand_y = (float)game->plat_wy[slot] - (float)VB_JUMP_PLATFORM_H / 2.0f -
+                    (float)VB_JUMP_CHAR_SIZE / 2.0f;
+    float dx = vb_jump_fabsf(game->char_wx - (float)game->plat_wx[slot]);
+    float dy = vb_jump_fabsf(game->char_wy - stand_y);
+    int hit_x = dx <= (float)game->plat_w[slot] / 2.0f + (float)VB_JUMP_LAND_PAD;
+    int hit_y = dy <= (float)VB_JUMP_PLATFORM_H / 2.0f + (float)VB_JUMP_LAND_PAD;
+    if (hit_x && hit_y)
+    {
+        int center = (dx <= (float)VB_JUMP_CENTER_ZONE) && (dy <= (float)VB_JUMP_CENTER_ZONE);
+        game->score += center ? 2 : 1;
+        if (game->score > game->best) game->best = game->score;
+        game->cur_plat = slot;
+        game->draw_off_y = 0.0f;
+        vb_jump_update_score_label();
+        vb_jump_set_status(center ? "中心 +2!" : "+1", center ? 0x47d7ac : 0x5db7ff);
+        rt_kprintf("[vb_runtime][jump] land score=%d center=%d\n", game->score, center);
+        game->cam_from_x = game->cam_x;
+        game->cam_from_y = game->cam_y;
+        game->cam_to_x = game->char_wx - (float)VB_JUMP_ANCHOR_X;
+        game->cam_to_y = game->char_wy - (float)VB_JUMP_ANCHOR_Y;
+        game->anim_frame = 0;
+        game->state = VB_JUMP_STATE_SCROLLING;
+    }
+    else
+    {
+        game->anim_frame = 0;
+        game->draw_off_y = 0.0f;
+        game->state = VB_JUMP_STATE_FALLING;
+        vb_jump_set_status("落空!", 0xff5c65);
+    }
+}
+
+static void vb_jump_step(void)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    if (!game->active) return;
+    switch (game->state)
+    {
+    case VB_JUMP_STATE_CHARGING:
+    {
+        int width;
+        uint32_t color = 0x47d7ac;
+        game->charge_ms += VB_JUMP_PERIOD_MS;
+        if (game->charge_ms > VB_JUMP_CHARGE_MAX_MS) game->charge_ms = VB_JUMP_CHARGE_MAX_MS;
+        width = game->charge_ms * VB_JUMP_POWER_W / VB_JUMP_CHARGE_MAX_MS;
+        if (width >= VB_JUMP_POWER_W * 8 / 10) color = 0xff5c65;
+        else if (width >= VB_JUMP_POWER_W / 2) color = 0xfbbf24;
+        if (game->power_fill)
+        {
+            lv_obj_set_width(game->power_fill, width > 2 ? width : 2);
+            lv_obj_set_style_bg_color(game->power_fill, lv_color_hex(color),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+        break;
+    }
+    case VB_JUMP_STATE_JUMPING:
+    {
+        float u;
+        game->anim_frame++;
+        if (game->anim_frame >= VB_JUMP_JUMP_FRAMES)
+        {
+            game->char_wx = game->jump_from_x + game->jump_dx;
+            game->char_wy = game->jump_from_y + game->jump_dy;
+            game->draw_off_y = 0.0f;
+            vb_jump_layout();
+            vb_jump_land_check();
+            break;
+        }
+        u = (float)game->anim_frame / (float)VB_JUMP_JUMP_FRAMES;
+        game->char_wx = game->jump_from_x + game->jump_dx * u;
+        game->char_wy = game->jump_from_y + game->jump_dy * u;
+        game->draw_off_y = 64.0f * 4.0f * u * (1.0f - u);
+        vb_jump_layout();
+        break;
+    }
+    case VB_JUMP_STATE_SCROLLING:
+    {
+        float u;
+        game->anim_frame++;
+        if (game->anim_frame >= VB_JUMP_SCROLL_FRAMES)
+        {
+            game->cam_x = game->cam_to_x;
+            game->cam_y = game->cam_to_y;
+            vb_jump_layout();
+            vb_jump_spawn_next();
+            vb_jump_layout();
+            game->state = VB_JUMP_STATE_READY;
+            break;
+        }
+        u = (float)game->anim_frame / (float)VB_JUMP_SCROLL_FRAMES;
+        game->cam_x = game->cam_from_x + (game->cam_to_x - game->cam_from_x) * u;
+        game->cam_y = game->cam_from_y + (game->cam_to_y - game->cam_from_y) * u;
+        vb_jump_layout();
+        break;
+    }
+    case VB_JUMP_STATE_FALLING:
+        game->anim_frame++;
+        game->draw_off_y = -(float)(game->anim_frame * 24);
+        vb_jump_layout();
+        if (game->anim_frame >= VB_JUMP_FALL_FRAMES)
+        {
+            game->state = VB_JUMP_STATE_OVER;
+            vb_jump_show_over();
+            rt_kprintf("[vb_runtime][jump] game over score=%d best=%d\n",
+                       game->score, game->best);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void vb_jump_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    vb_jump_step();
+}
+
+static void vb_jump_stop(void)
+{
+    if (g_vb_runtime.jump.timer)
+    {
+        lv_timer_del(g_vb_runtime.jump.timer);
+        g_vb_runtime.jump.timer = RT_NULL;
+    }
+    rt_memset(&g_vb_runtime.jump, 0, sizeof(g_vb_runtime.jump));
+}
+
+static void vb_jump_handle_touch(lv_event_code_t code, const lv_point_t *point)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    (void)point;
+    if (!game->active) return;
+    if (code == LV_EVENT_PRESSED)
+    {
+        if (game->state == VB_JUMP_STATE_READY)
+        {
+            game->state = VB_JUMP_STATE_CHARGING;
+            game->charge_ms = 0;
+            if (game->power_bg) lv_obj_clear_flag(game->power_bg, LV_OBJ_FLAG_HIDDEN);
+            if (game->power_fill)
+            {
+                lv_obj_set_width(game->power_fill, 2);
+                lv_obj_clear_flag(game->power_fill, LV_OBJ_FLAG_HIDDEN);
+            }
+            vb_jump_set_status("蓄力中", 0xfbbf24);
+        }
+        return;
+    }
+    if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
+        game->state == VB_JUMP_STATE_CHARGING)
+    {
+        vb_jump_begin_jump();
+        return;
+    }
+    if (code == LV_EVENT_CLICKED && game->state == VB_JUMP_STATE_OVER)
+    {
+        vb_jump_reset_round();
+        return;
+    }
+}
+
+static int vb_jump_start(const char *title)
+{
+    vb_jump_state_t *game = &g_vb_runtime.jump;
+    lv_obj_t *label;
+    int i;
+    if (!g_vb_runtime.root) return -RT_ERROR;
+    vb_jump_stop();
+    game->active = 1;
+    game->state = VB_JUMP_STATE_READY;
+    game->rng = 0x9e3779b9u;
+
+    label = vb_create_label(g_vb_runtime.root, title && title[0] ? title : "跳一跳",
+                            FONT_NORMAL, lv_color_hex(0xf8fafc));
+    lv_obj_set_width(label, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, VB_SCREEN_SAFE_TOP - 9);
+
+    game->score_label = vb_create_label(g_vb_runtime.root, "得分 0  最高 0",
+                                        FONT_SMALL, lv_color_hex(0x93c5fd));
+    lv_obj_set_width(game->score_label, 220);
+    lv_obj_set_style_text_align(game->score_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(game->score_label, LV_ALIGN_TOP_LEFT, VB_SCREEN_SAFE_LEFT,
+                 VB_SCREEN_SAFE_TOP + 23);
+
+    game->status_label = vb_create_label(g_vb_runtime.root, "按住蓄力",
+                                         FONT_SMALL, lv_color_hex(0xfbbf24));
+    lv_obj_set_width(game->status_label, 120);
+    lv_obj_set_style_text_align(game->status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(game->status_label, LV_ALIGN_TOP_RIGHT, -VB_SCREEN_SAFE_RIGHT,
+                 VB_SCREEN_SAFE_TOP + 23);
+
+    for (i = 0; i < 10; i++)
+    {
+        lv_obj_t *star = lv_obj_create(g_vb_runtime.root);
+        lv_obj_set_size(star, 2, 2);
+        lv_obj_set_pos(star, 20 + (i * 67) % 350, 90 + (i * 41) % 160);
+        lv_obj_set_style_radius(star, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(star, lv_color_hex(i & 1 ? 0x334155 : 0x64748b),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(star, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(star, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    for (i = 0; i < VB_JUMP_PLATFORM_POOL; i++)
+    {
+        lv_obj_t *plat = lv_obj_create(g_vb_runtime.root);
+        lv_obj_set_size(plat, VB_JUMP_PLAT_W_START, VB_JUMP_PLATFORM_H);
+        lv_obj_set_style_radius(plat, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(plat, lv_color_hex(0x47d7ac), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(plat, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(plat, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(plat, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_color(plat, lv_color_hex(0x47d7ac), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(plat, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(plat, LV_OBJ_FLAG_HIDDEN);
+        game->platforms[i] = plat;
+    }
+
+    game->character = lv_obj_create(g_vb_runtime.root);
+    lv_obj_set_size(game->character, VB_JUMP_CHAR_SIZE, VB_JUMP_CHAR_SIZE);
+    lv_obj_set_style_radius(game->character, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(game->character, lv_color_hex(0xf8fafc), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(game->character, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(game->character, 9, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_color(game->character, lv_color_hex(0x5db7ff), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(game->character, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    game->power_bg = lv_obj_create(g_vb_runtime.root);
+    lv_obj_set_size(game->power_bg, VB_JUMP_POWER_W, 10);
+    lv_obj_set_pos(game->power_bg, (LV_HOR_RES_MAX - VB_JUMP_POWER_W) / 2, VB_JUMP_POWER_Y);
+    lv_obj_set_style_radius(game->power_bg, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(game->power_bg, lv_color_hex(0x1e293b), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(game->power_bg, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(game->power_bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(game->power_bg, LV_OBJ_FLAG_HIDDEN);
+
+    game->power_fill = lv_obj_create(g_vb_runtime.root);
+    lv_obj_set_size(game->power_fill, 2, 10);
+    lv_obj_set_pos(game->power_fill, (LV_HOR_RES_MAX - VB_JUMP_POWER_W) / 2, VB_JUMP_POWER_Y);
+    lv_obj_set_style_radius(game->power_fill, 5, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(game->power_fill, lv_color_hex(0x47d7ac), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(game->power_fill, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(game->power_fill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(game->power_fill, LV_OBJ_FLAG_HIDDEN);
+
+    game->over_panel = lv_obj_create(g_vb_runtime.root);
+    lv_obj_set_size(game->over_panel, LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_obj_set_pos(game->over_panel, 0, 0);
+    lv_obj_set_style_bg_color(game->over_panel, lv_color_hex(0x050b14), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(game->over_panel, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(game->over_panel, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(game->over_panel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(game->over_panel, LV_OBJ_FLAG_HIDDEN);
+
+    game->over_title = vb_create_label(g_vb_runtime.root, "游戏结束",
+                                       FONT_BIGL, lv_color_hex(0xff5c65));
+    lv_obj_set_width(game->over_title, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(game->over_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(game->over_title, LV_ALIGN_TOP_MID, 0, 150);
+    lv_obj_add_flag(game->over_title, LV_OBJ_FLAG_HIDDEN);
+
+    game->over_text = vb_create_label(g_vb_runtime.root, "",
+                                      FONT_NORMAL, lv_color_hex(0xf8fafc));
+    lv_obj_set_width(game->over_text, VB_SCREEN_SAFE_WIDTH);
+    lv_obj_set_style_text_align(game->over_text, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(game->over_text, LV_ALIGN_TOP_MID, 0, 210);
+    lv_obj_add_flag(game->over_text, LV_OBJ_FLAG_HIDDEN);
+
+    vb_jump_reset_round();
+    game->timer = lv_timer_create(vb_jump_timer_cb, VB_JUMP_PERIOD_MS, RT_NULL);
+    rt_kprintf("[vb_runtime][jump] started period=%d\n", VB_JUMP_PERIOD_MS);
+    return game->timer ? RT_EOK : -RT_ENOMEM;
 }
 
 static uint32_t vb_thunder_random(void)
@@ -11026,6 +11686,11 @@ static int vb_script_execute_helper_call(const char *line)
         vb_breakout_start(argc >= 1 ? args[0] : "Neon Breakout");
         return 1;
     }
+    if (vb_extract_call_args(line, "vibe_jump_game", args, &argc))
+    {
+        vb_jump_start(argc >= 1 ? args[0] : "跳一跳");
+        return 1;
+    }
     if (vb_extract_call_args(line, "vibe_thunder_wing", args, &argc))
     {
         vb_thunder_start(argc >= 1 ? args[0] : "Thunder Wing");
@@ -11090,6 +11755,7 @@ int vibeboard_lua_host_reset(void)
     vb_breakout_stop();
     vb_thunder_stop();
     vb_imu_stop();
+    vb_jump_stop();
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.pomodoro, 0, sizeof(g_vb_runtime.pomodoro));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
@@ -11188,6 +11854,7 @@ static void vb_builtin_script_stop(void)
     vb_breakout_stop();
     vb_thunder_stop();
     vb_imu_stop();
+    vb_jump_stop();
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.pomodoro, 0, sizeof(g_vb_runtime.pomodoro));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
@@ -11298,6 +11965,11 @@ static void vb_runtime_touch_event_cb(lv_event_t *event)
     if (g_vb_runtime.breakout.active)
     {
         vb_breakout_handle_touch(code, &point);
+        return;
+    }
+    if (g_vb_runtime.jump.active)
+    {
+        vb_jump_handle_touch(code, &point);
         return;
     }
     if (g_vb_runtime.game2048.active)
@@ -11975,10 +12647,19 @@ static int vb_runtime_reload_current(void)
 
 static void vb_runtime_request_reload(void)
 {
-    if (g_vb_runtime.running)
+    if (g_vb_runtime.pending_reload) return;
+    if (g_vb_runtime.reload_in_progress)
     {
         g_vb_runtime.pending_reload = 1;
-        if (g_vb_runtime.timer) lv_timer_ready(g_vb_runtime.timer);
+        return;
+    }
+    if (g_vb_runtime.running)
+    {
+        /* This function is also called by BLE and shell worker threads.  Only
+         * publish the request here; the 200 ms LVGL timer consumes it on the
+         * GUI thread.  Waking an LVGL timer cross-thread can corrupt its list
+         * while install_end is reloading the active app. */
+        g_vb_runtime.pending_reload = 1;
     }
     else
     {
@@ -11994,10 +12675,16 @@ static int vb_runtime_select_app(const char *app_id)
         rt_kprintf("usage: vb_runtime_select <app_id>\n");
         return -RT_EINVAL;
     }
-    if (g_vb_runtime.reload_in_progress && rt_strcmp(g_vb_runtime.active_app, app_id) == 0)
+    if (rt_strcmp(g_vb_runtime.active_app, app_id) == 0 &&
+        (g_vb_runtime.pending_reload || g_vb_runtime.reload_in_progress))
     {
-        rt_kprintf("[vb_runtime] reload already in progress: %s\n", app_id);
+        rt_kprintf("[vb_runtime] app transition already pending: %s\n", app_id);
         return RT_EOK;
+    }
+    if (g_vb_runtime.pending_stop)
+    {
+        rt_kprintf("[vb_runtime] select blocked by stop: %s\n", app_id);
+        return -RT_EBUSY;
     }
     result = vb_write_active_app(app_id);
     if (result != RT_EOK)
@@ -12026,6 +12713,251 @@ static void vb_runtime_install_close_file(void)
     g_vb_runtime.install_offset = 0;
 }
 
+#if VB_RUNTIME_HAS_BLE_INSTALL
+static uint16_t vb_runtime_read_le16(const uint8_t *data)
+{
+    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+static uint32_t vb_runtime_read_le32(const uint8_t *data)
+{
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+           ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+static uint32_t vb_runtime_crc32(const uint8_t *data, rt_size_t len)
+{
+    uint32_t crc = 0xffffffffu;
+    rt_size_t index;
+    for (index = 0; index < len; index++)
+    {
+        uint32_t bit;
+        crc ^= data[index];
+        for (bit = 0; bit < 8u; bit++)
+        {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        }
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static void vb_runtime_install_bulk_reset(void)
+{
+    if (g_vb_runtime.install_bulk_buffer)
+    {
+        rt_free(g_vb_runtime.install_bulk_buffer);
+        g_vb_runtime.install_bulk_buffer = RT_NULL;
+    }
+    g_vb_runtime.install_bulk_id = 0;
+    g_vb_runtime.install_bulk_expected = 0;
+    g_vb_runtime.install_bulk_received = 0;
+    g_vb_runtime.install_bulk_next_sequence = 0;
+    g_vb_runtime.install_bulk_buffered = 0;
+    g_vb_runtime.install_bulk_active = 0;
+    g_vb_runtime.install_bulk_complete = 0;
+}
+
+static int vb_runtime_install_bulk_flush(void)
+{
+    rt_size_t offset = 0;
+    rt_size_t total = g_vb_runtime.install_bulk_buffered;
+    while (offset < total)
+    {
+        int written = write(g_vb_runtime.install_fd,
+                            g_vb_runtime.install_bulk_buffer + offset,
+                            total - offset);
+        if (written <= 0)
+        {
+            rt_kprintf("[vb_runtime] bulk write failed: %s offset=%lu\n",
+                       g_vb_runtime.install_path,
+                       (unsigned long)g_vb_runtime.install_bulk_received);
+            return -RT_ERROR;
+        }
+        offset += (rt_size_t)written;
+    }
+    g_vb_runtime.install_bulk_buffered = 0;
+    return RT_EOK;
+}
+
+static int vb_runtime_install_bulk_append(const uint8_t *data, rt_size_t len)
+{
+    while (len > 0)
+    {
+        rt_size_t room = VB_BLE_BULK_V2_WRITE_BUFFER_BYTES -
+                         g_vb_runtime.install_bulk_buffered;
+        rt_size_t take = len < room ? len : room;
+        rt_memcpy(g_vb_runtime.install_bulk_buffer +
+                      g_vb_runtime.install_bulk_buffered,
+                  data, take);
+        g_vb_runtime.install_bulk_buffered += (uint16_t)take;
+        data += take;
+        len -= take;
+        if (g_vb_runtime.install_bulk_buffered == VB_BLE_BULK_V2_WRITE_BUFFER_BYTES &&
+            vb_runtime_install_bulk_flush() != RT_EOK)
+        {
+            return -RT_ERROR;
+        }
+    }
+    return RT_EOK;
+}
+
+static int vb_runtime_install_bulk_begin(const char *app_id, const char *path,
+                                         const char *size_text, const char *id_text)
+{
+    char file_path[VB_MAX_PATH];
+    char dir_path[VB_MAX_PATH];
+    char *slash;
+    char *size_end = RT_NULL;
+    char *id_end = RT_NULL;
+    unsigned long size;
+    unsigned long transfer_id;
+
+    if (!vb_is_safe_app_id(app_id) || !vb_is_runtime_package_path(path) ||
+        !size_text || !id_text)
+        return -RT_EINVAL;
+    if (!vb_runtime_install_session_matches(app_id)) return -RT_EBUSY;
+    size = strtoul(size_text, &size_end, 10);
+    transfer_id = strtoul(id_text, &id_end, 10);
+    if (!size_end || *size_end || !id_end || *id_end || transfer_id == 0 ||
+        size > VB_RUNTIME_INSTALL_BLOB_MAX_BYTES || transfer_id > UINT32_MAX)
+        return -RT_EINVAL;
+    if (g_vb_runtime.install_bulk_active)
+    {
+        if (!g_vb_runtime.install_bulk_complete) return -RT_EBUSY;
+        vb_runtime_install_bulk_reset();
+    }
+    if (vb_prepare_filesystem() != RT_EOK) return -RT_ERROR;
+    rt_snprintf(file_path, sizeof(file_path), "%s/%s%s/%s", VIBEBOARD_APP_ROOT,
+                VIBEBOARD_STAGING_PREFIX, app_id, path);
+    file_path[sizeof(file_path) - 1] = '\0';
+    vb_safe_copy(dir_path, sizeof(dir_path), file_path);
+    slash = strrchr(dir_path, '/');
+    if (slash)
+    {
+        *slash = '\0';
+        if (vb_mkdir_recursive(dir_path) != RT_EOK) return -RT_ERROR;
+    }
+
+    vb_runtime_install_close_file();
+    g_vb_runtime.install_fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    if (g_vb_runtime.install_fd < 0) return -RT_ERROR;
+    if (size > 0)
+    {
+        g_vb_runtime.install_bulk_buffer = rt_malloc(VB_BLE_BULK_V2_WRITE_BUFFER_BYTES);
+        if (!g_vb_runtime.install_bulk_buffer)
+        {
+            vb_runtime_install_close_file();
+            return -RT_ENOMEM;
+        }
+    }
+    vb_safe_copy(g_vb_runtime.install_path, sizeof(g_vb_runtime.install_path), file_path);
+    g_vb_runtime.install_bulk_id = (uint32_t)transfer_id;
+    g_vb_runtime.install_bulk_expected = (uint32_t)size;
+    g_vb_runtime.install_bulk_received = 0;
+    g_vb_runtime.install_bulk_next_sequence = 0;
+    g_vb_runtime.install_bulk_buffered = 0;
+    g_vb_runtime.install_bulk_active = 1;
+    g_vb_runtime.install_bulk_complete = size == 0;
+    if (size == 0) vb_runtime_install_close_file();
+    rt_kprintf("[vb_runtime] bulk begin: %s/%s bytes=%lu id=%lu\n",
+               app_id, path, size, transfer_id);
+    return RT_EOK;
+}
+
+static int vb_runtime_install_bulk_packet(const uint8_t *packet, rt_size_t packet_len,
+                                          int *notify_status)
+{
+    uint8_t flags = 0;
+    uint16_t payload_len;
+    uint32_t transfer_id = 0;
+    uint32_t sequence = 0;
+    uint32_t offset = 0;
+    uint32_t expected_crc;
+    const uint8_t *payload;
+    int result = RT_EOK;
+
+    if (notify_status) *notify_status = 1;
+    if (!packet || packet_len < VB_BLE_BULK_V2_HEADER_BYTES)
+    {
+        vb_ble_set_status("err install_bulk_data id=0 seq=0 next=%lu offset=%lu rc=%d",
+                          (unsigned long)g_vb_runtime.install_bulk_next_sequence,
+                          (unsigned long)g_vb_runtime.install_bulk_received, -RT_EINVAL);
+        return -RT_EINVAL;
+    }
+    flags = packet[5];
+    if (notify_status) *notify_status = (flags & VB_BLE_BULK_V2_ACK_REQUEST) != 0;
+    payload_len = vb_runtime_read_le16(packet + 6);
+    transfer_id = vb_runtime_read_le32(packet + 8);
+    sequence = vb_runtime_read_le32(packet + 12);
+    offset = vb_runtime_read_le32(packet + 16);
+    expected_crc = vb_runtime_read_le32(packet + 20);
+    payload = packet + VB_BLE_BULK_V2_HEADER_BYTES;
+
+    if (vb_runtime_read_le32(packet) != VB_BLE_BULK_V2_MAGIC ||
+        packet[4] != VB_BLE_BULK_V2_VERSION ||
+        payload_len == 0 || payload_len > VB_BLE_BULK_V2_MAX_PAYLOAD ||
+        packet_len != VB_BLE_BULK_V2_HEADER_BYTES + payload_len)
+        result = -RT_EINVAL;
+    else if (!g_vb_runtime.install_bulk_active ||
+             transfer_id != g_vb_runtime.install_bulk_id)
+        result = -RT_EBUSY;
+    else if (vb_runtime_crc32(payload, payload_len) != expected_crc)
+        result = -RT_ERROR;
+    else if (offset < g_vb_runtime.install_bulk_received &&
+             payload_len <= g_vb_runtime.install_bulk_received - offset)
+        result = RT_EOK;
+    else if (g_vb_runtime.install_bulk_complete ||
+             offset != g_vb_runtime.install_bulk_received ||
+             sequence != g_vb_runtime.install_bulk_next_sequence ||
+             offset > g_vb_runtime.install_bulk_expected ||
+             payload_len > g_vb_runtime.install_bulk_expected - offset)
+        result = -RT_EINVAL;
+    else
+    {
+        result = vb_runtime_install_bulk_append(payload, payload_len);
+        if (result == RT_EOK)
+        {
+            g_vb_runtime.install_bulk_received += payload_len;
+            g_vb_runtime.install_bulk_next_sequence++;
+            if (g_vb_runtime.install_bulk_received == g_vb_runtime.install_bulk_expected)
+            {
+                result = vb_runtime_install_bulk_flush();
+                if (result == RT_EOK)
+                {
+                    vb_runtime_install_close_file();
+                    if (g_vb_runtime.install_bulk_buffer)
+                    {
+                        rt_free(g_vb_runtime.install_bulk_buffer);
+                        g_vb_runtime.install_bulk_buffer = RT_NULL;
+                    }
+                    g_vb_runtime.install_bulk_complete = 1;
+                }
+            }
+        }
+        if (result != RT_EOK)
+        {
+            vb_runtime_install_close_file();
+            if (g_vb_runtime.install_bulk_buffer)
+            {
+                rt_free(g_vb_runtime.install_bulk_buffer);
+                g_vb_runtime.install_bulk_buffer = RT_NULL;
+            }
+            g_vb_runtime.install_bulk_buffered = 0;
+            g_vb_runtime.install_bulk_active = 0;
+        }
+    }
+
+    vb_ble_set_status("%s install_bulk_data id=%lu seq=%lu next=%lu offset=%lu rc=%d",
+                      result == RT_EOK ? "ok" : "err",
+                      (unsigned long)transfer_id,
+                      (unsigned long)sequence,
+                      (unsigned long)g_vb_runtime.install_bulk_next_sequence,
+                      (unsigned long)g_vb_runtime.install_bulk_received,
+                      result);
+    return result;
+}
+#endif
+
 static int vb_runtime_install_session_matches(const char *app_id)
 {
     return app_id && g_vb_runtime.install_app[0] &&
@@ -12049,6 +12981,9 @@ static int vb_runtime_install_begin_app(const char *app_id)
         if (cleanup != RT_EOK) return cleanup;
     }
     vb_runtime_install_close_file();
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    vb_runtime_install_bulk_reset();
+#endif
     vb_build_install_dir(staging_dir, sizeof(staging_dir), VIBEBOARD_STAGING_PREFIX, app_id);
     if (access(staging_dir, 0) == 0 && vb_remove_tree(staging_dir) != RT_EOK)
     {
@@ -12090,6 +13025,17 @@ static int vb_runtime_install_file_chunk(const char *app_id, const char *path,
                    g_vb_runtime.install_app[0] ? g_vb_runtime.install_app : "--", app_id);
         return -RT_EBUSY;
     }
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    if (g_vb_runtime.install_bulk_active)
+    {
+        if (!g_vb_runtime.install_bulk_complete)
+        {
+            rt_kprintf("[vb_runtime] install file failed: bulk transfer incomplete\n");
+            return -RT_EBUSY;
+        }
+        vb_runtime_install_bulk_reset();
+    }
+#endif
 
     offset = strtol(offset_text, RT_NULL, 10);
     if (offset < 0)
@@ -12298,6 +13244,15 @@ static int vb_runtime_install_end_app(const char *app_id)
                    g_vb_runtime.install_app[0] ? g_vb_runtime.install_app : "--", app_id);
         return -RT_EBUSY;
     }
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    if (g_vb_runtime.install_bulk_active && !g_vb_runtime.install_bulk_complete)
+    {
+        rt_kprintf("[vb_runtime] install end failed: bulk transfer incomplete offset=%lu bytes=%lu\n",
+                   (unsigned long)g_vb_runtime.install_bulk_received,
+                   (unsigned long)g_vb_runtime.install_bulk_expected);
+        return -RT_EBUSY;
+    }
+#endif
     vb_runtime_install_close_file();
     vb_build_install_dir(staging_dir, sizeof(staging_dir), VIBEBOARD_STAGING_PREFIX, app_id);
     rt_snprintf(app_dir, sizeof(app_dir), "%s/%s", VIBEBOARD_APP_ROOT, app_id);
@@ -12356,7 +13311,16 @@ static int vb_runtime_install_end_app(const char *app_id)
     }
     vb_runtime_install_clear_session();
     rt_kprintf("[vb_runtime] install complete: %s\n", app_id);
-    if (g_vb_runtime.running)
+#if VB_RUNTIME_HAS_BLE_INSTALL
+    if (g_vb_ble.mailbox)
+    {
+        if (rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RELOAD_APP) != RT_EOK)
+        {
+            vb_runtime_request_reload();
+        }
+    }
+    else
+#endif
     {
         vb_runtime_request_reload();
     }
@@ -13209,11 +14173,13 @@ static void on_start(void)
     vb_runtime_state_defaults();
     g_vb_runtime_state_initialized = 1;
     g_vb_runtime.running = 1;
+    g_vb_runtime.reload_in_progress = 1;
     vb_prepare_filesystem();
     (void)vb_runtime_display_load_state();
     (void)vb_runtime_rgb_load_state();
     vb_runtime_recover_install_state();
     vb_load_active_package();
+    g_vb_runtime.reload_in_progress = 0;
     g_vb_runtime.timer = lv_timer_create(vb_timer_cb, VB_TIMER_PERIOD_MS, RT_NULL);
     rt_kprintf("[vb_runtime] start api=%s root=%s\n", VIBEBOARD_RUNTIME_API_VERSION, VIBEBOARD_APP_ROOT);
 }

@@ -1,0 +1,3 @@
+# Pet state packs are desktop-side build inputs. The board uses the active preload pack only.
+assets/pets/*/*
+assets/rocky/*
