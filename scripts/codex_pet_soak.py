@@ -449,6 +449,19 @@ def task_aggregate_returned_to_baseline(
     )
 
 
+def informational_permission_handled(
+    value: Mapping[str, object], *, target_active: int
+) -> bool:
+    active_tasks = value.get("activeTasks")
+    return (
+        isinstance(active_tasks, int)
+        and not isinstance(active_tasks, bool)
+        and active_tasks >= target_active
+        and value.get("state") == "running"
+        and value.get("approval") == 0
+    )
+
+
 async def exercise_cycle(
     caller: BridgeCaller,
     metrics: SoakMetrics,
@@ -509,12 +522,12 @@ async def exercise_cycle(
             metrics.state_errors += 1
         sensitive = await deliver_hook("PermissionRequest", first, turn, workspace)
         metrics.record_delivery(sensitive)
-        needs = await wait_board(
+        handled = await wait_board(
             caller,
-            lambda value: value.get("state") == "needs_input" and value.get("approval") == 0,
-            label="approval-needed task aggregate",
+            lambda value: informational_permission_handled(value, target_active=target_active),
+            label="informational permission task aggregate",
         )
-        if needs.get("approval") != 0:
+        if handled.get("state") != "running" or handled.get("approval") != 0:
             metrics.state_errors += 1
         await select_and_wait(active_pet)
         stopped = [
@@ -534,7 +547,8 @@ async def exercise_cycle(
             "runningActive": running.get("activeTasks"),
             "baselineActive": baseline_active,
             "baselineState": baseline_state,
-            "sensitiveApproval": needs.get("approval"),
+            "sensitiveState": handled.get("state"),
+            "sensitiveApproval": handled.get("approval"),
             "readyFrames": ready.get("frames"),
             "deliveries": deliveries + [sensitive] + stopped,
         }
@@ -670,6 +684,19 @@ async def run_soak(args: argparse.Namespace) -> int:
 
 
 def self_test() -> None:
+    informational_permission = {
+        "activeTasks": 3,
+        "state": "running",
+        "approval": 0,
+    }
+    assert informational_permission_handled(informational_permission, target_active=2)
+    assert not informational_permission_handled(
+        {**informational_permission, "state": "needs_input"}, target_active=2
+    )
+    assert not informational_permission_handled(
+        {**informational_permission, "approval": 1}, target_active=2
+    )
+
     metrics = SoakMetrics(started_at_ms=1_000)
     metrics.observe_status(1_000, {"connected": 1, "state": "ready", "custom": 1, "frames": 4})
     metrics.observe_failure(2_000, "MCPError")

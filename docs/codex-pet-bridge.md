@@ -376,7 +376,14 @@ PSRAM 分配成功。它不返回任务正文、命令、
    `uiTicks` 持续增长。
 5. 运行 3 分钟 exercise soak，要求 `passed=true`、`exerciseFailures=0`、
    `animationErrors=0`、`openOutage=false`；串口同时检查 `fatal error`、`assertion failed`、
-   `spi sem timeout` 均为 0。
+   `spi sem timeout` 均为 0。信息型 `PermissionRequest` 没有真实 approval ID 时必须保持
+   `running/approval=0`；只有实体待审批才允许 `needs_input/approval=1`。
+
+   ```sh
+   PYTHONPATH=scripts .venv/bin/python scripts/codex_pet_soak.py \
+     --duration-seconds 180 --sample-seconds 5 --exercise --exercise-seconds 20 \
+     --minimum-exercises 5 --output .local/codex_pet_soak_3min.jsonl
+   ```
 6. 做一次板子复位或重新刷写，等待 Monitor 自动重连，确认之前的任务快照被回放；若 Mac
    使用了旧 GATT 缓存，Bridge 会按同一外设标识重新扫描，不需要手动删除其他设备。
 7. 24 小时 soak：保持以下命令在独立终端运行，并记录 Mac 睡眠/唤醒、板子复位、BLE 断线

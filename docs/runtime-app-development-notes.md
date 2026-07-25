@@ -1591,9 +1591,47 @@ Pager 多处文字从 x=20 开始且错误提示位于 y=410；通用 manifest a
 - `.hpet`、Petdex 转换、Companion、Web、Bridge、transport、架构审计和全部 tracked Python
   编译分别通过；固件从清洁依赖状态完成全量链接。
 - 当前 `127.0.0.1:8790` 服务仍显示 Companion/Codex/板子全部连接，只有一个 Monitor/BLE owner。
-- 为避免中断用户正在使用的板子，本轮没有擅自刷写新固件。loader 合并和最后一轮 UI 修改目前
-  的证据是自测、架构审计和完整固件构建；下次获准刷写后仍需补跑 click test、九状态 sweep 和
-  3 分钟 exercise soak，不能把这部分写成已完成实机验证。
+- 2026-07-25 经用户授权，提交 `68bb8a5` 已刷入 `/dev/cu.usbserial-13220`；首次下载成功且 boot
+  捕获确认 SD、CO5300、FT6146、Runtime、BLE 和 `preload v2 states=9` 全部正常。
+- 点击回归实测 `idle(6帧) -> jumping(5帧) -> idle`，重复点击没有卡住；九状态 sweep 实测帧数
+  为 `6/8/8/4/5/8/6/6/6`，全部 120 ms，`loaderPhase=0`、`droppedFlows=0`，UI tick 从 19
+  连续增长到 272。
+- 修正问题三十二后，180.001 秒 exercise soak 完成 28 次采样和 7 轮任务循环，最终
+  `passed=true`，连接、投递、exercise、状态、动画、UI tick 和 flow 错误均为 0，Bridge RSS
+  增长 112 KiB。该轮没有同时占用串口保存全程 fault 关键字日志，也没有新增正面真机照片，因此
+  不能替代 24 小时发布 soak 或圆角玻璃的最终视觉验收。
+
+### 问题三十二：exercise soak 与自动审批状态契约漂移
+
+#### 现象与证据
+
+首次 3 分钟实机 soak 在第一轮 `PermissionRequest` 后等待 30 秒并报
+`approval-needed task aggregate did not converge`。但同一时间 `connected=1`、`state=running`、
+`approval=0`、`activeTasks=3`、`loaderPhase=0`，UI tick 从 1597 增长到 1904；Hook 的
+`deliveryFailures=0`。因此这不是 BLE、板端动画或 Hook 丢失。
+
+#### 根因
+
+`DesktopTaskRegistry.snapshot()` 已按既定安全契约处理自动审批：没有真实 approval ID 的通用
+`PermissionRequest` 只是信息事件，必须归一为 `running / Approval handled / approval=0`；只有
+真实待用户处理的请求才是 `needs_input / approval=1`。旧 soak 却强制等待
+`needs_input / approval=0`，这个组合既与当前协议矛盾，也会把正确行为判为失败。
+
+#### 修复与回归
+
+- 新增 `informational_permission_handled()`，要求活动任务数达到目标且状态精确为
+  `running / approval=0`。
+- self-test 使用本次真机失败样本固定正确条件，并明确拒绝 `needs_input` 和 `approval=1`，防止
+  以后再次混淆信息型 PermissionRequest 与真实实体审批。
+- 修复后的完整 180 秒实机重跑完成 7 轮 exercise，35 个 Hook 全部送达，临时任务每轮从基线
+  1 项增加到 3 项再清理回 1 项；`exerciseFailures=0`、`animationErrors=0`、
+  `uiTickStalls=0`、`openOutage=false`。
+
+```bash
+PYTHONPATH=scripts .venv/bin/python scripts/codex_pet_soak.py \
+  --duration-seconds 180 --sample-seconds 5 --exercise --exercise-seconds 20 \
+  --minimum-exercises 5 --output .local/codex_pet_soak_3min.jsonl
+```
 
 ## 待继续沉淀的问题
 
