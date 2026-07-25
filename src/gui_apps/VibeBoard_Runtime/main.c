@@ -3491,10 +3491,10 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
         g_vb_ble.last_adv_start_rc = status;
         g_vb_ble.adv_start_events++;
         g_vb_ble.advertising = status == 0;
-        vb_ble_set_status("adv started name=%s status=%u mode=%d state=%u events=%lu",
-                          VIBEBOARD_BLE_NAME, (unsigned)status, evt ? evt->adv_mode : -1,
-                          (unsigned)vb_ble_adv_context_state(),
-                          (unsigned long)g_vb_ble.adv_start_events);
+        rt_kprintf("[vb_runtime][ble] adv started name=%s status=%u mode=%d state=%u events=%lu\n",
+                   VIBEBOARD_BLE_NAME, (unsigned)status, evt ? evt->adv_mode : -1,
+                   (unsigned)vb_ble_adv_context_state(),
+                   (unsigned long)g_vb_ble.adv_start_events);
         break;
     }
     case SIBLES_ADV_EVT_ADV_STOPPED:
@@ -3504,10 +3504,10 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
         g_vb_ble.last_adv_stop_reason = reason;
         g_vb_ble.adv_stop_events++;
         g_vb_ble.advertising = 0;
-        vb_ble_set_status("adv stopped reason=%u mode=%d state=%u events=%lu",
-                          (unsigned)reason, evt ? evt->adv_mode : -1,
-                          (unsigned)vb_ble_adv_context_state(),
-                          (unsigned long)g_vb_ble.adv_stop_events);
+        rt_kprintf("[vb_runtime][ble] adv stopped reason=%u mode=%d state=%u events=%lu\n",
+                   (unsigned)reason, evt ? evt->adv_mode : -1,
+                   (unsigned)vb_ble_adv_context_state(),
+                   (unsigned long)g_vb_ble.adv_stop_events);
         break;
     }
     default:

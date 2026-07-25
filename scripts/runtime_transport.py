@@ -65,7 +65,8 @@ BLE_BULK_V2_MAX_PAYLOAD = 220
 # completed mailbox/SD processing instead of host-side write acceptance.
 BLE_BULK_V2_WINDOW = 1
 BLE_BULK_V2_RETRIES = 5
-BLE_BULK_V2_RECONNECT_RETRIES = 3
+BLE_BULK_V2_RECONNECT_RETRIES = 4
+BLE_INSTALL_SESSION_RESTARTS = 2
 BLE_BULK_V2_ALREADY_APPLIED_RC = -7  # RT-Thread -RT_EBUSY after a lost completion ACK.
 SERIAL_BLOB_CHUNK_BYTES = 3072
 SERIAL_BLOB_WRITE_BYTES = 256
@@ -88,6 +89,10 @@ class JSONResponseTruncated(JSONResponsePending):
 
 class RuntimeTransportError(RuntimeError):
     pass
+
+
+class InstallTransactionInterrupted(RuntimeTransportError):
+    """The board cannot safely continue an in-progress install transaction."""
 
 
 class InstallCommitUncertain(RuntimeTransportError):
@@ -836,6 +841,15 @@ def ble_bulk_ack_confirms_progress(
         and ack.next_sequence == expected_next_sequence
         and (ack.ok or ack.rc == BLE_BULK_V2_ALREADY_APPLIED_RC)
     )
+
+
+def install_control_requires_restart(status: str) -> bool:
+    if not status.startswith("err install_"):
+        return False
+    try:
+        return int(parse_key_values(status).get("rc", "0"), 10) in {-1, -7}
+    except ValueError:
+        return False
 
 
 def validate_ble_runtime_status(status: str) -> None:
@@ -2488,13 +2502,27 @@ class BLETransport:
     ) -> str:
         payload_size = self._bulk_v2_payload_size()
         if payload_size:
-            return await self._install_package_v2(
-                package_id,
-                files,
-                payload_size=payload_size,
-                progress=progress,
-                commit=commit,
-            )
+            for restart in range(BLE_INSTALL_SESSION_RESTARTS + 1):
+                try:
+                    return await self._install_package_v2(
+                        package_id,
+                        files,
+                        payload_size=payload_size,
+                        progress=progress,
+                        commit=commit,
+                    )
+                except InstallTransactionInterrupted as exc:
+                    if restart >= BLE_INSTALL_SESSION_RESTARTS:
+                        raise
+                    detail = " ".join(str(exc).split())[:160]
+                    print(
+                        "warning: BLE install transaction interrupted; restarting "
+                        f"{restart + 1}/{BLE_INSTALL_SESSION_RESTARTS}: {detail}",
+                        flush=True,
+                    )
+                    await self._refresh_bulk_connection()
+                    with contextlib.suppress(Exception):
+                        await self.abort_install(package_id)
         return await self._install_package_v1(
             package_id,
             files,
@@ -2526,11 +2554,16 @@ class BLETransport:
             current_command = f"vb_runtime_install_begin {package_id}"
             if progress:
                 progress(current_command, index + 1, total)
-            last_status = await self._read_install_control_retrying(
-                current_command,
-                lambda status, command=current_command: install_ack_matches(status, command),
-            )
+            try:
+                last_status = await self._read_install_control_retrying(
+                    current_command,
+                    lambda status, command=current_command: install_ack_matches(status, command),
+                )
+            except RuntimeTransportError as exc:
+                raise InstallTransactionInterrupted(f"BLE install begin interrupted: {exc}") from exc
             if last_status.startswith("err ") or " rc=-" in last_status:
+                if install_control_requires_restart(last_status):
+                    raise InstallTransactionInterrupted(f"BLE install begin cannot continue: {last_status}")
                 transport_fail(f"BLE install command failed: {last_status}")
             install_started = True
             current_ack_received = True
@@ -2546,12 +2579,17 @@ class BLETransport:
                 current_ack_received = False
                 if progress:
                     progress(current_command, index + 1, total)
-                last_status = await self._read_install_control_retrying(
-                    current_command,
-                    lambda status, command=current_command: install_ack_matches(status, command),
-                )
+                try:
+                    last_status = await self._read_install_control_retrying(
+                        current_command,
+                        lambda status, command=current_command: install_ack_matches(status, command),
+                    )
+                except RuntimeTransportError as exc:
+                    raise InstallTransactionInterrupted(f"BLE bulk begin interrupted: {exc}") from exc
                 current_ack_received = True
                 if last_status.startswith("err ") or " rc=-" in last_status:
+                    if install_control_requires_restart(last_status):
+                        raise InstallTransactionInterrupted(f"BLE bulk begin cannot continue: {last_status}")
                     transport_fail(f"BLE bulk begin failed: {last_status}")
                 index += 1
 
@@ -2600,7 +2638,9 @@ class BLETransport:
                         raise
                     except Exception as exc:
                         if data_reconnects >= BLE_BULK_V2_RECONNECT_RETRIES:
-                            raise
+                            raise InstallTransactionInterrupted(
+                                f"BLE bulk data stalled at {path}:{offset}: {exc}"
+                            ) from exc
                         data_reconnects += 1
                         detail = " ".join(str(exc).split())[:160]
                         print(
@@ -2610,14 +2650,26 @@ class BLETransport:
                             f"{type(exc).__name__}: {detail}",
                             flush=True,
                         )
-                        await self._refresh_bulk_connection()
-                        last_status = await self._read_install_control_retrying(
-                            bulk_begin_command,
-                            lambda status, command=bulk_begin_command: install_ack_matches(
-                                status, command
-                            ),
-                        )
+                        try:
+                            await self._refresh_bulk_connection()
+                        except RuntimeTransportError as reconnect_error:
+                            raise InstallTransactionInterrupted(
+                                f"BLE bulk reconnect failed at {path}:{offset}: {reconnect_error}"
+                            ) from reconnect_error
+                        try:
+                            last_status = await self._read_install_control_retrying(
+                                bulk_begin_command,
+                                lambda status, command=bulk_begin_command: install_ack_matches(
+                                    status, command
+                                ),
+                            )
+                        except RuntimeTransportError as control_error:
+                            raise InstallTransactionInterrupted(
+                                f"BLE bulk resume interrupted at {path}:{offset}: {control_error}"
+                            ) from control_error
                         if last_status.startswith("err ") or " rc=-" in last_status:
+                            if install_control_requires_restart(last_status):
+                                raise InstallTransactionInterrupted(f"BLE bulk resume cannot continue: {last_status}")
                             transport_fail(f"BLE bulk resume failed: {last_status}")
                         current_command = (
                             f"vb_runtime_install_bulk_data {transfer_id} "
@@ -2646,6 +2698,8 @@ class BLETransport:
             )
             current_ack_received = True
             if last_status.startswith("err ") or " rc=-" in last_status:
+                if install_control_requires_restart(last_status):
+                    raise InstallTransactionInterrupted(f"BLE install end cannot continue: {last_status}")
                 transport_fail(f"BLE install command failed: {last_status}")
             if f"active={package_id}" not in last_status:
                 last_status = await self.read_matching(
@@ -3744,6 +3798,108 @@ def run_self_test() -> None:
         assert transport.data_failures == 0
         assert transport._client.ack_count == 11
         assert transport._client.binary_writes == 11
+
+        class InterruptedInstallTransport(BulkTransport):
+            def __init__(self, failure_rc: int) -> None:
+                super().__init__()
+                self.control_failures = 0
+                self.data_failures = 0
+                self.session_losses = 1
+                self.transaction_begins = 0
+                self.failure_rc = failure_rc
+
+            async def read_matching(
+                self,
+                command: str,
+                matcher: Callable[[str], bool],
+                *,
+                timeout: float = 4.0,
+                response_wait: float | None = None,
+            ) -> str:
+                if command.startswith("vb_runtime_install_begin "):
+                    self.transaction_begins += 1
+                if command.startswith("vb_runtime_install_bulk ") and self.session_losses:
+                    self.session_losses -= 1
+                    parts = command.split()
+                    response = (
+                        f"err install_bulk app={parts[1]} path={parts[2]} "
+                        f"bytes={parts[3]} id={parts[4]} rc={self.failure_rc}"
+                    )
+                    assert matcher(response)
+                    self.commands.append(command)
+                    return response
+                return await super().read_matching(
+                    command,
+                    matcher,
+                    timeout=timeout,
+                    response_wait=response_wait,
+                )
+
+        for failure_rc in (-1, -7):
+            interrupted = InterruptedInstallTransport(failure_rc)
+            recovered = await interrupted.install_package(
+                "demo", {"main.lua": b"x" * 1000}, commit=True
+            )
+            assert "active=demo" in recovered
+            assert interrupted.transaction_begins == 2
+            assert interrupted.session_losses == 0
+
+        exhausted = InterruptedInstallTransport(-7)
+        exhausted.session_losses = BLE_INSTALL_SESSION_RESTARTS + 1
+        try:
+            await exhausted.install_package("demo", {"main.lua": b"x" * 1000}, commit=True)
+            raise AssertionError("exhausted BLE install transaction restarts were accepted")
+        except InstallTransactionInterrupted as exc:
+            assert "rc=-7" in str(exc)
+        assert exhausted.transaction_begins == BLE_INSTALL_SESSION_RESTARTS + 1
+
+        class StalledDataTransport(BulkTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self.control_failures = 0
+                self.data_failures = 0
+                self.transaction_begins = 0
+
+            async def read_matching(
+                self,
+                command: str,
+                matcher: Callable[[str], bool],
+                *,
+                timeout: float = 4.0,
+                response_wait: float | None = None,
+            ) -> str:
+                if command.startswith("vb_runtime_install_begin "):
+                    self.transaction_begins += 1
+                return await super().read_matching(
+                    command,
+                    matcher,
+                    timeout=timeout,
+                    response_wait=response_wait,
+                )
+
+            async def _send_bulk_window(
+                self,
+                transfer_id: int,
+                frames: list[bytes],
+                *,
+                expected_offset: int,
+                expected_next_sequence: int,
+            ) -> str:
+                if self.transaction_begins == 1:
+                    raise RuntimeTransportError("fake stalled BLE bulk frame")
+                return await super()._send_bulk_window(
+                    transfer_id,
+                    frames,
+                    expected_offset=expected_offset,
+                    expected_next_sequence=expected_next_sequence,
+                )
+
+        stalled = StalledDataTransport()
+        stalled_result = await stalled.install_package(
+            "demo", {"main.lua": b"x" * 1000}, commit=True
+        )
+        assert "active=demo" in stalled_result
+        assert stalled.transaction_begins == 2
 
         class RefreshRetryTransport(BLETransport):
             def __init__(self, failures: int) -> None:

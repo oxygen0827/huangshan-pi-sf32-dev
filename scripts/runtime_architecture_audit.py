@@ -75,6 +75,28 @@ def audit_runtime_transport() -> None:
         ok("runtime_transport", "app page and BLE cache-name guards are present")
 
 
+def audit_ble_status_ownership() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    function_start = main.find("static uint8_t vb_ble_advertising_event(")
+    function_end = main.find("\nstatic ", function_start + 1)
+    if function_start < 0 or function_end < 0:
+        fail("ble_status_ownership", "advertising event handler could not be audited")
+        return
+    advertising_handler = main[function_start:function_end]
+    if "vb_ble_set_status(" in advertising_handler:
+        fail(
+            "ble_status_ownership",
+            "asynchronous advertising events overwrite the command-response characteristic",
+        )
+    elif (
+        'rt_kprintf("[vb_runtime][ble] adv started ' not in advertising_handler
+        or 'rt_kprintf("[vb_runtime][ble] adv stopped ' not in advertising_handler
+    ):
+        fail("ble_status_ownership", "advertising diagnostics are not retained as serial-only logs")
+    else:
+        ok("ble_status_ownership", "advertising diagnostics cannot overwrite BLE command responses")
+
+
 def audit_app_store_bridge() -> None:
     rel = "scripts/app_store_server.py"
     text = read(rel)
@@ -731,6 +753,7 @@ def audit_direct_transport_usage() -> None:
 def run_audit() -> int:
     CHECKS.clear()
     audit_runtime_transport()
+    audit_ble_status_ownership()
     audit_app_store_bridge()
     audit_desktop_voice_bridge()
     audit_ios_transport()

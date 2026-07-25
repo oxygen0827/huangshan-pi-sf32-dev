@@ -1633,6 +1633,57 @@ PYTHONPATH=scripts .venv/bin/python scripts/codex_pet_soak.py \
   --minimum-exercises 5 --output .local/codex_pet_soak_3min.jsonl
 ```
 
+## 2026-07-25：BLE 广播事件覆盖安装回包，部署在中途被误判失败
+
+### 问题三十三：异步诊断和命令应答共用 GATT status 缓冲区
+
+#### 现象与证据
+
+Companion 部署 `2-mitsuha` 时在约 36% 失败，网页最后显示：
+
+```text
+Did not receive expected BLE status response. Last output:
+ok status api=vibeboard-huangshan-ble-install/v1 active=welcome flow=272 secure=1 bulk=2
+```
+
+失败任务和 Monitor 日志还保留了三类关键证据：控制 ACK 偶尔读到旧的 `ok install_begin`，
+`install_bulk` 曾返回 `rc=-1` / `rc=-7`，重连后又连续读到 `adv stopped` 或普通 `status`，导致目标
+文件传输和旧宠物回滚都提前终止。板端 `df` 仍有约 3.6 MiB 空闲，主堆也有约 84 KiB 余量，
+因此 SD 容量和内存耗尽不是根因。
+
+#### 根因
+
+Runtime 的 `vb_ble_advertising_event()` 在广播开始和停止回调中调用 `vb_ble_set_status()` 输出
+诊断文本。这个函数写入的正是安装命令共用的 GATT status/notify 缓冲区。广播事件与连接、重连
+和安装 ACK 异步发生，因此合法的 `install_begin`、`install_bulk` 或 `status` 回包可能在主机读取前
+被 `adv started/stopped` 覆盖；主机看到的是语法正确但属于另一个时刻的旧消息。
+
+主机 transport 还有第二层问题：控制面 `rc=-1` / `rc=-7`、bulk ACK 停滞或重连次数耗尽后，
+旧逻辑直接终止整个部署。Runtime 安装是 staging 事务，这些错误应重新建立连接并从
+`install_begin` 重启整轮事务，而不是只重发当前帧；但 `install_end` 已提交而 ACK 丢失仍属于
+commit-uncertain，不能用同一策略盲目重装。
+
+#### 修复与回归
+
+- 广播开始/停止改为 `rt_kprintf()` 串口诊断，不再写共享 GATT status。异步事件今后只能写日志，
+  只有命令 worker 可以发布命令应答。
+- BLE v2 安装增加有上限的整轮事务恢复：`rc=-1`、`rc=-7`、bulk ACK 停滞和重连耗尽会先尽力
+  abort staging，再重新连接并从 `install_begin` 开始；最多重启两次，避免无限循环。
+- `install_end` 的 `InstallCommitUncertain` 保持独立裁决路径，防止板端已提交时再次安装或错误回滚。
+- transport 自测固定覆盖 `rc=-1`、`rc=-7`、数据 ACK 永久停滞、恢复成功和重试耗尽；架构审计
+  直接禁止 advertising callback 调用 `vb_ble_set_status()`，并要求保留串口诊断。
+- 排障时先按时间线比对 Companion 期望 ACK、最后 GATT status 和广告事件；不能把“最后一条消息
+  合法”误当成“它属于当前命令”。串口、广播和命令回包必须各自拥有明确的数据通道。
+
+修复固件构建和启动确认通过。真实板子随后使用同一个摘要
+`e3f8aea83249e09364160fcd89d9d1650aa6bd17fb3896348a7563f6a6c1b3cc` 重新部署
+`2-mitsuha`，任务 `pet-827ca46b4e594718` 完成并报告 `assetStates=9`、`preloadVersion=2`、
+`frameMs=120`、`preloadedBytes=1328640`。九状态 sweep 的帧数依次为
+`6/8/8/4/5/8/6/6/6`，UI tick 从 19 增长到 273，`loaderPhase=0`、`droppedFlows=0`；电源接口
+实测 VBAT 4355 mV、charger ready、当前 `no_charging`。现有 power API 没有经过标定的百分比
+SOC 字段，不能从单次端电压臆算百分比。完整 Runtime deep check、Web、Bridge、transport 和架构
+审计均通过。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：
