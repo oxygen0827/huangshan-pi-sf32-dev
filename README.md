@@ -36,6 +36,15 @@ GUI 应用。
 里。当前仓库复制了立创 `lvgl/watch` 的已验证应用结构，用它作为第一版
 可运行开发基座。
 
+## 目录导航
+
+- `src/`：Runtime、板端 GUI 与共用 UI 组件。
+- `scripts/`：构建、刷机、传输、Companion、资源转换和回归入口；见
+  [scripts/README.md](scripts/README.md)。
+- `mobile/`：iOS BLE 客户端与 Demo。
+- `docs/`：产品契约、发布流程和真实问题复盘；见 [docs/README.md](docs/README.md)。
+- `project/`：SiFli 工程配置；`project/build_*` 是本机构建产物，不纳入版本控制。
+
 ## 立创例程与传感器验证
 
 2026-07-01 已在 `sf32lb52-lchspi-ulp` 板型和 SDK 2.5.0 上构建并刷板跑过

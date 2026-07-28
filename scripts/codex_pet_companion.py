@@ -58,6 +58,7 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_SPRITESHEET_BYTES = 16 * 1024 * 1024
 SAFE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 SAFE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+SAFE_SUPPORT_BUNDLE = re.compile(r"^vibeboard-support-[0-9]{8}-[0-9]{6}-[a-z0-9-]{1,32}[.]zip$")
 HOOK_EVENTS = ("SessionStart", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 _PETDEX_STATE_CONTRACT = json.loads(PETDEX_STATE_CONTRACT_PATH.read_text(encoding="utf-8"))
 PETDEX_STATE_ROWS = {
@@ -153,8 +154,12 @@ def _read_json(path: Path, default: object) -> object:
 
 
 def _fetch_json(url: str, *, max_bytes: int, timeout: float = 20.0) -> object:
-    request = urllib.request.Request(url, headers={"User-Agent": "VibeBoard-Companion/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    request = urllib.request.Request(
+        _valid_petdex_manifest_url(url),
+        headers={"User-Agent": "VibeBoard-Companion/1.0"},
+    )
+    opener = urllib.request.build_opener(_PetdexManifestRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
         declared = int(response.headers.get("content-length") or 0)
         if declared > max_bytes:
             raise CompanionError("Petdex manifest is too large")
@@ -222,6 +227,39 @@ class _PetdexAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(
             request, file_pointer, code, message, headers, safe_url
         )
+
+
+def _valid_petdex_manifest_url(value: object) -> str:
+    text = str(value or "")
+    parsed = urllib.parse.urlsplit(text)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise CompanionError("Petdex manifest contains an invalid redirect URL") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "petdex.dev"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or bool(parsed.fragment)
+    ):
+        raise CompanionError("Petdex manifest redirect left the allowlist")
+    return text
+
+
+class _PetdexManifestRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        safe_url = _valid_petdex_manifest_url(urllib.parse.urljoin(request.full_url, new_url))
+        return super().redirect_request(request, file_pointer, code, message, headers, safe_url)
 
 
 def normalize_petdex_entry(value: Mapping[str, object]) -> dict[str, object]:
@@ -877,7 +915,7 @@ class CompanionState:
             job.status = "running"
             job.update(stage="collect", progress=15, message="Collecting redacted board and Companion diagnostics")
             try:
-                bundle = await create_support_bundle(self)
+                bundle = await create_support_bundle(self, job_id=job.job_id)
                 job.result = {
                     "bundlePath": bundle.name,
                     "downloadPath": f"/v1/support/bundles/{job.job_id}",
@@ -898,7 +936,7 @@ class CompanionState:
         if job is None or job.kind != "support_bundle" or job.status != "done" or not isinstance(job.result, dict):
             return None
         value = job.result.get("bundlePath")
-        if not isinstance(value, str) or not re.fullmatch(r"vibeboard-support-[0-9]{8}-[0-9]{6}[.]zip", value):
+        if not isinstance(value, str) or SAFE_SUPPORT_BUNDLE.fullmatch(value) is None:
             return None
         root = (self.state_dir / "support").resolve()
         candidate = (root / value).resolve()
@@ -1033,9 +1071,16 @@ class CompanionState:
             return asset_path.read_bytes(), content_type
         data, content_type = _fetch_bytes(source_url, max_bytes=MAX_SPRITESHEET_BYTES)
         asset_dir.mkdir(parents=True, exist_ok=True)
-        temp = asset_path.with_suffix(asset_path.suffix + ".tmp")
-        temp.write_bytes(data)
-        os.replace(temp, asset_path)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{asset_path.name}.", dir=asset_dir)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, asset_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
         return data, content_type
 
     def pair_board(self) -> CompanionJob:
@@ -1196,6 +1241,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 self._json(200, self.state.firmware_available())
                 return
             if path.startswith("/v1/jobs/"):
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
                 job = self.state.get_job(urllib.parse.unquote(path.removeprefix("/v1/jobs/")))
                 if job is None:
                     self._error(404, "job not found")
@@ -1377,6 +1425,26 @@ def run_self_test() -> None:
             pass
         else:
             raise AssertionError(f"unsafe Petdex asset URL passed: {unsafe_url}")
+    assert _valid_petdex_manifest_url("https://petdex.dev/api/manifest") == "https://petdex.dev/api/manifest"
+    for unsafe_url in (
+        "http://petdex.dev/api/manifest",
+        "https://petdex.dev.evil.example/api/manifest",
+        "https://user@petdex.dev/api/manifest",
+        "https://petdex.dev:444/api/manifest",
+        "https://petdex.dev/api/manifest#fragment",
+    ):
+        try:
+            _valid_petdex_manifest_url(unsafe_url)
+        except CompanionError:
+            pass
+        else:
+            raise AssertionError(f"unsafe Petdex manifest URL passed: {unsafe_url}")
+    try:
+        _fetch_json("http://petdex.dev/api/manifest", max_bytes=1)
+    except CompanionError:
+        pass
+    else:
+        raise AssertionError("unsafe initial Petdex manifest URL reached the HTTP client")
     try:
         _valid_petdex_redirect_url(
             "https://assets.petdex.dev/pet.webp",

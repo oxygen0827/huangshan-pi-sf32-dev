@@ -77,24 +77,56 @@ def audit_runtime_transport() -> None:
 
 def audit_ble_status_ownership() -> None:
     main = read("src/gui_apps/VibeBoard_Runtime/main.c")
-    function_start = main.find("static uint8_t vb_ble_advertising_event(")
-    function_end = main.find("\nstatic ", function_start + 1)
-    if function_start < 0 or function_end < 0:
-        fail("ble_status_ownership", "advertising event handler could not be audited")
-        return
-    advertising_handler = main[function_start:function_end]
-    if "vb_ble_set_status(" in advertising_handler:
+    sections: list[tuple[str, str]] = []
+    for function in ("vb_ble_advertising_event", "vb_ble_advertising_start"):
+        function_start = main.find(f"static uint8_t {function}(")
+        function_end = main.find("\nstatic ", function_start + 1)
+        if function_start < 0 or function_end < 0:
+            fail("ble_status_ownership", f"{function} could not be audited")
+            return
+        sections.append((function, main[function_start:function_end]))
+    if any("vb_ble_set_status(" in section for _, section in sections):
         fail(
             "ble_status_ownership",
-            "asynchronous advertising events overwrite the command-response characteristic",
+            "asynchronous advertising work overwrites the command-response characteristic",
         )
-    elif (
-        'rt_kprintf("[vb_runtime][ble] adv started ' not in advertising_handler
-        or 'rt_kprintf("[vb_runtime][ble] adv stopped ' not in advertising_handler
+    elif not all(
+        marker in main
+        for marker in (
+            'rt_kprintf("[vb_runtime][ble] adv started ',
+            'rt_kprintf("[vb_runtime][ble] adv stopped ',
+            'rt_kprintf("[vb_runtime][ble] adv start requested ',
+            'rt_kprintf("[vb_runtime][ble] adv restart requested ',
+        )
     ):
         fail("ble_status_ownership", "advertising diagnostics are not retained as serial-only logs")
     else:
-        ok("ble_status_ownership", "advertising diagnostics cannot overwrite BLE command responses")
+        ok("ble_status_ownership", "advertising work cannot overwrite BLE command responses")
+
+
+def audit_ble_secure_link() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    section_start = main.find("BLE_GATT_SERVICE_DEFINE_128(vb_ble_install_att_db)")
+    section_end = main.find("SIBLES_ADVERTISING_CONTEXT_DECLAR", section_start)
+    if section_start < 0 or section_end < 0:
+        fail("ble_secure_link", "BLE install GATT table could not be audited")
+        return
+    table = main[section_start:section_end]
+    for token in (
+        "BLE_GATT_PERM_WRITE_PERMISSION_UNAUTH",
+        "BLE_GATT_PERM_READ_PERMISSION_UNAUTH",
+        "BLE_GATT_PERM_NOTIFY_PERMISSION_UNAUTH",
+    ):
+        if token not in table:
+            fail("ble_secure_link", f"BLE install GATT table is missing {token!r}")
+    if '#include "bf0_sibles_svc_change.h"' not in main or "ble_svc_changed_send_set(SVC_CHANGE_IND_SEND_TYPE_ONCE)" not in main:
+        fail("ble_secure_link", "firmware does not request the standard Service Changed indication after a GATT update")
+    if "CONFIG_BLE_SVC_CHG_ENABLE=y" not in read("project/proj.conf"):
+        fail("ble_secure_link", "project does not explicitly enable the standard Service Changed service")
+    if "PERMISSION_AUTH" in table or "PERMISSION_NO_AUTH" in table:
+        fail("ble_secure_link", "BLE install table no longer uses the no-MITM encrypted permission profile")
+    if not any(item[0] == "fail" and item[1].startswith("ble_secure_link") for item in CHECKS):
+        ok("ble_secure_link", "BLE control, status, and voice paths retain no-MITM encryption and signal standard Service Changed")
 
 
 def audit_app_store_bridge() -> None:
@@ -765,6 +797,9 @@ def audit_direct_transport_usage() -> None:
 def audit_recovery_and_release_gates() -> None:
     main = read("src/gui_apps/VibeBoard_Runtime/main.c")
     transport = read("scripts/runtime_transport.py")
+    companion = read("scripts/codex_pet_companion.py")
+    firmware = read("scripts/companion_firmware.py")
+    diagnostics = read("scripts/companion_diagnostics.py")
     required_files = (
         "scripts/runtime_recovery_soak.py",
         "scripts/companion_firmware.py",
@@ -785,16 +820,30 @@ def audit_recovery_and_release_gates() -> None:
     for token in ("snapshot_restarts = 0", "snapshot_restarts > 5"):
         if token not in transport:
             fail("recovery_release_gates", f"runtime transport missing dynamic JSON guard {token!r}")
-    if "wirelessDfu" not in read("scripts/companion_firmware.py") or '"enabled": False' not in read("scripts/dual_bank_dfu.py"):
+    if "wirelessDfu" not in firmware or '"enabled": False' not in read("scripts/dual_bank_dfu.py"):
         fail("recovery_release_gates", "firmware update must remain USB-only until dual-bank migration")
+    for token in (
+        "SAFE_SUPPORT_BUNDLE",
+        "_PetdexManifestRedirectHandler",
+        'if not self._authorized():\n                    self._error(401, "valid Companion session required")',
+    ):
+        if token not in companion:
+            fail("recovery_release_gates", f"Companion boundary is missing {token!r}")
+    for token in ("_operation_lock", "_HTTPSRedirectHandler", "_valid_https_url"):
+        if token not in firmware:
+            fail("recovery_release_gates", f"firmware recovery boundary is missing {token!r}")
+    for token in ("secrets.token_hex", "job_id: str | None", "Authorization: [redacted]"):
+        if token not in diagnostics:
+            fail("recovery_release_gates", f"diagnostics boundary is missing {token!r}")
     if not any(item[0] == "fail" and item[1].startswith("recovery_release_gates") for item in CHECKS):
-        ok("recovery_release_gates", "Runtime recovery, signed release, diagnostics, and DFU migration gates are present")
+        ok("recovery_release_gates", "Runtime recovery, authenticated diagnostics, signed release, and DFU migration gates are present")
 
 
 def run_audit() -> int:
     CHECKS.clear()
     audit_runtime_transport()
     audit_ble_status_ownership()
+    audit_ble_secure_link()
     audit_app_store_bridge()
     audit_desktop_voice_bridge()
     audit_ios_transport()

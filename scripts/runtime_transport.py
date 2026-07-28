@@ -1634,7 +1634,10 @@ class BLETransport:
                 target,
                 timeout=self.options.connect_timeout,
             )
-            self._client = await self._client_context.__aenter__()
+            self._client = await asyncio.wait_for(
+                self._client_context.__aenter__(),
+                timeout=max(BLE_GATT_IO_TIMEOUT_SECONDS, self.options.connect_timeout),
+            )
             if not self._client.is_connected:
                 transport_fail("BLE connection failed")
             if self.options.connect_settle > 0:
@@ -1677,19 +1680,28 @@ class BLETransport:
     async def close(self) -> None:
         if self._client is not None:
             if self._voice_notify_started:
-                try:
-                    await self._client.stop_notify(VOICE_STREAM_UUID)
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        self._client.stop_notify(VOICE_STREAM_UUID),
+                        timeout=BLE_GATT_IO_TIMEOUT_SECONDS,
+                    )
                 self._voice_notify_started = False
             if self._status_notify_started:
-                try:
-                    await self._client.stop_notify(STATUS_UUID)
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        self._client.stop_notify(STATUS_UUID),
+                        timeout=BLE_GATT_IO_TIMEOUT_SECONDS,
+                    )
                 self._status_notify_started = False
         if self._client_context is not None:
-            await self._client_context.__aexit__(None, None, None)
+            # CoreBluetooth can leave a half-open client after an interrupted
+            # service change.  Do not let its disconnect callback hold the
+            # Companion command queue or the board's only central link forever.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self._client_context.__aexit__(None, None, None),
+                    timeout=BLE_GATT_IO_TIMEOUT_SECONDS,
+                )
         self._client_context = None
         self._client = None
         self._bulk_v2_supported = False
@@ -3516,6 +3528,23 @@ def run_self_test() -> None:
         )
 
     asyncio.run(check_ble_status_notify_reconnect())
+
+    async def check_ble_close_timeout() -> None:
+        class HangingContext:
+            async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+                await asyncio.Event().wait()
+
+        transport = BLETransport(BLETransportOptions(disconnect_pause=0))
+        transport._client_context = HangingContext()
+        original_timeout = globals()["BLE_GATT_IO_TIMEOUT_SECONDS"]
+        globals()["BLE_GATT_IO_TIMEOUT_SECONDS"] = 0.01
+        try:
+            await asyncio.wait_for(transport.close(), timeout=0.1)
+        finally:
+            globals()["BLE_GATT_IO_TIMEOUT_SECONDS"] = original_timeout
+        assert transport._client_context is None
+
+    asyncio.run(check_ble_close_timeout())
 
     class FakeCommandNotifyClient:
         def __init__(self, transport: BLETransport) -> None:

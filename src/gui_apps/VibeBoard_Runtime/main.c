@@ -42,6 +42,9 @@
 #include "bf0_ble_gap.h"
 #include "bf0_sibles.h"
 #include "bf0_sibles_advertising.h"
+#if defined(BLE_SVC_CHG_ENABLE)
+#include "bf0_sibles_svc_change.h"
+#endif
 #if defined(VB_RUNTIME_ENABLE_BT_PAN) && defined(CFG_PAN) && defined(RT_USING_LWIP)
 #include "bts2_app_inc.h"
 #include "bts2_app_demo.h"
@@ -3597,7 +3600,7 @@ static void vb_ble_service_init(void)
     {
         sibles_register_cbk(g_vb_ble.srv_handle, vb_ble_gatts_get_cbk, vb_ble_gatts_set_cbk);
         g_vb_ble.service_ready = 1;
-        vb_ble_set_status("service ready uuid=56425254-494e-5354-0000-000152544d45");
+        vb_ble_set_status("service ready");
     }
     else
     {
@@ -3628,20 +3631,20 @@ static uint8_t vb_ble_advertising_start(void)
         {
             ret = SIBLES_ADV_NO_ERR;
             g_vb_ble.last_adv_start_rc = ret;
-            vb_ble_set_status("adv already started name=%s state=%u idx=%u trans=%u",
-                              VIBEBOARD_BLE_NAME,
-                              (unsigned)vb_ble_adv_context_state(),
-                              (unsigned)vb_ble_adv_context_index(),
-                              (unsigned)vb_ble_adv_context_transist());
+            rt_kprintf("[vb_runtime][ble] adv already started name=%s state=%u idx=%u trans=%u\n",
+                       VIBEBOARD_BLE_NAME,
+                       (unsigned)vb_ble_adv_context_state(),
+                       (unsigned)vb_ble_adv_context_index(),
+                       (unsigned)vb_ble_adv_context_transist());
             return ret;
         }
         ret = sibles_advertising_start(g_vb_ble_install_adv_context);
         g_vb_ble.last_adv_start_rc = ret;
-        vb_ble_set_status("adv restart requested name=%s rc=%u state=%u idx=%u trans=%u",
-                          VIBEBOARD_BLE_NAME, (unsigned)ret,
-                          (unsigned)vb_ble_adv_context_state(),
-                          (unsigned)vb_ble_adv_context_index(),
-                          (unsigned)vb_ble_adv_context_transist());
+        rt_kprintf("[vb_runtime][ble] adv restart requested name=%s rc=%u state=%u idx=%u trans=%u\n",
+                   VIBEBOARD_BLE_NAME, (unsigned)ret,
+                   (unsigned)vb_ble_adv_context_state(),
+                   (unsigned)vb_ble_adv_context_index(),
+                   (unsigned)vb_ble_adv_context_transist());
         return ret;
     }
 
@@ -3657,7 +3660,7 @@ static uint8_t vb_ble_advertising_start(void)
     para.adv_data.manufacturer_data = rt_malloc(sizeof(sibles_adv_type_manufacturer_data_t) + sizeof(manu_data));
     if (!para.adv_data.completed_uuid || !para.rsp_data.completed_name || !para.adv_data.manufacturer_data)
     {
-        vb_ble_set_status("adv alloc failed");
+        rt_kprintf("[vb_runtime][ble] adv alloc failed\n");
         goto cleanup;
     }
 
@@ -3681,15 +3684,15 @@ static uint8_t vb_ble_advertising_start(void)
         g_vb_ble.adv_configured = 1;
         ret = sibles_advertising_start(g_vb_ble_install_adv_context);
         g_vb_ble.last_adv_start_rc = ret;
-        vb_ble_set_status("adv start requested name=%s rc=%u state=%u idx=%u trans=%u",
-                          VIBEBOARD_BLE_NAME, (unsigned)ret,
-                          (unsigned)vb_ble_adv_context_state(),
-                          (unsigned)vb_ble_adv_context_index(),
-                          (unsigned)vb_ble_adv_context_transist());
+        rt_kprintf("[vb_runtime][ble] adv start requested name=%s rc=%u state=%u idx=%u trans=%u\n",
+                   VIBEBOARD_BLE_NAME, (unsigned)ret,
+                   (unsigned)vb_ble_adv_context_state(),
+                   (unsigned)vb_ble_adv_context_index(),
+                   (unsigned)vb_ble_adv_context_transist());
     }
     else
     {
-        vb_ble_set_status("adv init failed rc=%d", ret);
+        rt_kprintf("[vb_runtime][ble] adv init failed rc=%d\n", ret);
     }
 
 cleanup:
@@ -3850,6 +3853,10 @@ static void vb_ble_worker_entry(void *parameter)
             (void)connection_manager_set_bond_cnf_auth(GAP_AUTH_REQ_NO_MITM_BOND);
             (void)connection_manager_set_bond_cnf_iocap(GAP_IO_CAP_NO_INPUT_NO_OUTPUT);
             (void)connection_manager_set_bond_ack(BOND_ACCEPT);
+#if defined(BLE_SVC_CHG_ENABLE)
+            /* Force bonded centrals to rediscover a firmware-changed GATT table. */
+            ble_svc_changed_send_set(SVC_CHANGE_IND_SEND_TYPE_ONCE);
+#endif
             vb_ble_service_init();
             vb_ble_advertising_start();
         }

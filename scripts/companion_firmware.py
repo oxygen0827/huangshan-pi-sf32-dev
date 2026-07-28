@@ -13,7 +13,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -29,6 +31,46 @@ MAX_RELEASE_BYTES = 32 * 1024 * 1024
 
 class FirmwareManagerError(RuntimeError):
     pass
+
+
+def _valid_https_url(value: object, *, label: str) -> str:
+    text = str(value or "")
+    parsed = urllib.parse.urlsplit(text)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise FirmwareManagerError(f"{label} contains an invalid URL") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or bool(parsed.fragment)
+    ):
+        raise FirmwareManagerError(f"{label} must use a credential-free https:// URL")
+    return text
+
+
+class _HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        safe_url = _valid_https_url(
+            urllib.parse.urljoin(request.full_url, new_url),
+            label="firmware redirect",
+        )
+        return super().redirect_request(request, file_pointer, code, message, headers, safe_url)
+
+
+def _open_https(request: urllib.request.Request, *, timeout: float):
+    return urllib.request.build_opener(_HTTPSRedirectHandler()).open(request, timeout=timeout)
 
 
 def _safe_extract(package: zipfile.ZipFile, destination: Path) -> None:
@@ -66,6 +108,7 @@ class FirmwareManager:
         self.public_key = Path(os.environ["VIBEBOARD_FIRMWARE_PUBLIC_KEY"]).expanduser() if os.environ.get("VIBEBOARD_FIRMWARE_PUBLIC_KEY") else None
         self.release_dir = Path(os.environ["VIBEBOARD_FIRMWARE_RELEASE_DIR"]).expanduser() if os.environ.get("VIBEBOARD_FIRMWARE_RELEASE_DIR") else None
         self.port = os.environ.get("VIBEBOARD_FIRMWARE_PORT", "").strip()
+        self._operation_lock = threading.Lock()
 
     @property
     def configured(self) -> bool:
@@ -109,11 +152,12 @@ class FirmwareManager:
     def _read_feed(self) -> dict[str, Any]:
         if not self.feed_url:
             return {"schemaVersion": 1, "releases": []}
-        if not self.feed_url.startswith("https://"):
-            raise FirmwareManagerError("firmware feed must use https://")
-        request = urllib.request.Request(self.feed_url, headers={"accept": "application/json"})
+        request = urllib.request.Request(
+            _valid_https_url(self.feed_url, label="firmware feed"),
+            headers={"accept": "application/json"},
+        )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with _open_https(request, timeout=10) as response:
                 data = response.read(MAX_FEED_BYTES + 1)
         except OSError as exc:
             raise FirmwareManagerError(f"firmware feed unavailable: {exc}") from exc
@@ -148,14 +192,12 @@ class FirmwareManager:
         if not candidates:
             raise FirmwareManagerError("requested firmware release is not in the signed feed")
         row = candidates[0]
-        url = str(row.get("url") or "")
-        if not url.startswith("https://"):
-            raise FirmwareManagerError("firmware release URL must use https://")
+        url = _valid_https_url(row.get("url"), label="firmware release URL")
         expected_sha = str(row.get("sha256") or "")
         staging = Path(tempfile.mkdtemp(prefix="vibeboard-release-", dir=self.state_dir))
         archive = staging / "release.zip"
         try:
-            with urllib.request.urlopen(urllib.request.Request(url), timeout=30) as response, archive.open("wb") as handle:
+            with _open_https(urllib.request.Request(url), timeout=30) as response, archive.open("wb") as handle:
                 total = 0
                 while True:
                     block = response.read(128 * 1024)
@@ -225,6 +267,14 @@ class FirmwareManager:
         progress("health", 92, "Boot log confirmed; checking Runtime health")
 
     def update(self, version: str | None, progress: Callable[[str, int, str], None]) -> dict[str, object]:
+        if not self._operation_lock.acquire(blocking=False):
+            raise FirmwareManagerError("another firmware operation is already in progress")
+        try:
+            return self._update_locked(version, progress)
+        finally:
+            self._operation_lock.release()
+
+    def _update_locked(self, version: str | None, progress: Callable[[str, int, str], None]) -> dict[str, object]:
         if not self.configured:
             raise FirmwareManagerError("firmware update is not configured for this Companion build")
         version_value, release = self._release_from_feed(version)
@@ -257,6 +307,14 @@ class FirmwareManager:
             raise
 
     def rollback(self, progress: Callable[[str, int, str], None]) -> dict[str, object]:
+        if not self._operation_lock.acquire(blocking=False):
+            raise FirmwareManagerError("another firmware operation is already in progress")
+        try:
+            return self._rollback_locked(progress)
+        finally:
+            self._operation_lock.release()
+
+    def _rollback_locked(self, progress: Callable[[str, int, str], None]) -> dict[str, object]:
         last_good = self._read_state("last-success.json")
         candidate = last_good.get("previous")
         release = last_good.get("previousRelease")
@@ -280,6 +338,19 @@ def run_self_test() -> None:
         assert status["configured"] is False
         assert "reason" in status
         assert _version_key("1.10.0") > _version_key("1.9.9")
+        assert _valid_https_url("https://downloads.example.com/release.zip", label="test")
+        for unsafe_url in (
+            "http://downloads.example.com/release.zip",
+            "https://user@downloads.example.com/release.zip",
+            "https://downloads.example.com:444/release.zip",
+            "https://downloads.example.com/release.zip#fragment",
+        ):
+            try:
+                _valid_https_url(unsafe_url, label="test")
+            except FirmwareManagerError:
+                pass
+            else:
+                raise AssertionError(f"unsafe HTTPS URL accepted: {unsafe_url}")
         archive_path = root / "unsafe.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
             archive.writestr("../escape", b"must not extract")
@@ -291,4 +362,14 @@ def run_self_test() -> None:
             else:
                 raise AssertionError("archive traversal was accepted")
         assert not (root / "escape").exists()
+        assert manager._operation_lock.acquire(blocking=False)
+        try:
+            try:
+                manager.update(None, lambda *_: None)
+            except FirmwareManagerError as exc:
+                assert "already in progress" in str(exc)
+            else:
+                raise AssertionError("concurrent firmware update was accepted")
+        finally:
+            manager._operation_lock.release()
     print("companion_firmware self-test ok")

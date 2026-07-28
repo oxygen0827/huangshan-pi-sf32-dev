@@ -83,7 +83,10 @@ The Mac Companion exposes the signed update path through `/v1/firmware/status`,
 `/v1/firmware/available`, `/v1/firmware/update`, and `/v1/firmware/rollback`.
 The manager downloads only HTTPS feed entries, enforces a pinned public key,
 checks the archive digest, rejects archive traversal and symlink members before
-extraction, then delegates to `firmware_release.py`. A release is written to
+extraction, then delegates to `firmware_release.py`. Initial feed/release URLs
+and every redirect must be credential-free standard HTTPS URLs. Exactly one
+update or rollback may own the flash operation at a time; a concurrent request
+fails before it can race the board or overwrite `last-attempt.json`. A release is written to
 `last-success.json` only after the board boot log and Runtime health check pass.
 If health fails, the previous signed release is restored automatically. The UI
 must keep update and rollback visibly separate from normal pet deployment.
@@ -102,7 +105,9 @@ directions, and a physical rollback on production hardware.
 
 `POST /v1/support/bundle` creates a per-job ZIP containing redacted board,
 Companion, firmware, recent-job, and bounded log-tail data. Credentials,
-tokens, private keys, passwords, and hook commands are removed. The download
-endpoint resolves the exact filename recorded by that job and rejects paths
-outside the support directory, so concurrent diagnostic requests cannot return
-another user's bundle.
+tokens, Basic/Bearer authorization values, cookies, private keys, passwords,
+and hook commands are removed. The job inspection and download endpoints both
+require a current Companion session token. The download endpoint resolves the
+exact filename recorded by that job and rejects paths outside the support
+directory, so concurrent diagnostic requests cannot return another user's
+bundle.

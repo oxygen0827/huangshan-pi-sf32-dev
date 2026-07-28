@@ -110,6 +110,7 @@ App，创建 DMG，提交 `notarytool --wait`，staple DMG，并生成 SHA-256 �
 6. 用签名固件 feed 在 USB 板上完成 update、Runtime health、last-good 和 rollback；未完成
    双分区迁移前确认 `/v1/firmware/status` 仍返回 `wirelessDfu=false`。
 7. 在页面导出诊断包，确认下载需要 session token、任务与 ZIP 一一对应，且日志中没有 token、
-   password、private key 或 Hook command。
+   password、private key、Authorization/Cookie 凭据或 Hook command；并发导出时两个任务必须拿到不同
+   的 ZIP。
 
 Developer ID 证书、公证钥匙串、正式域名和下载 URL 属于发布凭据，不能提交到仓库。

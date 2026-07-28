@@ -1940,6 +1940,105 @@ BLE/串口 Runtime 状态包含心跳、耗时和恢复计数。读取 `json_rea
 重试故障和一次注入 GUI heartbeat watchdog 重启；watchdog reset reason 为 `0x56420001`，板子
 重启后重新广播并恢复连接。
 
+### 问题四十：本地 Companion 的恢复与诊断接口也必须按生产边界审计
+
+#### 问题根源
+
+这一轮完整审查发现，板端 Runtime 已具备恢复保护，但桌面侧仍有几处容易在真实用户并发操作或
+异常网络条件下暴露的问题：
+
+- `GET /v1/jobs/<id>` 能返回安装、固件和诊断任务的日志，却没有像下载诊断 ZIP 一样检查 session；
+  loopback 服务面对公网网页时，这会扩大同机其他页面读取任务细节的机会。
+- 诊断 ZIP 只按秒命名；两个任务在同一秒完成会覆盖同一文件。宠物 spritesheet 缓存也复用固定
+  `.tmp` 文件，多个请求拉取同一资源时可能竞争写入。
+- 诊断脱敏只覆盖简单 Bearer/token 字样，不能可靠覆盖 `Authorization: Basic ...`、`Cookie: ...`
+  或 PEM 私钥；支持包恰恰是最不该泄漏这些值的文件。
+- Petdex manifest、固件 feed 和 release 初始地址要求 HTTPS，但默认 HTTP 客户端会自动跟随未审计
+  的重定向；固件包最终仍会验签，然而下载边界和错误提示不应依赖“最后一步会失败”。
+- 固件 update 和 rollback 可以同时被 API 创建为任务。底层 USB flash 不是可并行资源，两个操作可能
+  同时写状态文件、争用串口或让 UI 显示一个迟到的失败任务。
+
+#### 已落地的解决方案
+
+- 任务查询、诊断创建和诊断下载统一要求有效的 15 分钟 Companion session；仍保持服务只监听
+  loopback 和精确 Origin/PNA 校验。
+- 诊断文件名加入经校验的 job ID（无 job ID 时使用随机后缀），下载时继续同时检查文件名白名单和
+  support 根目录。spritesheet 使用唯一临时文件、`fsync` 和原子 `replace`，不会把半写缓存暴露给
+  并发读取者。
+- 脱敏器递归处理数据结构，并覆盖 Bearer/Basic、Authorization、Cookie、API key、token、密码和
+  PEM 私钥；字段名会保留而值替换为 `[redacted]`，使支持包既安全又可定位来源。
+- Petdex manifest 的初始 URL 和每次重定向都只能留在 `https://petdex.dev`；固件 feed/release 及每一次跳转只能是
+  无账号、无片段、标准端口的 HTTPS URL。固件 release 仍必须通过钉住 Ed25519 公钥、哈希和布局验证。
+- `FirmwareManager` 为 update/rollback 共享非阻塞操作锁，第二个操作立即得到明确错误，不会碰触板子
+  或覆盖恢复状态。
+
+#### 回归要求
+
+1. 无 token 查询 `/v1/jobs/<id>` 和下载 `/v1/support/bundles/<id>` 必须返回 401；带当前 session
+   才能读取该本地 Companion 保存的任务结果。
+2. 同时创建两个诊断任务，ZIP 名称不同、下载路径不能越过 support 目录，且压缩包和日志中不出现
+   Bearer/Basic 凭据、Cookie、token、password、private key 或 Hook command 的原始值。
+3. 伪造 HTTP、带账号、非标准端口或带 fragment 的 Petdex/firmware URL，以及重定向到这些地址的响应，
+   必须在下载前拒绝；有效 release 仍须完整验签。
+4. 并发请求 update 和 rollback 时，只有一个可以持有 USB 恢复操作；失败请求不写 `last-attempt.json`
+   且不启动刷写子进程。
+5. `companion_diagnostics.py --self-test`、`companion_firmware.py --self-test`、
+   `codex_pet_companion.py --self-test`、`runtime_architecture_audit.py --self-test` 和真实 Companion
+   API 回归必须全部通过后才可打包发布。
+
+### 问题四十一：固件变更后 CoreBluetooth 缓存旧 GATT handle，并且异步日志污染状态通道
+
+#### 问题根源
+
+一次开发刷写后，板子仍稳定以 `VibeBoard` 广播，macOS 也能建立加密链路，但读取 Runtime `status`
+特征返回单字节 `0x01`。该值是旧 GATT 表里的 CCCD 内容，不是 Runtime 状态；Companion 因此一直
+等待 `status`/`capabilities` 的有效回包，网页最终显示连接或部署超时。
+
+仅换一组 Runtime UUID 不能修复这个问题。板端已实际注册新 UUID，CoreBluetooth 却连服务枚举也按
+同一 peripheral identity 复用了旧表。换 UUID 会同时破坏已发布 Mac/iOS 客户端兼容性，并没有让
+当前设备自动恢复。
+
+缓存失效后又发现第二个独立遗漏：`vb_ble_advertising_start()` 把 `adv start requested`、重启请求和
+分配失败等异步诊断写进了命令应答共用的 `status` characteristic。即使 GATT handle 正确，首次读取
+也可能不是命令回包。主机端还直接 await 了 Bleak 的 `__aenter__` 和 `__aexit__`；CoreBluetooth 在
+半开连接或 Service Changed 的关闭阶段不返回时，单条诊断命令会永久占住板子的唯一中心连接。
+
+#### 已落地的解决方案
+
+- `project/proj.conf` 显式开启 SDK 的 `CONFIG_BLE_SVC_CHG_ENABLE=y`。Runtime 上电时设置一次标准
+  `Service Changed` indication；已绑定中心在加密后会重新发现同一 v1 Runtime service 的正确
+  attribute table。Python、iOS 和已发布协议 UUID 保持 v1，不以临时 UUID 轮换作为缓存恢复手段。
+- 广告 started/stopped 之外，`vb_ble_advertising_start()` 的 already-started、restart-requested、
+  allocation/init failure 也全部改为 `rt_kprintf()`。`status` 缓冲区只保留由命令 worker 生成的
+  应答。架构审计同时覆盖广告 callback 和广告启动函数，防止将来把异步日志重新写回 GATT status。
+- `BLETransport` 给 Bleak 建连、两条 notify 的取消和 `__aexit__` 统一加 GATT I/O deadline；即使
+  CoreBluetooth 清理回调挂住，transport 也会清空本地引用、释放 Companion 命令队列，并让板端广告
+  健康检查恢复可发现状态。自测包含永不返回的 `__aexit__` 桩。
+- 真机恢复先释放失效客户端，再做 fresh scan；不要把“广告在有效连接时停止”误诊为广播故障。
+  板子在中心连接存在时按 BLE 规范停止可连接广告，连接关闭后才应检查健康恢复。
+
+#### 真机回归结果
+
+- 在同一台曾缓存旧 handle 的 Mac 上，标准 Service Changed 后 `status` 命令返回
+  `ok status api=vibeboard-huangshan-ble-install/v1 ... secure=1`；`capabilities` 经 BLE 读取完整
+  713 字节 JSON 后进程退出，未留下半开连接。
+- 最新固件实际跑完 1 次 Runtime reload（1852 ms，`reload_failures=0`、`reload_timeouts=0`）、九状态
+  sweep（`idle/runRight/runLeft/waving/jumping/failed/waiting/running/review`，每项均有多帧且 UI tick
+  前进），点击 jump 后回到 `idle`。
+- 电源 API 返回 VBAT 4277 mV、charger `no_charging`。该硬件当前没有经校准的电量百分比 SOC，不能
+  从单次电压伪造百分比。
+- `runtime_transport.py`、`runtime_architecture_audit.py`、Bridge、Companion、Swift package、固件
+  构建和打包后的 Companion 验证均通过。
+
+#### 后续规则
+
+1. 任何固件 GATT 表调整必须走标准 Service Changed，并在“旧 bond、新固件”的同一台 Mac 上做读、
+   notify、完整 JSON 和断开后重扫回归；fresh scan 或改 UUID 不是 GATT cache 的替代方案。
+2. 命令应答 characteristic 只能由命令路径写入。广告、连接、重启、健康检查和采样诊断必须走串口
+   日志或独立 telemetry 通道。
+3. 所有外部 BLE await，尤其是 client 建连和关闭，都必须有上界；超时后本地 transport 必须可丢弃，
+   不得继续占用下一轮重连或部署任务。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：
