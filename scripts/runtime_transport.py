@@ -1094,6 +1094,7 @@ class SerialTransport:
         buffer = bytearray()
         offset = 0
         total = None
+        snapshot_restarts = 0
         fallback_deadline = time.time() + max(timeout, 4.0)
         while True:
             chunk_output = self.command(f"json_read {kind} {offset} {SERIAL_JSON_CHUNK_BYTES}", wait=command_wait)
@@ -1110,7 +1111,18 @@ class SerialTransport:
                 total = chunk_total
                 buffer = bytearray(total)
             elif total != chunk_total:
-                transport_fail(f"Serial json_read total changed for {kind}: {total} -> {chunk_total}")
+                # Runtime status snapshots contain live counters (heartbeat,
+                # elapsed time, UI ticks).  A snapshot can therefore change
+                # length between chunks. Restart from offset zero so the
+                # assembled response is coherent instead of treating a
+                # one-byte length change as a transport failure.
+                snapshot_restarts += 1
+                if snapshot_restarts > 5 or time.time() >= fallback_deadline:
+                    transport_fail(f"Serial json_read snapshot kept changing for {kind}: {total} -> {chunk_total}")
+                buffer = bytearray()
+                offset = 0
+                total = None
+                continue
             end_offset = chunk_offset + len(payload)
             if end_offset > len(buffer):
                 transport_fail(f"Serial json_read overflow for {kind}: {end_offset}>{len(buffer)}")
@@ -2048,6 +2060,7 @@ class BLETransport:
         buffer = bytearray()
         offset = 0
         total = None
+        snapshot_restarts = 0
         while True:
             status = await self.command(f"json_read {kind} {offset} {RUNTIME_DATA_CHUNK_BYTES}")
             chunk = extract_json_chunk(status, kind)
@@ -2063,7 +2076,13 @@ class BLETransport:
                 total = chunk_total
                 buffer = bytearray(total)
             elif total != chunk_total:
-                transport_fail(f"BLE json_read total changed for {kind}: {total} -> {chunk_total}")
+                snapshot_restarts += 1
+                if snapshot_restarts > 5 or time.monotonic() >= deadline:
+                    transport_fail(f"BLE json_read snapshot kept changing for {kind}: {total} -> {chunk_total}")
+                buffer = bytearray()
+                offset = 0
+                total = None
+                continue
             end_offset = chunk_offset + len(payload)
             if end_offset > len(buffer):
                 transport_fail(f"BLE json_read overflow for {kind}: {end_offset}>{len(buffer)}")

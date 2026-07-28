@@ -33,7 +33,8 @@ codex_pet_bridge.py（唯一 BLE 持有者）
 
 ## 宠物状态
 
-每只宠物有 5 种动画，对应不同的任务状态。板端宠物的状态优先级从高到低为：
+每只 Petdex 宠物包含九种动画：`idle`、`runRight`、`runLeft`、`waving`、`jumping`、
+`failed`、`waiting`、`running`、`review`。Codex 任务状态映射如下：
 
 | 状态 | 触发条件 | 宠物表现 |
 |---|---|---|
@@ -50,18 +51,21 @@ Bridge 内部还有 `listening`（录音中）和 `transcribing`（ASR 转写中
 
 ## 每板一宠物
 
-板子**同时只有一只 active 宠物**。宠物资源（5 种状态 × 2 帧，共约 830 KB）在启动时一次性加载进 PSRAM，运行期间切换状态直接切换已驻留的帧，不读 SD 卡。
+板子**同时只有一只 active 宠物**。九个状态每个至少 2 帧、最多 8 帧，转换为 160x173
+RGB565A、120ms 的 `VBPC v2` 资源。板端只解压并缓存当前状态，状态切换不需要反复读取整包。
 
 换宠物需要：在桌面端重新生成 `preload.bin`，然后把 Codex Pet App 重新安装到板子。这个操作可以通过 Companion 网页一键完成，不需要重新烧录固件。
 
 ---
 
-## 物理按键
+## 交互
 
-| 按键 | 常规状态 | 待审批状态 |
+| 操作 | 常规状态 | 待审批状态 |
 |---|---|---|
-| 左键 | 切换到上一个任务 | Deny（拒绝） |
-| 右键 | 切换到下一个任务 | Allow（批准） |
+| 屏幕向右滑 | 切换到上一个任务 | - |
+| 屏幕向左滑 | 切换到下一个任务 | - |
+| 点击宠物 | 播放跳跃动作 | - |
+| 审批键 | - | Allow / Deny |
 
 审批只对以下两类操作有效，其余一律显示"请在电脑端处理"：
 - 命令执行（`item/commandExecution/requestApproval`）
@@ -79,7 +83,9 @@ scripts/
   codex_pet_mcp.py             MCP 工具服务（通过 Bridge IPC 转发硬件命令）
   codex_pet_companion.py       宠物图库与一键部署服务（端口 8790）
   codex_pet_web.html           Companion 网页 UI
-  codex_pet_monitor.command    用户启动入口
+  codex_pet_agent.py          打包后的统一 Agent / Hook 入口
+  codex_pet_companion_app.swift macOS 菜单栏外壳
+  build_codex_pet_companion_app.command 自包含 App、DMG、签名与公证
 
 scripts/runtime_apps/codex_pet/
   main.lua                     板端入口（调用原生 helper）
@@ -101,3 +107,4 @@ docs/
 - [QUICKSTART.md](QUICKSTART.md) — 从开机到宠物上板的完整开箱流程
 - [../docs/codex-pet-bridge.md](../docs/codex-pet-bridge.md) — 协议细节、状态归并逻辑、事故复盘
 - [../docs/codex-pet-one-click-deploy.md](../docs/codex-pet-one-click-deploy.md) — 宠物部署架构与安装恢复
+- [../docs/macos-companion-release.md](../docs/macos-companion-release.md) — macOS 打包、域名、签名、公证与发布 Gate

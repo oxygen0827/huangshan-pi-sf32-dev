@@ -28,7 +28,7 @@ typedef struct
 
 int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
                        const char *project);
-void vb_codex_pet_stop(void);
+int vb_codex_pet_stop(void);
 void vb_codex_pet_tick(uint32_t now);
 void vb_codex_pet_receive_flow(const char *channel, uint32_t sequence,
                                const char *payload);

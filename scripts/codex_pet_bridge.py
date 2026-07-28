@@ -120,7 +120,7 @@ def install_nonfatal_standard_streams() -> None:
         sys.stderr = NonFatalTextStream(sys.stderr)  # type: ignore[assignment]
 
 
-async def wait_for_shutdown_signal() -> None:
+async def wait_for_shutdown_signal(parent_pid: int | None = None) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed: list[signal.Signals] = []
@@ -131,7 +131,13 @@ async def wait_for_shutdown_signal() -> None:
             continue
         installed.append(signum)
     try:
-        await stop.wait()
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=2.0 if parent_pid else None)
+            except asyncio.TimeoutError:
+                if parent_pid is not None and os.getppid() != parent_pid:
+                    print("Codex Pet parent process exited; stopping Agent.", flush=True)
+                    return
     finally:
         for signum in installed:
             with contextlib.suppress(Exception):
@@ -2461,8 +2467,6 @@ async def run_service(args: argparse.Namespace) -> None:
             device=device,
             status=monitor,
         )
-        await service.start()
-        device.project_name = None
         companion_server = None
         if not args.no_companion:
             from codex_pet_companion import CompanionServer, CompanionState
@@ -2473,6 +2477,7 @@ async def run_service(args: argparse.Namespace) -> None:
                 state_dir=args.companion_state_dir,
                 hooks_path=args.hooks_path,
                 ble_cache=args.ble_cache,
+                workspace=args.workspace,
             )
             companion_server = CompanionServer(
                 companion_state,
@@ -2480,10 +2485,14 @@ async def run_service(args: argparse.Namespace) -> None:
                 open_browser=not args.companion_no_open,
             )
             companion_server.start()
-        print(f"Codex Pet monitor ready: {args.socket}")
-        print("Watching Codex Desktop tasks through global Hooks; voice submission is disabled.")
         try:
-            await wait_for_shutdown_signal()
+            # The setup UI must remain available while the first BLE scan or
+            # macOS pairing prompt is still pending.
+            await service.start()
+            device.project_name = None
+            print(f"Codex Pet monitor ready: {args.socket}")
+            print("Watching Codex Desktop tasks through global Hooks; voice submission is disabled.")
+            await wait_for_shutdown_signal(args.parent_pid)
         finally:
             if companion_server is not None:
                 await asyncio.to_thread(companion_server.close)
@@ -2544,7 +2553,7 @@ async def run_service(args: argparse.Namespace) -> None:
     print(f"Codex Pet Bridge ready: {args.socket}")
     print("Codex Pet live console ready: replies and approval requests stay on this Bridge connection.")
     try:
-        await wait_for_shutdown_signal()
+        await wait_for_shutdown_signal(args.parent_pid)
     finally:
         await service.close()
 
@@ -2557,6 +2566,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--desktop-state", type=Path, default=DEFAULT_DESKTOP_STATE)
     parser.add_argument("--hardware-audit", type=Path, default=DEFAULT_HARDWARE_AUDIT)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument("--parent-pid", type=int, help="Stop when the owning desktop process exits.")
     parser.add_argument("--codex-bin")
     parser.add_argument("--name", default=DEFAULT_DEVICE_NAME)
     parser.add_argument("--address")

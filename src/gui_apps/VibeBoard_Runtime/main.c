@@ -1,5 +1,6 @@
 #include <rtthread.h>
 #include <rtdevice.h>
+#include "bf0_hal_hlp.h"
 #include "drivers/rt_drv_pwm.h"
 #if defined(BSP_USING_LCD)
 #include "drv_lcd.h"
@@ -120,6 +121,14 @@
 #define VB_KEY_HOME_DEBOUNCE_MS 350
 #define VB_TIMER_PERIOD_MS 200
 #define VB_STATUS_TICK_REFRESH_MS 1000
+#define VB_RUNTIME_LUA_CLOSE_TIMEOUT_MS 5000
+#define VB_RUNTIME_HOST_STOP_TIMEOUT_MS 5000
+#define VB_RUNTIME_RECOVERY_RETRY_LIMIT 2
+#define VB_RUNTIME_RECOVERY_BACKOFF_MS 1200
+#define VB_RUNTIME_WATCHDOG_TIMEOUT_MS 12000
+#define VB_RUNTIME_RESET_REASON_MAGIC 0x56420000u
+#define VB_RUNTIME_RESET_REASON_GUI_STALL 1u
+#define VB_RUNTIME_RESET_REASON_RELOAD_FAILURE 2u
 #define VB_PAN_TIMER_MS 3000
 #define VB_HTTP_HEADER_BUFSZ 1024
 #define VB_HTTP_CHUNK_SIZE 512
@@ -153,6 +162,8 @@
 #define VB_BLE_ADV_RESTART_ATTEMPTS 6
 #define VB_BLE_ADV_FORCE_RESTART_DELAY_MS 250
 #define VB_BLE_ADV_FORCE_RESTART_ATTEMPTS 8
+#define VB_BLE_HEALTH_CHECK_MS 1000
+#define VB_BLE_LINK_GRACE_MS 5000
 #define VB_BLE_TRACKED_CONNECTIONS 8
 #define VB_SENSOR_JSON_MAX 512
 #define VB_POWER_JSON_MAX 384
@@ -817,6 +828,8 @@ typedef struct
     uint16_t notify_cccd;
     uint16_t voice_cccd;
     uint8_t conn_idx;
+    uint8_t link_conn_idx;
+    uint32_t link_started_tick;
     /* Security requests are emitted by both the raw GAP and connection-manager
      * callbacks on some SDK builds. Keep one in flight per link so the second
      * callback cannot restart SMP pairing and force a timeout. */
@@ -936,6 +949,22 @@ typedef struct
     vb_pager_state_t pager;
     volatile int pending_reload;
     volatile int reload_in_progress;
+    uint8_t reload_phase;
+    uint32_t reload_started_tick;
+    uint32_t reload_phase_started_tick;
+    uint32_t reload_count;
+    uint32_t reload_failure_count;
+    uint32_t reload_timeout_count;
+    char reload_host_wait[20];
+    uint8_t recovery_attempts;
+    uint8_t recovery_stage;
+    uint32_t recovery_next_tick;
+    uint32_t recovery_count;
+    char recovery_last_reason[VB_MAX_TEXT];
+    uint32_t watchdog_heartbeat;
+    uint32_t watchdog_last_reset_reason;
+    volatile uint8_t fault_reload_once;
+    volatile uint8_t fault_watchdog;
     volatile int pending_stop;
     volatile int pending_manager_refresh;
     int running;
@@ -1004,6 +1033,8 @@ static vb_info_flow_state_t g_vb_flow;
 static vb_voice_state_t g_vb_voice;
 static char g_vb_msh_text[VB_APP_JSON_MAX];
 static uint8_t g_vb_install_blob_buffer[VB_RUNTIME_INSTALL_BLOB_CHUNK_BYTES];
+static rt_thread_t g_vb_runtime_watchdog_thread;
+static volatile int g_vb_runtime_watchdog_started;
 #if VB_RUNTIME_HAS_BT_PAN
 static vb_pan_state_t g_vb_pan;
 #endif
@@ -1013,7 +1044,17 @@ static vb_ble_install_state_t g_vb_ble;
 #endif
 
 static int vb_builtin_script_start(const char *script_path, const char *manifest_path);
-static void vb_builtin_script_stop(void);
+static int vb_builtin_script_stop(void);
+
+enum
+{
+    VB_RUNTIME_RELOAD_IDLE = 0,
+    VB_RUNTIME_RELOAD_LUA_CLOSE,
+    VB_RUNTIME_RELOAD_HOST_STOP,
+    VB_RUNTIME_RELOAD_TEARDOWN,
+    VB_RUNTIME_RELOAD_LOAD,
+    VB_RUNTIME_RELOAD_FAILED,
+};
 static lv_obj_t *vb_create_label(lv_obj_t *parent, const char *text, uint16_t font_size,
                                  lv_color_t color);
 static void vb_set_obj_bg(lv_obj_t *obj, uint32_t color);
@@ -1066,9 +1107,11 @@ static void vb_runtime_request_manager_refresh(const char *message);
 static void vb_render_app_manager_ui(const char *reason);
 #endif
 static void vb_runtime_stop_current_app(void);
+static void vb_runtime_watchdog_start(void);
 static int vb_runtime_app_status_command(void);
 static int vb_runtime_apps_status_command(void);
 static void vb_read_active_app(char *dst, rt_size_t cap);
+static void vb_runtime_active_app_snapshot(char *dst, rt_size_t cap);
 static int vb_runtime_sensors_read_json(char *dst, rt_size_t cap);
 static int vb_runtime_sensors_status_command(void);
 static int vb_runtime_power_read_json(char *dst, rt_size_t cap);
@@ -1149,7 +1192,24 @@ __attribute__((weak)) int vibeboard_lua_start_script(const char *script_path, co
 
 __attribute__((weak)) void vibeboard_lua_stop_app(void)
 {
-    vb_builtin_script_stop();
+    (void)vb_builtin_script_stop();
+}
+
+__attribute__((weak)) int vibeboard_lua_begin_stop_async(void)
+{
+    vibeboard_lua_stop_app();
+    return RT_EOK;
+}
+
+__attribute__((weak)) int vibeboard_lua_stop_async_state(void)
+{
+    return VIBEBOARD_LUA_STOP_COMPLETE;
+}
+
+__attribute__((weak)) int vibeboard_lua_finish_stop_async(void)
+{
+    vibeboard_lua_stop_app();
+    return RT_EOK;
 }
 
 static void vb_safe_copy(char *dst, rt_size_t cap, const char *src)
@@ -2759,6 +2819,7 @@ BLE_GATT_SERVICE_DEFINE_128(vb_ble_install_att_db)
 SIBLES_ADVERTISING_CONTEXT_DECLAR(g_vb_ble_install_adv_context);
 
 static uint8_t vb_ble_advertising_force_restart(void);
+static void vb_ble_health_check(void);
 
 void vb_peer_advertising_changed(uint8_t flags)
 {
@@ -2941,7 +3002,7 @@ static int vb_ble_execute_line(char *line)
     if (rt_strcmp(argv[0], "status") == 0 || rt_strcmp(argv[0], "vb_runtime_status") == 0)
     {
         char active[VB_MAX_APP_ID];
-        vb_read_active_app(active, sizeof(active));
+        vb_runtime_active_app_snapshot(active, sizeof(active));
         vb_ble_set_status("ok status api=%s active=%s flow=%lu secure=%d bulk=2", VIBEBOARD_RUNTIME_BLE_API_VERSION,
                           active[0] ? active : "(unknown)",
                           (unsigned long)g_vb_flow.total_count,
@@ -3495,6 +3556,8 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
                    VIBEBOARD_BLE_NAME, (unsigned)status, evt ? evt->adv_mode : -1,
                    (unsigned)vb_ble_adv_context_state(),
                    (unsigned long)g_vb_ble.adv_start_events);
+        if (status != 0 && g_vb_ble.mailbox && !g_vb_ble.link_active)
+            (void)rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
         break;
     }
     case SIBLES_ADV_EVT_ADV_STOPPED:
@@ -3508,6 +3571,11 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
                    (unsigned)reason, evt ? evt->adv_mode : -1,
                    (unsigned)vb_ble_adv_context_state(),
                    (unsigned long)g_vb_ble.adv_stop_events);
+        /* A stop can happen without a matching GAP disconnect (controller reset,
+         * failed start, or an SDK state transition). Let the worker decide after
+         * the link state settles whether advertising must be restored. */
+        if (g_vb_ble.mailbox)
+            (void)rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
         break;
     }
     default:
@@ -3682,17 +3750,94 @@ static uint8_t vb_ble_advertising_force_restart(void)
     return start_rc;
 }
 
+static int vb_ble_link_state_is_live(uint8_t conn_idx, uint32_t now)
+{
+    uint8_t state;
+    uint32_t age;
+    if (conn_idx >= VB_BLE_TRACKED_CONNECTIONS)
+        return 0;
+    state = connection_manager_get_connection_state(conn_idx);
+    age = g_vb_ble.link_started_tick ? now - g_vb_ble.link_started_tick : VB_BLE_LINK_GRACE_MS + 1u;
+    if (state == CONNECTION_STATE_CONNECTED ||
+        state == CONNECTION_STATE_CONNECTING ||
+        state == CONNECTION_STATE_RESOLVING)
+        return 1;
+    if ((state == CONNECTION_STATE_DISCONNECTING || state == CM_CONN_INDEX_ERROR) &&
+        age <= rt_tick_from_millisecond(VB_BLE_LINK_GRACE_MS))
+        return 1;
+    return 0;
+}
+
+static void vb_ble_health_check(void)
+{
+    uint32_t now = rt_tick_get();
+    uint8_t conn_idx = INVALID_CONN_IDX;
+    int link_present = g_vb_ble.link_active || g_vb_ble.connected;
+    int link_live = 0;
+    uint8_t ret;
+
+    if (!g_vb_ble.power_on || !g_vb_ble.service_ready)
+        return;
+
+    if (link_present)
+    {
+        conn_idx = (g_vb_ble.link_active && g_vb_ble.link_conn_idx < VB_BLE_TRACKED_CONNECTIONS) ?
+                   g_vb_ble.link_conn_idx : g_vb_ble.conn_idx;
+        link_live = vb_ble_link_state_is_live(conn_idx, now);
+        if (link_live)
+            return;
+
+        rt_kprintf("[vb_runtime][ble] stale link idx=%u active=%d connected=%d state=%u; recovering\n",
+                   (unsigned)conn_idx, g_vb_ble.link_active, g_vb_ble.connected,
+                   conn_idx < VB_BLE_TRACKED_CONNECTIONS ?
+                   (unsigned)connection_manager_get_connection_state(conn_idx) :
+                   (unsigned)CM_CONN_INDEX_ERROR);
+        if (conn_idx < VB_BLE_TRACKED_CONNECTIONS)
+        {
+            g_vb_ble.security_requested[conn_idx] = 0;
+            g_vb_ble.mtu_by_conn[conn_idx] = 0;
+            vb_peer_release_host_connection(conn_idx);
+        }
+        g_vb_ble.link_active = 0;
+        g_vb_ble.connected = 0;
+        g_vb_ble.encrypted = 0;
+        g_vb_ble.notify_cccd = 0;
+        g_vb_ble.voice_cccd = 0;
+        g_vb_ble.conn_idx = INVALID_CONN_IDX;
+        g_vb_ble.link_conn_idx = INVALID_CONN_IDX;
+        g_vb_ble.link_started_tick = 0;
+    }
+
+    if (g_vb_ble.advertising)
+        return;
+    ret = vb_ble_advertising_start();
+    if (ret != SIBLES_ADV_NO_ERR)
+        rt_kprintf("[vb_runtime][ble] health advertising retry rc=%u state=%u idx=%u trans=%u\n",
+                   (unsigned)ret, (unsigned)vb_ble_adv_context_state(),
+                   (unsigned)vb_ble_adv_context_index(),
+                   (unsigned)vb_ble_adv_context_transist());
+}
+
 static void vb_ble_worker_entry(void *parameter)
 {
     uint32_t value;
     int attempt;
     uint8_t ret;
+    rt_err_t recv_result;
     (void)parameter;
     while (1)
     {
-        if (!g_vb_ble.mailbox ||
-            rt_mb_recv(g_vb_ble.mailbox, (rt_uint32_t *)&value, RT_WAITING_FOREVER) != RT_EOK)
+        if (!g_vb_ble.mailbox)
         {
+            rt_thread_mdelay(VB_BLE_HEALTH_CHECK_MS);
+            vb_ble_health_check();
+            continue;
+        }
+        recv_result = rt_mb_recv(g_vb_ble.mailbox, (rt_uint32_t *)&value,
+                                 rt_tick_from_millisecond(VB_BLE_HEALTH_CHECK_MS));
+        if (recv_result != RT_EOK)
+        {
+            vb_ble_health_check();
             continue;
         }
         if (value == BLE_POWER_ON_IND)
@@ -3714,7 +3859,8 @@ static void vb_ble_worker_entry(void *parameter)
             rt_thread_mdelay(VB_BLE_ADV_RESTART_DELAY_MS);
             for (attempt = 0; attempt < VB_BLE_ADV_RESTART_ATTEMPTS; attempt++)
             {
-                if (!g_vb_ble.power_on || !g_vb_ble.service_ready || g_vb_ble.link_active)
+                if (!g_vb_ble.power_on || !g_vb_ble.service_ready ||
+                    g_vb_ble.link_active || g_vb_ble.connected || g_vb_ble.advertising)
                 {
                     break;
                 }
@@ -3726,6 +3872,7 @@ static void vb_ble_worker_entry(void *parameter)
                 }
                 rt_thread_mdelay(VB_BLE_ADV_RESTART_INTERVAL_MS);
             }
+            vb_ble_health_check();
         }
         else if (value == VB_BLE_EVT_RELOAD_APP)
         {
@@ -3763,6 +3910,7 @@ static int vb_ble_install_init(void)
     if (g_vb_ble.initialized) return RT_EOK;
     rt_memset(&g_vb_ble, 0, sizeof(g_vb_ble));
     g_vb_ble.conn_idx = INVALID_CONN_IDX;
+    g_vb_ble.link_conn_idx = INVALID_CONN_IDX;
     vb_ble_set_status("init");
     g_vb_ble.mailbox = rt_mb_create("vb_ble", 8, RT_IPC_FLAG_FIFO);
     if (!g_vb_ble.mailbox)
@@ -3827,6 +3975,8 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
             if (ind->role == 1)
             {
                 g_vb_ble.link_active = 1;
+                g_vb_ble.link_conn_idx = ind->conn_idx;
+                g_vb_ble.link_started_tick = rt_tick_get();
                 g_vb_ble.advertising = 0;
             }
         }
@@ -3845,8 +3995,16 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
     case BLE_GAP_DISCONNECTED_IND:
     {
         ble_gap_disconnected_ind_t *ind = (ble_gap_disconnected_ind_t *)data;
+        int host_link;
         if (!ind) break;
-        g_vb_ble.link_active = 0;
+        host_link = ind->conn_idx == g_vb_ble.link_conn_idx ||
+                    ind->conn_idx == g_vb_ble.conn_idx;
+        if (host_link)
+        {
+            g_vb_ble.link_active = 0;
+            g_vb_ble.link_conn_idx = INVALID_CONN_IDX;
+            g_vb_ble.link_started_tick = 0;
+        }
         if (ind->conn_idx < VB_BLE_TRACKED_CONNECTIONS)
         {
             g_vb_ble.mtu_by_conn[ind->conn_idx] = 0;
@@ -3862,10 +4020,14 @@ static int vb_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, 
             g_vb_ble.rx_len = 0;
             vb_ble_set_status("host disconnected reason=%d", ind->reason);
         }
-        else
-            rt_kprintf("[vb_runtime][ble] non-host disconnected idx=%u reason=%u\n",
+        else if (!host_link)
+            rt_kprintf("[vb_runtime][ble] non-host disconnected idx=%u reason=%u host_link=%d\n",
                        (unsigned)ind->conn_idx, (unsigned)ind->reason);
-        if (g_vb_ble.mailbox) rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
+        if (!host_link && g_vb_ble.link_active)
+            rt_kprintf("[vb_runtime][ble] preserved host link idx=%u after peer disconnect\n",
+                       (unsigned)g_vb_ble.link_conn_idx);
+        if (g_vb_ble.mailbox && host_link)
+            rt_mb_send(g_vb_ble.mailbox, VB_BLE_EVT_RESTART_ADV);
         break;
     }
     case CONNECTION_MANAGER_ENCRYPT_IND_EVENT:
@@ -4764,6 +4926,19 @@ static void vb_read_active_app(char *dst, rt_size_t cap)
     if (vb_is_safe_app_id(text)) vb_safe_copy(dst, cap, text);
 }
 
+static void vb_runtime_active_app_snapshot(char *dst, rt_size_t cap)
+{
+    /* Status paths run concurrently with frame preloading.  The in-memory
+     * active id is authoritative while Runtime is alive and avoids a second
+     * SD/SPI transaction in the recovery path. */
+    if (g_vb_runtime.running && vb_is_safe_app_id(g_vb_runtime.active_app))
+    {
+        vb_safe_copy(dst, cap, g_vb_runtime.active_app);
+        return;
+    }
+    vb_read_active_app(dst, cap);
+}
+
 static int vb_write_active_app(const char *app_id)
 {
     char text[VB_MAX_APP_ID + 2];
@@ -4777,6 +4952,85 @@ static void vb_runtime_set_app_result(int status, const char *message)
 {
     g_vb_runtime.app_last_status = status;
     vb_safe_copy(g_vb_runtime.app_last_error, sizeof(g_vb_runtime.app_last_error), message ? message : "");
+}
+
+static const char *vb_runtime_reload_phase_name(void)
+{
+    switch (g_vb_runtime.reload_phase)
+    {
+    case VB_RUNTIME_RELOAD_LUA_CLOSE: return "lua_close";
+    case VB_RUNTIME_RELOAD_HOST_STOP: return "host_stop";
+    case VB_RUNTIME_RELOAD_TEARDOWN: return "teardown";
+    case VB_RUNTIME_RELOAD_LOAD: return "load";
+    case VB_RUNTIME_RELOAD_FAILED: return "recovery_required";
+    default: return "idle";
+    }
+}
+
+static uint32_t vb_runtime_reload_elapsed_ms(void)
+{
+    if (!g_vb_runtime.reload_started_tick) return 0;
+    return (uint32_t)((rt_tick_get() - g_vb_runtime.reload_started_tick) * 1000u /
+                      RT_TICK_PER_SECOND);
+}
+
+static void vb_runtime_record_reset_reason(uint32_t reason)
+{
+    uint32_t value = VB_RUNTIME_RESET_REASON_MAGIC | (reason & 0xffffu);
+    /* RTC slot 6 is owned by the SDK hardware WDT driver.  Keep the
+     * application-level recovery reason in the module-record slot instead of
+     * changing the meaning of the board's real watchdog status. */
+    HAL_Set_backup(RTC_BACKUP_MODULE_RECORD, value);
+    g_vb_runtime.watchdog_last_reset_reason = value;
+}
+
+static void vb_runtime_controlled_reset(uint32_t reason, const char *message)
+{
+    if (g_vb_runtime.install_fd >= 0 || g_vb_runtime.install_app[0])
+    {
+        rt_kprintf("[vb_runtime][recovery] reset deferred during install: %s\n",
+                   message ? message : "--");
+        return;
+    }
+    vb_runtime_record_reset_reason(reason);
+    rt_kprintf("[vb_runtime][recovery] controlled reset reason=%lu message=%s\n",
+               (unsigned long)reason, message ? message : "--");
+    rt_hw_cpu_reset();
+}
+
+static void vb_runtime_watchdog_entry(void *parameter)
+{
+    (void)parameter;
+    for (;;)
+    {
+        uint32_t now;
+        rt_thread_mdelay(1000);
+        if (!g_vb_runtime.running || !g_vb_runtime.timer) continue;
+        if (g_vb_runtime.install_fd >= 0 || g_vb_runtime.install_app[0]) continue;
+        now = rt_tick_get();
+        if (g_vb_runtime.watchdog_heartbeat &&
+            now - g_vb_runtime.watchdog_heartbeat >=
+                rt_tick_from_millisecond(VB_RUNTIME_WATCHDOG_TIMEOUT_MS))
+        {
+            vb_runtime_controlled_reset(VB_RUNTIME_RESET_REASON_GUI_STALL,
+                                        "GUI heartbeat stalled");
+        }
+    }
+}
+
+static void vb_runtime_watchdog_start(void)
+{
+    if (g_vb_runtime_watchdog_started) return;
+    g_vb_runtime_watchdog_thread = rt_thread_create(
+        "vbwdog", vb_runtime_watchdog_entry, RT_NULL, 2048,
+        RT_THREAD_PRIORITY_MIDDLE + 12, RT_THREAD_TICK_DEFAULT);
+    if (!g_vb_runtime_watchdog_thread)
+    {
+        rt_kprintf("[vb_runtime][recovery] watchdog thread allocation failed\n");
+        return;
+    }
+    g_vb_runtime_watchdog_started = 1;
+    rt_thread_startup(g_vb_runtime_watchdog_thread);
 }
 
 static void vb_runtime_return_home(void)
@@ -4809,6 +5063,8 @@ static void vb_runtime_return_home(void)
 
 static const char *vb_runtime_app_state_name(void)
 {
+    if (g_vb_runtime.reload_phase == VB_RUNTIME_RELOAD_FAILED) return "recovery_required";
+    if (g_vb_runtime.reload_in_progress) return "reloading";
     if (g_vb_runtime.app_failed) return "failed";
     if (g_vb_runtime.app_running) return "running";
     return "idle";
@@ -5091,7 +5347,7 @@ static int vb_runtime_app_status_json(char *dst, rt_size_t cap)
     int result = RT_EOK;
     if (!dst || cap == 0) return -RT_EINVAL;
     dst[0] = '\0';
-    vb_read_active_app(active, sizeof(active));
+    vb_runtime_active_app_snapshot(active, sizeof(active));
     result |= vb_json_appendf(dst, cap, &used, "{\"api\":");
     result |= vb_json_append_string(dst, cap, &used, VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION, 0);
     result |= vb_json_appendf(dst, cap, &used, ",\"active\":");
@@ -5106,11 +5362,29 @@ static int vb_runtime_app_status_json(char *dst, rt_size_t cap)
                               g_vb_runtime.app_last_status);
     result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.app_last_error, 0);
     result |= vb_json_appendf(dst, cap, &used,
-                              ",\"launches\":%lu,\"stops\":%lu,\"pending_reload\":%d,\"reloading\":%d,\"pending_stop\":%d,\"launcher_page\":%d,\"launcher_total\":%d,\"launcher_count\":%d,\"pending_delete\":",
+                              ",\"launches\":%lu,\"stops\":%lu,\"pending_reload\":%d,\"reloading\":%d,\"reload_phase\":",
                               (unsigned long)g_vb_runtime.app_launch_count,
                               (unsigned long)g_vb_runtime.app_stop_count,
                               g_vb_runtime.pending_reload ? 1 : 0,
-                              g_vb_runtime.reload_in_progress ? 1 : 0,
+                              g_vb_runtime.reload_in_progress ? 1 : 0);
+    result |= vb_json_append_string(dst, cap, &used, vb_runtime_reload_phase_name(), 0);
+    result |= vb_json_appendf(dst, cap, &used, ",\"host_wait\":");
+    result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.reload_host_wait, 0);
+    result |= vb_json_appendf(dst, cap, &used,
+                              ",\"reload_elapsed_ms\":%lu,\"reloads\":%lu,\"reload_failures\":%lu,\"reload_timeouts\":%lu,\"recovery_attempts\":%d,\"recovery_stage\":%d,\"recoveries\":%lu,\"last_recovery\":",
+                              (unsigned long)vb_runtime_reload_elapsed_ms(),
+                              (unsigned long)g_vb_runtime.reload_count,
+                              (unsigned long)g_vb_runtime.reload_failure_count,
+                              (unsigned long)g_vb_runtime.reload_timeout_count,
+                              g_vb_runtime.recovery_attempts,
+                              g_vb_runtime.recovery_stage,
+                              (unsigned long)g_vb_runtime.recovery_count);
+    result |= vb_json_append_string(dst, cap, &used, g_vb_runtime.recovery_last_reason, 0);
+    result |= vb_json_appendf(dst, cap, &used,
+                              ",\"watchdog_heartbeat\":%lu,\"last_reset_reason\":%lu,\"watchdog_fault\":%d,\"pending_stop\":%d,\"launcher_page\":%d,\"launcher_total\":%d,\"launcher_count\":%d,\"pending_delete\":",
+                              (unsigned long)g_vb_runtime.watchdog_heartbeat,
+                              (unsigned long)g_vb_runtime.watchdog_last_reset_reason,
+                              g_vb_runtime.fault_watchdog ? 1 : 0,
                               g_vb_runtime.pending_stop ? 1 : 0,
                               g_vb_runtime.launcher_page,
                               g_vb_runtime.launcher_total,
@@ -11747,7 +12021,7 @@ int vibeboard_lua_host_reset(void)
 {
     if (!g_vb_runtime.root) return -RT_ERROR;
     vb_pager_stop();
-    vb_codex_pet_stop();
+    if (vb_codex_pet_stop() != RT_EOK) return -RT_ETIMEOUT;
     vb_runtime_audio_release_codex_cues();
     rt_memset(g_vb_runtime.script_objects, 0, sizeof(g_vb_runtime.script_objects));
     g_vb_runtime.script_object_count = 1;
@@ -11789,10 +12063,31 @@ void vibeboard_lua_host_set_active(int active)
     g_vb_runtime.script_runtime_active = active ? 1 : 0;
 }
 
-void vibeboard_lua_host_stop(void)
+int vibeboard_lua_host_stop(void)
 {
-    vb_runtime_audio_shutdown();
-    vb_builtin_script_stop();
+    int result;
+    result = vb_runtime_audio_shutdown();
+    if (result != RT_EOK)
+    {
+        vb_safe_copy(g_vb_runtime.reload_host_wait,
+                     sizeof(g_vb_runtime.reload_host_wait), "audio");
+        return result;
+    }
+    result = vb_builtin_script_stop();
+    if (result == -RT_EBUSY)
+    {
+        vb_safe_copy(g_vb_runtime.reload_host_wait,
+                     sizeof(g_vb_runtime.reload_host_wait), "asset_loader");
+        return result;
+    }
+    if (result != RT_EOK)
+    {
+        vb_safe_copy(g_vb_runtime.reload_host_wait,
+                     sizeof(g_vb_runtime.reload_host_wait), "host_cleanup");
+        return result;
+    }
+    g_vb_runtime.reload_host_wait[0] = '\0';
+    return result;
 }
 
 static int vb_builtin_script_start(const char *script_path, const char *manifest_path)
@@ -11849,10 +12144,12 @@ static int vb_builtin_script_start(const char *script_path, const char *manifest
     return RT_EOK;
 }
 
-static void vb_builtin_script_stop(void)
+static int vb_builtin_script_stop(void)
 {
+    int result;
     vb_pager_stop();
-    vb_codex_pet_stop();
+    result = vb_codex_pet_stop();
+    if (result != RT_EOK) return result;
     vb_runtime_audio_release_codex_cues();
     g_vb_runtime.script_runtime_active = 0;
     g_vb_runtime.script_last_label = RT_NULL;
@@ -11874,6 +12171,7 @@ static void vb_builtin_script_stop(void)
     rt_memset(&g_vb_runtime.snake, 0, sizeof(g_vb_runtime.snake));
     rt_memset(&g_vb_runtime.pomodoro, 0, sizeof(g_vb_runtime.pomodoro));
     rt_memset(&g_vb_runtime.weather, 0, sizeof(g_vb_runtime.weather));
+    return RT_EOK;
 }
 
 static void vb_set_obj_bg(lv_obj_t *obj, uint32_t color)
@@ -12647,6 +12945,56 @@ static void vb_runtime_stop_current_app(void)
     rt_kprintf("[vb_runtime] app stopped active=%s\n", g_vb_runtime.active_app);
 }
 
+static void vb_runtime_reload_fail(int status, const char *message, int timed_out)
+{
+    uint32_t now = rt_tick_get();
+    g_vb_runtime.pending_reload = 0;
+    g_vb_runtime.reload_in_progress = 0;
+    g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_FAILED;
+    g_vb_runtime.reload_failure_count++;
+    g_vb_runtime.recovery_count++;
+    if (timed_out) g_vb_runtime.reload_timeout_count++;
+    vb_safe_copy(g_vb_runtime.recovery_last_reason,
+                 sizeof(g_vb_runtime.recovery_last_reason), message);
+    vb_runtime_set_app_result(status, message);
+    rt_kprintf("[vb_runtime] reload recovery required phase=%s elapsed=%lums status=%d: %s\n",
+               vb_runtime_reload_phase_name(),
+               (unsigned long)vb_runtime_reload_elapsed_ms(), status, message);
+    if (g_vb_runtime.install_fd >= 0 || g_vb_runtime.install_app[0]) return;
+    if (g_vb_runtime.recovery_attempts < VB_RUNTIME_RECOVERY_RETRY_LIMIT)
+    {
+        g_vb_runtime.recovery_attempts++;
+        g_vb_runtime.recovery_stage = g_vb_runtime.recovery_attempts;
+        g_vb_runtime.recovery_next_tick = now + rt_tick_from_millisecond(
+            VB_RUNTIME_RECOVERY_BACKOFF_MS * g_vb_runtime.recovery_attempts);
+        g_vb_runtime.pending_reload = 1;
+        rt_kprintf("[vb_runtime][recovery] scheduled retry=%d\n",
+                   g_vb_runtime.recovery_attempts);
+        return;
+    }
+    g_vb_runtime.recovery_stage = 3;
+    vb_runtime_controlled_reset(VB_RUNTIME_RESET_REASON_RELOAD_FAILURE,
+                                message ? message : "reload recovery exhausted");
+}
+
+static void vb_runtime_reload_teardown_ui(void)
+{
+    vb_runtime_clear_overlay_controls();
+    if (g_vb_runtime.root)
+    {
+        lv_obj_del(g_vb_runtime.root);
+        g_vb_runtime.root = RT_NULL;
+    }
+    vb_weather_release_image();
+    rt_memset(&g_vb_runtime.game2048, 0, sizeof(g_vb_runtime.game2048));
+    rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
+    g_vb_runtime.component_count = 0;
+    g_vb_runtime.status_label = RT_NULL;
+    g_vb_runtime.clock_label = RT_NULL;
+    g_vb_runtime.flow_label = RT_NULL;
+    g_vb_runtime.script_flow_label = RT_NULL;
+}
+
 static int vb_runtime_reload_current(void)
 {
     int result;
@@ -12655,21 +13003,93 @@ static int vb_runtime_reload_current(void)
         return gui_app_run(APP_ID);
     }
     if (g_vb_runtime.reload_in_progress) return -RT_EBUSY;
+    if (vibeboard_lua_stop_async_state() == VIBEBOARD_LUA_STOP_CLOSING)
+        return -RT_EBUSY;
     g_vb_runtime.reload_in_progress = 1;
-    vb_runtime_clear_overlay_controls();
-    vibeboard_lua_stop_app();
-    if (g_vb_runtime.root)
+    g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_LUA_CLOSE;
+    g_vb_runtime.reload_started_tick = rt_tick_get();
+    g_vb_runtime.reload_phase_started_tick = g_vb_runtime.reload_started_tick;
+    g_vb_runtime.reload_host_wait[0] = '\0';
+    g_vb_runtime.reload_count++;
+    result = vibeboard_lua_begin_stop_async();
+    if (result != RT_EOK)
     {
-        lv_obj_del(g_vb_runtime.root);
-        g_vb_runtime.root = RT_NULL;
+        vb_runtime_reload_fail(result, "could not begin Lua Runtime shutdown", 0);
+        return result;
     }
-    vb_weather_release_image();
-    g_vb_runtime.status_label = RT_NULL;
-    g_vb_runtime.clock_label = RT_NULL;
-    g_vb_runtime.flow_label = RT_NULL;
+    rt_kprintf("[vb_runtime] reload begin active=%s\n", g_vb_runtime.active_app);
+    return RT_EOK;
+}
+
+static void vb_runtime_reload_step(uint32_t now)
+{
+    int result;
+    int lua_state;
+
+    if (!g_vb_runtime.reload_in_progress) return;
+    if (g_vb_runtime.reload_phase == VB_RUNTIME_RELOAD_LUA_CLOSE)
+    {
+        lua_state = vibeboard_lua_stop_async_state();
+        if (lua_state == VIBEBOARD_LUA_STOP_CLOSING)
+        {
+            if (now - g_vb_runtime.reload_started_tick >=
+                rt_tick_from_millisecond(VB_RUNTIME_LUA_CLOSE_TIMEOUT_MS))
+            {
+                /* The old UI intentionally remains intact.  It is safer to
+                 * require a reboot than to free LVGL/PSRAM while Lua may still
+                 * be releasing it on the close worker. */
+                vb_runtime_reload_fail(-RT_ETIMEOUT,
+                                       "Lua shutdown timed out; current app retained",
+                                       1);
+            }
+            return;
+        }
+        if (lua_state != VIBEBOARD_LUA_STOP_COMPLETE)
+        {
+            vb_runtime_reload_fail(-RT_ERROR, "Lua shutdown entered an invalid state", 0);
+            return;
+        }
+        g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_HOST_STOP;
+        g_vb_runtime.reload_phase_started_tick = now;
+    }
+
+    if (g_vb_runtime.reload_phase == VB_RUNTIME_RELOAD_HOST_STOP)
+    {
+        result = vibeboard_lua_finish_stop_async();
+        if (result == -RT_EBUSY)
+        {
+            if (now - g_vb_runtime.reload_phase_started_tick >=
+                rt_tick_from_millisecond(VB_RUNTIME_HOST_STOP_TIMEOUT_MS))
+            {
+                vb_runtime_reload_fail(-RT_ETIMEOUT,
+                                       "Runtime host shutdown timed out; current app retained",
+                                       1);
+            }
+            return;
+        }
+        if (result != RT_EOK)
+        {
+            vb_runtime_reload_fail(result, "Lua host shutdown failed; current app retained", 0);
+            return;
+        }
+    }
+
+    g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_TEARDOWN;
+    vb_runtime_reload_teardown_ui();
+    g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_LOAD;
     result = vb_load_active_package();
     g_vb_runtime.reload_in_progress = 0;
-    return result;
+    g_vb_runtime.reload_started_tick = 0;
+    g_vb_runtime.reload_phase_started_tick = 0;
+    if (result != RT_EOK)
+    {
+        vb_runtime_reload_fail(result, "reload completed with app startup failure", 0);
+        return;
+    }
+    g_vb_runtime.reload_phase = VB_RUNTIME_RELOAD_IDLE;
+    g_vb_runtime.recovery_attempts = 0;
+    g_vb_runtime.recovery_stage = 0;
+    g_vb_runtime.recovery_next_tick = 0;
 }
 
 static void vb_runtime_request_reload(void)
@@ -13690,7 +14110,7 @@ static int vb_runtime_status_command(void)
 {
     char active[VB_MAX_APP_ID];
     int fs = vb_prepare_filesystem();
-    vb_read_active_app(active, sizeof(active));
+    vb_runtime_active_app_snapshot(active, sizeof(active));
     vb_runtime_gpio_refresh();
     rt_kprintf("[vb_runtime] api=%s\n", VIBEBOARD_RUNTIME_API_VERSION);
     rt_kprintf("[vb_runtime] root=%s\n", VIBEBOARD_APP_ROOT);
@@ -14089,6 +14509,21 @@ static void vb_timer_cb(lv_timer_t *timer)
     uint32_t now = rt_tick_get();
     int sensor_refreshed = 0;
     (void)timer;
+    /* This is the watchdog's independent GUI heartbeat.  It is deliberately
+     * first so a blocked reload/cleanup path is observable from another RTOS
+     * thread without touching LVGL from that thread. */
+    if (!g_vb_runtime.fault_watchdog) g_vb_runtime.watchdog_heartbeat = now;
+    if (g_vb_runtime.fault_reload_once)
+    {
+        g_vb_runtime.fault_reload_once = 0;
+        vb_runtime_reload_fail(-RT_ERROR, "injected reload failure", 0);
+        return;
+    }
+    if (g_vb_runtime.reload_in_progress)
+    {
+        vb_runtime_reload_step(now);
+        return;
+    }
     if (g_vb_runtime.pending_stop)
     {
         g_vb_runtime.pending_stop = 0;
@@ -14103,8 +14538,19 @@ static void vb_timer_cb(lv_timer_t *timer)
     }
     if (g_vb_runtime.pending_reload)
     {
-        g_vb_runtime.pending_reload = 0;
-        vb_runtime_reload_current();
+        if (!g_vb_runtime.recovery_next_tick ||
+            (int32_t)(now - g_vb_runtime.recovery_next_tick) >= 0)
+        {
+            int result;
+            g_vb_runtime.pending_reload = 0;
+            result = vb_runtime_reload_current();
+            if (result == -RT_EBUSY)
+            {
+                g_vb_runtime.pending_reload = 1;
+                g_vb_runtime.recovery_next_tick = now +
+                    rt_tick_from_millisecond(250);
+            }
+        }
         return;
     }
     vb_runtime_poll_home_key(now);
@@ -14238,6 +14684,7 @@ static void on_start(void)
 {
     rt_memset(&g_vb_runtime, 0, sizeof(g_vb_runtime));
     vb_runtime_state_defaults();
+    g_vb_runtime.watchdog_last_reset_reason = HAL_Get_backup(RTC_BACKUP_MODULE_RECORD);
     g_vb_runtime_state_initialized = 1;
     g_vb_runtime.running = 1;
     g_vb_runtime.reload_in_progress = 1;
@@ -14248,6 +14695,8 @@ static void on_start(void)
     vb_load_active_package();
     g_vb_runtime.reload_in_progress = 0;
     g_vb_runtime.timer = lv_timer_create(vb_timer_cb, VB_TIMER_PERIOD_MS, RT_NULL);
+    g_vb_runtime.watchdog_heartbeat = rt_tick_get();
+    vb_runtime_watchdog_start();
     rt_kprintf("[vb_runtime] start api=%s root=%s\n", VIBEBOARD_RUNTIME_API_VERSION, VIBEBOARD_APP_ROOT);
 }
 
@@ -14341,6 +14790,34 @@ static int vb_runtime_reload(int argc, char **argv)
     return RT_EOK;
 }
 MSH_CMD_EXPORT(vb_runtime_reload, reload VibeBoard runtime app);
+
+static int vb_runtime_recovery_test(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        rt_kprintf("usage: vb_runtime_recovery_test retry|watchdog\n");
+        return -RT_EINVAL;
+    }
+    if (rt_strcmp(argv[1], "retry") == 0)
+    {
+        g_vb_runtime.recovery_attempts = 0;
+        g_vb_runtime.fault_reload_once = 1;
+        rt_kprintf("[vb_runtime][recovery] retry fault armed\n");
+        return RT_EOK;
+    }
+    if (rt_strcmp(argv[1], "watchdog") == 0)
+    {
+        if (g_vb_runtime.install_fd >= 0 || g_vb_runtime.install_app[0])
+            return -RT_EBUSY;
+        g_vb_runtime.watchdog_heartbeat = rt_tick_get();
+        g_vb_runtime.fault_watchdog = 1;
+        rt_kprintf("[vb_runtime][recovery] watchdog fault armed timeout=%dms\n",
+                   VB_RUNTIME_WATCHDOG_TIMEOUT_MS);
+        return RT_EOK;
+    }
+    return -RT_EINVAL;
+}
+MSH_CMD_EXPORT(vb_runtime_recovery_test, inject Runtime recovery test faults);
 
 static int vb_runtime_select(int argc, char **argv)
 {

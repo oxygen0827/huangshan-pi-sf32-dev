@@ -278,6 +278,8 @@ CODEX_PET_BOARD=<CoreBluetooth peripheral identifier> \
 Codex Pet 图库、签名 `.hpet`、macOS Companion 深链、本地 API、一键部署和恢复流程详见
 [`docs/codex-pet-one-click-deploy.md`](docs/codex-pet-one-click-deploy.md)。启动唯一 Monitor 后
 可直接打开 `http://127.0.0.1:8790/` 浏览和部署宠物；网页不会直接持有 BLE 或 Codex 凭证。
+面向普通 Mac 用户的自包含 DMG、菜单栏、登录启动、域名、Developer ID 和公证流程见
+[`docs/macos-companion-release.md`](docs/macos-companion-release.md)。
 
 ### 验证与排障
 
@@ -381,6 +383,7 @@ docs/                    开发板、上游来源和 bring-up 记录
 - [Runtime App 开发经验记录](docs/runtime-app-development-notes.md)
 - [Codex Pet Bridge、任务状态与审批协议](docs/codex-pet-bridge.md)
 - [Codex Pet 音频、TTS 与唤醒词评估](docs/codex-pet-audio-evaluation.md)
+- [VibeBoard Companion macOS 发布](docs/macos-companion-release.md)
 - [黄山派 LVGL AI 生成约束](docs/ai-ui/lvgl-system-contract.md)
 - [上游仓库记录](docs/upstream.md)
 - [开发板 bring-up 记录](docs/board-bringup.md)

@@ -1,0 +1,10 @@
+{
+  "name": "vibeboard-companion-node-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned image conversion dependencies bundled with VibeBoard Companion.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "sharp": "0.34.5"
+  }
+}

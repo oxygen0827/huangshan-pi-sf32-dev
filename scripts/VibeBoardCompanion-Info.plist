@@ -35,5 +35,11 @@
   <true/>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>连接 VibeBoard 并部署 Codex Pet。</string>
+  <key>VibeBoardPublicSiteURL</key>
+  <string></string>
+  <key>VibeBoardUpdateManifestURL</key>
+  <string></string>
+  <key>VibeBoardFirmwareManifestURL</key>
+  <string></string>
 </dict>
 </plist>

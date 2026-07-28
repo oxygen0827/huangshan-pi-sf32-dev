@@ -1,0 +1,7 @@
+bleak==3.0.2
+pyinstaller==6.21.0
+pyobjc-core==12.2.1
+pyobjc-framework-Cocoa==12.2.1
+pyobjc-framework-CoreBluetooth==12.2.1
+pyobjc-framework-libdispatch==12.2.1
+pyserial==3.5

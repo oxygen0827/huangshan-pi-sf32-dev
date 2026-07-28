@@ -18,6 +18,7 @@
 #define VB_LUA_OBJECT_NAME_MAX 24
 #define VB_LUA_APP_DIR_MAX 160
 #define VB_LUA_OBJECT_METATABLE "vibeboard.lvgl.object"
+#define VB_LUA_STOP_THREAD_STACK 3072
 
 typedef struct
 {
@@ -32,6 +33,7 @@ typedef struct
 typedef struct
 {
     lua_State *state;
+    lua_State *closing_state;
     rt_size_t memory_used;
     rt_size_t memory_peak;
     rt_size_t memory_limit;
@@ -39,11 +41,11 @@ typedef struct
     uint32_t instruction_limit;
     uint32_t object_sequence;
     char app_dir[VB_LUA_APP_DIR_MAX];
+    volatile int stop_async_state;
+    rt_thread_t stop_thread;
 } vb_lua_runtime_t;
 
 static vb_lua_runtime_t g_vb_lua;
-
-void vibeboard_lua_stop_app(void);
 
 static void vb_lua_copy(char *dst, rt_size_t cap, const char *src)
 {
@@ -543,6 +545,11 @@ int vibeboard_lua_start_script(const char *script_path, const char *manifest_pat
     int status;
     (void)manifest_path;
     if (!script_path) return -RT_EINVAL;
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
+    {
+        rt_kprintf("[vb_runtime][lua] start blocked while close is pending\n");
+        return -RT_EBUSY;
+    }
 
     vibeboard_lua_stop_app();
     if (vibeboard_lua_host_reset() != RT_EOK) return -RT_ERROR;
@@ -585,13 +592,93 @@ int vibeboard_lua_start_script(const char *script_path, const char *manifest_pat
     return RT_EOK;
 }
 
+static void vb_lua_stop_worker(void *parameter)
+{
+    lua_State *state = (lua_State *)parameter;
+
+    if (state) lua_close(state);
+    g_vb_lua.closing_state = RT_NULL;
+    g_vb_lua.stop_thread = RT_NULL;
+    g_vb_lua.stop_async_state = VIBEBOARD_LUA_STOP_COMPLETE;
+}
+
+int vibeboard_lua_begin_stop_async(void)
+{
+    rt_thread_t thread;
+
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
+    {
+        return -RT_EBUSY;
+    }
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_COMPLETE)
+    {
+        return RT_EOK;
+    }
+    if (!g_vb_lua.state)
+    {
+        g_vb_lua.stop_async_state = VIBEBOARD_LUA_STOP_COMPLETE;
+        return RT_EOK;
+    }
+
+    g_vb_lua.closing_state = g_vb_lua.state;
+    g_vb_lua.state = RT_NULL;
+    g_vb_lua.stop_async_state = VIBEBOARD_LUA_STOP_CLOSING;
+    thread = rt_thread_create("vbluacls", vb_lua_stop_worker, g_vb_lua.closing_state,
+                              VB_LUA_STOP_THREAD_STACK,
+                              RT_THREAD_PRIORITY_MIDDLE + 8,
+                              RT_THREAD_TICK_DEFAULT);
+    if (!thread)
+    {
+        g_vb_lua.state = g_vb_lua.closing_state;
+        g_vb_lua.closing_state = RT_NULL;
+        g_vb_lua.stop_async_state = VIBEBOARD_LUA_STOP_IDLE;
+        return -RT_ENOMEM;
+    }
+    g_vb_lua.stop_thread = thread;
+    rt_thread_startup(thread);
+    return RT_EOK;
+}
+
+int vibeboard_lua_stop_async_state(void)
+{
+    return g_vb_lua.stop_async_state;
+}
+
+int vibeboard_lua_finish_stop_async(void)
+{
+    int result;
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
+    {
+        return -RT_EBUSY;
+    }
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_IDLE && g_vb_lua.state)
+    {
+        return -RT_EBUSY;
+    }
+
+    result = vibeboard_lua_host_stop();
+    if (result != RT_EOK) return result;
+    rt_memset(&g_vb_lua, 0, sizeof(g_vb_lua));
+    return RT_EOK;
+}
+
 void vibeboard_lua_stop_app(void)
 {
+    if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
+    {
+        /* Runtime will finish host teardown after the worker acknowledges the
+         * close.  A synchronous caller must not reintroduce a GUI deadlock. */
+        return;
+    }
     if (g_vb_lua.state)
     {
         lua_close(g_vb_lua.state);
         g_vb_lua.state = RT_NULL;
     }
-    vibeboard_lua_host_stop();
+    if (vibeboard_lua_host_stop() != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime][lua] host shutdown did not finish\n");
+        return;
+    }
     rt_memset(&g_vb_lua, 0, sizeof(g_vb_lua));
 }

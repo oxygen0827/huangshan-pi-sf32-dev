@@ -99,7 +99,9 @@ node scripts/codex_pet_web_test.js
 服务只绑定 loopback。带 Origin 的请求必须来自当前 Companion 的精确端口，或来自
 `VIBEBOARD_COMPANION_ORIGINS` 明确列出的公开站点；写请求还必须使用 Bearer token，不使用
 Cookie。远端只能提交已批准 Petdex slug，不能提交任意 URL。深链若带 digest，构建结果必须
-完全匹配，否则安装失败。
+完全匹配，否则安装失败。公网 HTTPS 页面调用固定 loopback 地址时，OPTIONS 只对已配置的精确
+Origin 返回 Private Network Access 许可，不能用 `*` 放宽。网页服务在首次 BLE 扫描前启动，
+因此板子关机、首次配对或扫描超时时也能立即显示设置和诊断页面。
 
 ## macOS App 与深链
 
@@ -113,8 +115,16 @@ open ".local/VibeBoard Companion.app"
 App 注册 `vibeboard://`，日志写入 `~/.vibeboard/companion/companion.log`，不会把长期服务的
 stdout 留给可能关闭的 Terminal pipe。默认是 ad-hoc 签名；发布构建需要设置
 `CODEX_PET_CODESIGN_IDENTITY`，并在产物流水线中完成 Developer ID 签名、公证和 stapling。
-当前开发 App 从同一仓库使用 `.venv` 和脚本；面向终端用户的发行流水线还必须把 Python
-runtime、依赖和 Companion 资源打入安装包，不能把源码 clone 当成消费级安装方式。
+App 已把 Python 3.12 Agent、Bleak/CoreBluetooth、Node、Sharp、Hooks、网页和 Runtime 模板
+打入自身；安装后的用户不需要仓库、`.venv`、Node 或终端。菜单栏提供状态、图库、重新配对、
+登录启动、更新检查和诊断日志，Agent 异常退出后会有界重启。
+
+构建会产出 `.app`、架构对应的 DMG 和 SHA-256。正式发布的域名、Developer ID、公证和更新
+manifest 配置见 `docs/macos-companion-release.md`。离线包校验：
+
+```sh
+./scripts/verify_codex_pet_companion_app.sh
+```
 
 ## 安装恢复
 
@@ -150,6 +160,7 @@ node scripts/build_hpet_petdex.js --self-test
 .venv/bin/python scripts/codex_pet_bridge.py --self-test
 .venv/bin/python scripts/runtime_transport.py --self-test
 .venv/bin/python scripts/runtime_architecture_audit.py --self-test
+./scripts/verify_codex_pet_companion_app.sh
 ```
 
 真机至少覆盖：首次配对、断线重连、每阶段断线、错误 ACK、重启、abort、上一宠物回滚、连续

@@ -222,7 +222,6 @@ typedef struct
     lv_obj_t *right_eye;
     lv_obj_t *mouth;
     lv_obj_t *status_label;
-    lv_obj_t *pet_name_label;
     lv_obj_t *transcript_label;
     lv_obj_t *task_label;
     lv_obj_t *quota_label;
@@ -615,26 +614,32 @@ static int vb_pet_legacy_state_index(int asset_state)
     }
 }
 
-static void vb_pet_stop_preload_worker(void)
+static int vb_pet_stop_preload_worker(void)
 {
     if (g_pet.loader_thread)
     {
         g_pet.loader_stop = 1;
         if (g_pet.loader_sem) rt_sem_release(g_pet.loader_sem);
-        while (g_pet.loader_thread) rt_thread_mdelay(10);
+        if (g_pet.loader_thread)
+        {
+            /* The loader can be inside SD/zlib work.  Runtime polls this
+             * acknowledgement from its GUI timer instead of blocking LVGL. */
+            return -RT_EBUSY;
+        }
     }
     if (g_pet.loader_sem)
     {
         rt_sem_delete(g_pet.loader_sem);
         g_pet.loader_sem = RT_NULL;
     }
+    return RT_EOK;
 }
 
-static void vb_pet_release_preloaded_assets(void)
+static int vb_pet_release_preloaded_assets(void)
 {
     int bank;
     int frame;
-    vb_pet_stop_preload_worker();
+    if (vb_pet_stop_preload_worker() != RT_EOK) return -RT_EBUSY;
     vb_pet_clear_custom_state();
     for (bank = 0; bank < VB_PET_PRELOAD_CACHE_BANKS; bank++)
     {
@@ -650,6 +655,7 @@ static void vb_pet_release_preloaded_assets(void)
     g_pet.preloaded_data = RT_NULL;
     g_pet.preloaded_data_size = 0;
     rt_memset(g_pet.preloaded_frames, 0, sizeof(g_pet.preloaded_frames));
+    return RT_EOK;
 }
 
 static int vb_pet_preload_segment_valid(uint32_t offset, uint32_t length,
@@ -928,7 +934,7 @@ static int vb_pet_preload_assets(void)
         g_pet.active_cache_bank = 0;
         result = vb_pet_start_preload_worker();
     }
-    if (!result) vb_pet_release_preloaded_assets();
+    if (!result) (void)vb_pet_release_preloaded_assets();
     else
         rt_kprintf("[vb_runtime][codex_pet] preload v%d states=%d cache=%lu max_frames=%d\n",
                    g_pet.preload_version,
@@ -1509,8 +1515,6 @@ static void vb_pet_render(void)
     lv_label_set_text(g_pet.status_label, vb_pet_status_text());
     lv_obj_set_style_text_color(g_pet.status_label, lv_color_hex(color),
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
-    if (g_pet.pet_name_label)
-        lv_label_set_text(g_pet.pet_name_label, g_pet.pet_name[0] ? g_pet.pet_name : "Rocky");
     if (g_pet.error[0]) task_text = g_pet.error;
     else if (g_pet.approval_pending)
     {
@@ -1956,7 +1960,7 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
 {
     lv_obj_t *label;
     if (!root || !ops || !ops->send_action) return -RT_EINVAL;
-    vb_codex_pet_stop();
+    if (vb_codex_pet_stop() != RT_EOK) return -RT_EBUSY;
     rt_memset(&g_pet, 0, sizeof(g_pet));
     g_pet.root = root;
     g_pet.ops = *ops;
@@ -2065,12 +2069,6 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
         else vb_pet_update_rocky(0);
     }
 
-    g_pet.pet_name_label = vb_pet_label(root,
-        g_pet.pet_name[0] ? g_pet.pet_name : "Rocky", 0x94a3b8);
-    lv_obj_set_width(g_pet.pet_name_label, 120);
-    lv_obj_set_style_text_align(g_pet.pet_name_label, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(g_pet.pet_name_label, 240, 36);
-
     g_pet.status_label = vb_pet_label(root, "Disconnected", 0x94a3b8);
     lv_obj_set_width(g_pet.status_label, 330);
     lv_obj_set_style_text_align(g_pet.status_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -2115,24 +2113,36 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     return RT_EOK;
 }
 
-void vb_codex_pet_stop(void)
+int vb_codex_pet_stop(void)
 {
     vb_pet_reset_flow_queue(0);
     if (!g_pet.active)
     {
         vb_pet_publish_status();
-        return;
+        return RT_EOK;
     }
     if ((g_pet.state == VB_PET_RECORDING || g_pet.state == VB_PET_TRANSCRIBING) &&
         g_pet.ops.voice_clear) g_pet.ops.voice_clear();
+    {
+        int release_result = vb_pet_release_preloaded_assets();
+        if (release_result == -RT_EBUSY) return release_result;
+        if (release_result != RT_EOK)
+        {
+            vb_pet_copy(g_pet.error, sizeof(g_pet.error), "Asset loader shutdown failed");
+            g_pet.state = VB_PET_ERROR;
+            g_pet.dirty = 1;
+            vb_pet_publish_status();
+            return release_result;
+        }
+    }
     g_pet.active = 0;
     if (g_pet.root) lv_obj_remove_event_cb(g_pet.root, vb_pet_touch_event);
     if (g_pet.ops.rgb_set) (void)g_pet.ops.rgb_set("off");
     vb_pet_detach_custom_image();
-    vb_pet_release_preloaded_assets();
     vb_pet_release_rocky_frames();
     rt_memset(&g_pet, 0, sizeof(g_pet));
     vb_pet_publish_status();
+    return RT_EOK;
 }
 
 static void vb_pet_apply_flow(const char *channel, uint32_t sequence,

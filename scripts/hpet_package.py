@@ -16,10 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from companion_paths import companion_root
 from runtime_package import load_package_from_dir, validate_package
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = companion_root()
 CODEX_PET_APP_DIR = ROOT_DIR / "scripts" / "runtime_apps" / "codex_pet"
 CRYPTO_SCRIPT = ROOT_DIR / "scripts" / "hpet_crypto.js"
 CONVERTER_SCRIPT = ROOT_DIR / "scripts" / "build_hpet_petdex.js"

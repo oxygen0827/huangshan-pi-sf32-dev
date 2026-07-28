@@ -30,10 +30,10 @@
 
 typedef struct
 {
-    int playing;
+    volatile int playing;
     int ready;
     int suspended;
-    int stop_requested;
+    volatile int stop_requested;
     int last_error;
     int volume;
     uint32_t sequence;
@@ -46,7 +46,7 @@ typedef struct
     int tone_requested;
     int tone_continuous;
     int capture_reserved;
-    rt_thread_t worker;
+    volatile rt_thread_t worker;
 #if VB_AUDIO_BUILT
     audio_client_t client;
 #endif
@@ -691,9 +691,15 @@ int vb_runtime_audio_format_text(const char *selector, char *dst, rt_size_t cap)
     return 0;
 }
 
-void vb_runtime_audio_shutdown(void)
+int vb_runtime_audio_shutdown(void)
 {
+    if (g_vb_audio.worker || g_vb_audio.playing)
+    {
+        g_vb_audio.stop_requested = 1;
+        return -RT_EBUSY;
+    }
     vb_runtime_audio_release_codex_cues();
+    return RT_EOK;
 }
 
 static int vb_runtime_audio_msh(int argc, char **argv)

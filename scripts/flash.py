@@ -140,6 +140,12 @@ def validate_artifacts(build_dir: Path, files: list[FlashFile]) -> None:
 
 
 def find_sftool() -> str:
+    bundled = os.environ.get("VIBEBOARD_SFTOOL", "").strip()
+    if bundled:
+        candidate = Path(bundled).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        raise SystemExit(f"VIBEBOARD_SFTOOL is not an executable file: {candidate}")
     found = shutil.which("sftool")
     if found:
         return found

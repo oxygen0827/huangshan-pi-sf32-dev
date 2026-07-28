@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from codex_pet_appserver import CodexAppServerClient, CodexAppServerError, public_error, resolve_codex_bin
+from companion_paths import companion_root
+from companion_firmware import FirmwareManager, FirmwareManagerError
+from companion_diagnostics import create_support_bundle
+from companion_diagnostics import run_self_test as diagnostics_self_test
+from companion_firmware import run_self_test as firmware_self_test
+from firmware_release import FirmwareReleaseError
 from hpet_package import (
     DEFAULT_CACHE_DIR,
     DEFAULT_KEY_DIR,
@@ -38,7 +44,7 @@ from hpet_package import (
 from runtime_transport import load_ble_cache, save_ble_cache
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = companion_root()
 WEB_PATH = ROOT_DIR / "scripts" / "codex_pet_web.html"
 PETDEX_MANIFEST_URL = "https://petdex.dev/api/manifest"
 PETDEX_CONFIG_PATH = ROOT_DIR / "scripts" / "petdex_pets.json"
@@ -585,10 +591,17 @@ class CodexHookBinding:
         self.hooks_path = hooks_path.expanduser()
         self.python_path = (python_path or Path(sys.executable)).resolve()
         self.hook_script = (ROOT_DIR / "scripts" / "codex_pet_hook.py").resolve()
+        configured_agent = os.environ.get("VIBEBOARD_COMPANION_AGENT")
+        self.agent_path = Path(configured_agent).expanduser().resolve() if configured_agent else None
         self.trust_probe = trust_probe
 
     @property
     def command(self) -> str:
+        if self.agent_path is not None:
+            return (
+                f"{shlex.quote(str(self.agent_path))} --hook "
+                f"{shlex.quote(str(self.hook_script))} --companion-managed"
+            )
         return f"{shlex.quote(str(self.python_path))} {shlex.quote(str(self.hook_script))} --companion-managed"
 
     def _is_managed(self, hook: object) -> bool:
@@ -739,6 +752,7 @@ class CompanionState:
         state_dir: Path = DEFAULT_STATE_DIR,
         hooks_path: Path = DEFAULT_HOOKS_PATH,
         ble_cache: Path | None = None,
+        workspace: Path = ROOT_DIR,
     ) -> None:
         self.loop = loop
         self.device = device
@@ -749,11 +763,12 @@ class CompanionState:
         self.hooks = CodexHookBinding(hooks_path)
         self.hooks.trust_probe = CodexHookTrustProbe(
             loop=loop,
-            workspace=ROOT_DIR,
+            workspace=workspace,
             hooks_path=self.hooks.hooks_path,
             hook_script=self.hooks.hook_script,
         )
         self.ble_cache = ble_cache
+        self.firmware = FirmwareManager(self.state_dir, root=ROOT_DIR)
         self.jobs: dict[str, CompanionJob] = {}
         self._jobs_lock = threading.Lock()
         self._install_lock: asyncio.Lock | None = None
@@ -785,6 +800,7 @@ class CompanionState:
         return {
             "companion": {"connected": True, "version": 1},
             "codex": self.hooks.status(),
+            "firmware": self.firmware.status(),
             "board": {
                 "connected": bool(self.device.connected),
                 "name": cache.get("name") or "VibeBoard",
@@ -821,6 +837,74 @@ class CompanionState:
             cutoff = time.time() - 3600
             self.jobs = {key: value for key, value in self.jobs.items() if value.created_at >= cutoff}
         return job
+
+    def firmware_available(self) -> dict[str, object]:
+        return self.firmware.available()
+
+    def start_firmware_job(self, *, version: str | None = None, rollback: bool = False) -> CompanionJob:
+        job = self._new_job("firmware_rollback" if rollback else "firmware_update", "firmware")
+
+        def progress(stage: str, percent: int, message: str) -> None:
+            job.update(stage=stage, progress=percent, message=message)
+            job.append(message)
+
+        async def run() -> None:
+            job.status = "running"
+            try:
+                if rollback:
+                    result = await asyncio.to_thread(self.firmware.rollback, progress)
+                else:
+                    result = await asyncio.to_thread(self.firmware.update, version, progress)
+                job.result = result
+                job.status = "done"
+                job.update(stage="complete", progress=100, message="Firmware update completed")
+            except (FirmwareManagerError, FirmwareReleaseError) as exc:
+                job.status = "failed"
+                job.update(stage="failed", message=str(exc))
+                job.append(f"ERROR {type(exc).__name__}: {exc}")
+            except Exception as exc:
+                job.status = "failed"
+                job.update(stage="failed", message=str(exc))
+                job.append(f"ERROR {type(exc).__name__}: {exc}")
+
+        asyncio.run_coroutine_threadsafe(run(), self.loop)
+        return job
+
+    def start_support_bundle_job(self) -> CompanionJob:
+        job = self._new_job("support_bundle", "support")
+
+        async def run() -> None:
+            job.status = "running"
+            job.update(stage="collect", progress=15, message="Collecting redacted board and Companion diagnostics")
+            try:
+                bundle = await create_support_bundle(self)
+                job.result = {
+                    "bundlePath": bundle.name,
+                    "downloadPath": f"/v1/support/bundles/{job.job_id}",
+                    "bytes": bundle.stat().st_size,
+                }
+                job.status = "done"
+                job.update(stage="complete", progress=100, message="Support bundle is ready")
+            except Exception as exc:
+                job.status = "failed"
+                job.update(stage="failed", message=str(exc))
+                job.append(f"ERROR {type(exc).__name__}: {exc}")
+
+        asyncio.run_coroutine_threadsafe(run(), self.loop)
+        return job
+
+    def support_bundle(self, job_id: str) -> Path | None:
+        job = self.get_job(job_id)
+        if job is None or job.kind != "support_bundle" or job.status != "done" or not isinstance(job.result, dict):
+            return None
+        value = job.result.get("bundlePath")
+        if not isinstance(value, str) or not re.fullmatch(r"vibeboard-support-[0-9]{8}-[0-9]{6}[.]zip", value):
+            return None
+        root = (self.state_dir / "support").resolve()
+        candidate = (root / value).resolve()
+        if candidate.parent != root:
+            return None
+        return candidate if candidate.is_file() else None
 
     def start_package_job(self, slug: str, *, install: bool, expected_digest: str | None = None) -> CompanionJob:
         if expected_digest is not None and SAFE_DIGEST.fullmatch(expected_digest) is None:
@@ -1066,6 +1150,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
         self.send_header("access-control-allow-headers", "authorization, content-type")
         self.send_header("access-control-max-age", "600")
+        if self.headers.get("access-control-request-private-network", "").lower() == "true":
+            self.send_header("access-control-allow-private-network", "true")
+            self.send_header("vary", "origin, access-control-request-private-network")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -1102,12 +1189,29 @@ class CompanionHandler(BaseHTTPRequestHandler):
             if path == "/v1/status":
                 self._json(200, self.state.status())
                 return
+            if path == "/v1/firmware/status":
+                self._json(200, self.state.status()["firmware"])
+                return
+            if path == "/v1/firmware/available":
+                self._json(200, self.state.firmware_available())
+                return
             if path.startswith("/v1/jobs/"):
                 job = self.state.get_job(urllib.parse.unquote(path.removeprefix("/v1/jobs/")))
                 if job is None:
                     self._error(404, "job not found")
                     return
                 self._json(200, job.to_dict())
+                return
+            support_match = re.fullmatch(r"/v1/support/bundles/([a-z0-9-]+)", path)
+            if support_match:
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
+                bundle = self.state.support_bundle(support_match.group(1))
+                if bundle is None or not bundle.is_file():
+                    self._error(404, "support bundle not ready")
+                    return
+                self._send(200, bundle.read_bytes(), "application/zip", download=bundle.name)
                 return
             self._error(404, "not found")
         except (CompanionError, HpetError, ValueError) as exc:
@@ -1130,6 +1234,24 @@ class CompanionHandler(BaseHTTPRequestHandler):
             if path == "/v1/board/pair":
                 self._read_json()
                 job = self.state.pair_board()
+                self._json(202, {"jobId": job.job_id})
+                return
+            if path == "/v1/firmware/update":
+                body = self._read_json()
+                version = body.get("version")
+                if version is not None and not isinstance(version, str):
+                    raise CompanionError("firmware version must be a string")
+                job = self.state.start_firmware_job(version=version)
+                self._json(202, {"jobId": job.job_id})
+                return
+            if path == "/v1/firmware/rollback":
+                self._read_json()
+                job = self.state.start_firmware_job(rollback=True)
+                self._json(202, {"jobId": job.job_id})
+                return
+            if path == "/v1/support/bundle":
+                self._read_json()
+                job = self.state.start_support_bundle_job()
                 self._json(202, {"jobId": job.job_id})
                 return
             if path == "/v1/codex/bind":
@@ -1217,6 +1339,8 @@ async def _standalone(port: int, open_browser: bool) -> None:
 
 
 def run_self_test() -> None:
+    firmware_self_test()
+    diagnostics_self_test()
     assert parse_install_url("vibeboard://pet/install?source=petdex&slug=shinchan") == "shinchan"
     for bad in ("https://pet/install?source=petdex&slug=shinchan", "vibeboard://pet/install?source=other&slug=shinchan", "vibeboard://pet/install?source=petdex&slug=../bad"):
         try:

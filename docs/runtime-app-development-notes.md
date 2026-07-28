@@ -1684,6 +1684,262 @@ commit-uncertain，不能用同一策略盲目重装。
 SOC 字段，不能从单次端电压臆算百分比。完整 Runtime deep check、Web、Bridge、transport 和架构
 审计均通过。
 
+### 问题三十四：BLE 广播停止后没有板端自愈
+
+#### 现象与证据
+
+2026-07-26/27，Companion 反复报告找不到固定的 `VibeBoard` 外设；按设备名和 Runtime
+专用 Service UUID 做独立扫描均为 0 个匹配，而电脑蓝牙可以发现其他设备。打开串口会复位板子，
+复位后的 `vb_runtime_ble_status` 立即显示 `init=1 power=1 service=1 adv=1`，并重新被扫描到，
+说明射频、服务注册和广告数据本身正常，故障发生在运行后广告状态丢失。
+
+#### 根因
+
+板端只在 `BLE_GAP_DISCONNECTED_IND` 到达时投递广播重启；广告开始失败或广告被底层停止时，
+`vb_ble_advertising_event()` 只更新诊断字段，没有安排恢复。若控制器漏发断连事件，
+`link_active` 还会一直为 1，既没有广告也不会重试。此前断连处理还会无条件清掉
+`link_active`，使非主连接的断开事件也能干扰当前主机链路。已有的 `is_auto_restart=1` 只能覆盖
+SDK 能观察到的正常断连，不能覆盖启动失败、控制器复位或事件丢失。
+
+#### 修复与回归
+
+- 广告 started/stopped 回调只写串口诊断；失败或停止会向 BLE worker 投递恢复意图，绝不在回调
+  中直接重入广告 API。
+- BLE worker 每 1 秒做健康检查，通过 `connection_manager_get_connection_state()` 校验活动连接
+  索引；超过 5 秒仍无效的连接会清理 host/Notify 状态并恢复广播。
+- 广播恢复受 `power_on/service_ready/link_active/connected/advertising` 五项门闩保护，
+  有效连接期间不重启、不抢占 GATT；重复恢复请求会被限速重试。
+- 断连按 `conn_idx` 隔离；只有当前 host/raw 链路的断连才清理 host 状态并安排广播恢复，
+  非主连接只清理自己的 MTU/安全请求记录。
+- 架构审计固定检查健康检查、连接索引和“不在有效连接期间重启广告”的门闩。
+- 重启后的串口状态必须看到 `adv=1 starts>=1`；主机侧 fresh scan 必须重新找到 `VibeBoard`，
+  建连后保持 `secure=1`、Notify 正常，断开后在有界时间内再次发现广告。
+
+2026-07-27 实机回归：最终固件编译、烧录均成功；复位后串口显示
+`service=1 adv=1 starts=1 stops=0`。macOS fresh scan 找到固定身份
+`22614720-A687-453C-8D11-DD5297EA6FB6`；
+30 秒连接保持期间每 3 秒一次的 9 次 `status` 均返回 `secure=1`，客户端主动断开后再次扫描仍能
+找到 `VibeBoard`。Companion 随后在 6.6 秒内连上，`/v1/status` 返回 `board.connected=true`、
+`runtimeApi=vibeboard-huangshan-runtime/v1`、`bleInstall=true`。架构审计、Runtime transport、
+BLE CLI、Bridge 和 Companion 自测通过。
+
+### 问题三十五：macOS Companion 仍依赖源码环境，且首次蓝牙扫描阻塞网页
+
+#### 现象与证据
+
+旧 `.app` 只是一层 Swift 启动器：它从 App 所在目录反推仓库，再运行 `.venv/bin/python` 和
+`scripts/codex_pet_bridge.py`。离开开发机或删除源码后必然启动失败，宠物转换还要求用户预装
+Node/Sharp。把 Python 初步打包后，发布校验又发现 ad-hoc Hardened Runtime 会因 Agent 与内置
+Python framework 的 Team ID 不同而拒绝 `dlopen`。
+
+真实启动测试还发现 Agent 进程存在但 `127.0.0.1:8790` 长时间拒绝连接。日志停在
+`[codex_pet][ble] connect attempt`：monitor 先等待最长约 170 秒的 BLE 连接，完成后才创建 HTTP
+服务。板子关机或首次配对时，新用户会把正常扫描误判为 Companion 已崩溃。
+
+#### 根因
+
+- 消费级 App 与开发仓库没有形成资源边界，Hooks 命令也固定引用 Python 和源码脚本。
+- PyInstaller 的 Python framework、PyObjC/CoreBluetooth 与 Node/Sharp 都属于嵌套可执行依赖，
+  必须按签名类型采用一致的签名策略。
+- `run_service()` 把 UI 服务错误地放在设备 ready gate 之后；BLE ready 是硬件状态，不应成为本地
+  设置页的可用性前置条件。
+- 公网域名到 loopback API 还涉及精确 CORS、Private Network Access 预检和短期 capability，
+  只注册一个深链不足以形成完整网页交接。
+
+#### 修复与回归
+
+- 新增统一 `codex_pet_agent.py` 和 `companion_paths.py`。PyInstaller App 内置 Python、Bleak、
+  PyObjC/CoreBluetooth、Hooks 与静态资源；Node、Sharp 和九状态转换器也放入 App Resources。
+  Hooks 命令改为应用内 Agent，并保留可审计的 `codex_pet_hook.py` 资源路径。
+- Swift 外壳改为菜单栏 App，支持首次设置、登录启动、状态轮询、诊断日志、更新检查、Agent
+  异常重启、`vibeboard://companion/open` 和经过 slug/digest 校验的安装深链。启动前先探测
+  `/v1/status`：菜单栏进程被强杀但 Agent 仍存活时接管现有服务，不重复启动第二个 BLE owner，
+  避免 8790 端口冲突和两秒一次的重启循环。新 Agent 同时接收 `--parent-pid`，每 2 秒检查父进程；
+  外壳被强杀后会自行关闭 HTTP、IPC 和 BLE，不长期遗留孤儿进程。
+- ad-hoc 开发包不启用 Hardened Runtime；正式 Developer ID 包继续使用 runtime、timestamp 和
+  inside-out 签名，再执行 notarytool、staple 和 SHA-256。正式签名构建禁止借用其他 App 的
+  Sharp，必须使用项目依赖。
+- Companion HTTP 在 `service.start()` 等待 BLE 之前启动。修复后用真实板子验证：网页状态接口
+  立即可访问，BLE 随后约 7 秒连接，`board.connected=true`。
+- 公网 Origin 只能在构建时精确配置；loopback API 响应 PNA 预检，写请求仍要求 15 分钟 token。
+  未启动时网页显示启动/下载 Companion，不向公网暴露 BLE 或 Codex 凭据。
+- `verify_codex_pet_companion_app.sh` 对成品执行 codesign、CoreBluetooth/PyObjC 导入、Hook、
+  Companion、Bridge、`.hpet`、Ed25519 和 Sharp 转换自测。最终 arm64 开发 App 与 62 MB DMG
+  构建成功，整套成品校验通过。
+
+#### 后续规则
+
+1. 任何消费级 Companion 发布都必须在没有仓库、Python 和 Node 的干净 Mac 上验证。
+2. 本地设置/API 必须先于慢速硬件发现可用；连接状态只能影响按钮，不能阻塞页面监听。
+3. ad-hoc 与 Developer ID 签名不可共用同一组 Hardened Runtime 假设；成品必须实际执行内置
+   Agent，不能只检查 `codesign --verify`。
+4. 公网站点只允许精确 HTTPS Origin，不能用 `*` 绕过 CORS/PNA；深链和 API 参数都必须继续
+   校验 slug 与 digest。
+5. 菜单栏外壳与 Agent 是两个进程；启动、崩溃恢复和登录启动都必须先接管健康实例，再决定是否
+   创建新实例，不能把父进程 PID 当作唯一生命周期真相。
+
+### 问题三十六：Runtime 重载卡在 Lua 关闭阶段，桌面永久停帧
+
+#### 现象与真机证据
+
+2026-07-27，板子桌面停止刷新，但显示屏和触控诊断仍分别报告 `ready=1`。串口连续两次读取
+Runtime App Manager 得到完全相同的状态：
+
+```text
+active=codex_pet state=idle running=0 failed=0
+pending_reload=0 reloading=1 pending_stop=0
+```
+
+同时 Codex Pet 状态仍为 `active=1`、`preloadVersion=2`、`assetStates=9`、
+`preloadedBytes=1328640`，但 `uiTicks` 停在 `5` 不再增长。这说明屏幕、触控、宠物资源和状态
+查询线程尚可工作，实际停止的是 GUI timer 所在的 Runtime 重载路径。现场 Companion 日志只有
+`GET /v1/status` 轮询，没有新的部署、launch 或 reload 命令，因此不能把这次卡死归因为网页重复
+部署或 Companion 重复下发。
+
+#### 已确认根因
+
+`vb_runtime_reload_current()` 先将 `reload_in_progress` 置为 1，再同步调用
+`vibeboard_lua_stop_app()`；只有函数完整返回后才会清除该标志。现场状态中旧宠物仍
+`active=1`，而真正的 `vb_codex_pet_stop()` 位于 Lua Host stop 之后。因此卡死点已收敛到
+`vibeboard_lua_stop_app()` 内、Host stop 之前的 `lua_close(g_vb_lua.state)`：Lua state 关闭没有
+返回，GUI timer 无法继续执行，`reloading=1` 也就永久保留。
+
+当前诊断没有捕获 Lua 内部堆/GC 的具体栈帧，不能把根因进一步武断写成某个 allocator 或 LVGL
+缺陷；但“重载流程同步阻塞在 Lua close，且没有阶段诊断、超时恢复或失败出口”已经由状态顺序
+和代码控制流确认。宠物名称标签的删除只改变渲染对象，不经过 Runtime reload 或 Lua close，不是
+本次故障原因。
+
+另发现一个必须同时治理的同类风险：`vb_pet_stop_preload_worker()` 在 GUI 路径中无限等待
+`loader_thread` 变为 `NULL`。本次状态仍为 `active=1`，所以它不是本次已证实的直接卡点；但未来
+一旦卡在宠物清理阶段，该无界等待会造成相同的“桌面永久停帧”。
+
+#### 恢复与永久修复方案
+
+- 现场恢复：硬件重启后板子已恢复正常。这只会重新初始化 Runtime，不能视为永久修复，也不能
+  代替后续回归。
+- 为 Runtime reload 引入可读的阶段状态和开始时间，至少区分 `lua_close`、host stop、root 删除、
+  包加载和 Lua start；`vb_runtime_app_status` 必须暴露阶段和持续时间。以后不能只看到一个
+  `reloading=1` 就猜测卡点。
+- 对正常重载路径建立失败收敛机制：重载进入后必须保证能回到“已运行”或“已报告失败并可重新启动”
+  两个终态之一。恢复动作只能由 Runtime/GUI 所有者安排，BLE、串口或 watchdog worker 不得直接
+  删除或创建 LVGL 对象。
+- 针对 `lua_close` 阶段，先用新增阶段日志和真机重放取得 Lua 堆/GC 证据，再修复触发关闭阻塞的
+  底层资源生命周期；不要在 GUI 线程里用忙等或强行跨线程销毁 Lua/LVGL 来掩盖问题。
+- `vb_pet_stop_preload_worker()` 改为有界停止协议：发出 stop、唤醒 worker、在有限时间内等待其
+  确认；超时必须记录错误并走受控恢复，不能无限 `rt_thread_mdelay(10)`。释放 semaphore 和 PSRAM
+  资源只能发生在 worker 已确认退出之后。
+
+#### 回归要求
+
+1. 冷启动、BLE 连接、状态轮询并存时，连续执行至少 20 次 `codex_pet` reload；每轮都要求
+   `running=1`、`reloading=0`、`uiTicks` 持续增长，并且 `active=1` 的九状态资源可用。
+2. 在 jumping/running/review 等会唤醒预加载 worker 的状态切换期间触发 reload，验证 worker 停止、
+   Lua close、root 重建和预载恢复均在有界时间内完成。
+3. 故障桩分别阻塞 Lua close 和预加载 worker；状态接口必须给出具体阶段和失败原因，板子不得只
+   留下无期限的 `reloading=1`。恢复后必须重新通过显示、触控、BLE、九状态 sweep 和 UI tick 检查。
+4. Companion 的常规 `/v1/status` 轮询不得触发 reload；日志和自动化测试要固定这一负向契约，避免
+   后续排障再次把只读轮询误判为部署命令。
+
+### 问题三十七：恢复路径不能以同步清理或未校验刷写为代价
+
+#### 问题根源
+
+问题三十六中的 `lua_close()` 在 GUI timer 内同步执行，导致一个 VM 关闭异常就能永久阻塞所有
+LVGL 刷新。宠物的预加载 worker 也存在同一类风险：旧实现发出停止信号后，在 GUI 路径无限等待
+`loader_thread` 变为 `NULL`。即使 Lua close 已经修复，SD 卡读写或 zlib 解压异常也仍可通过这个
+无界等待把桌面卡住。
+
+固件恢复路径的风险不同但同样严重：原有 `flash.py` 能可靠刷写当前 build，却没有“这一组
+bootloader、flash table 和 Runtime 是否来自同一已验证版本”的发布身份，也没有签名校验。把
+BLE 宠物包安装和全量固件刷写混为一谈，会让用户在普通部署失败时走向破坏性恢复操作。
+
+#### 已落地的解决方案
+
+- Runtime reload 改为 GUI 所有者驱动的阶段状态机。`lua_close` 在独立 RT-Thread worker 执行，
+  GUI timer 只轮询 `lua_close -> host_stop -> teardown -> load`；`app_status` 新增
+  `reload_phase`、累计耗时、重载次数、失败次数和超时次数。BLE/串口 worker 仍然只能发布 reload
+  请求，不能跨线程触碰 LVGL。
+- `lua_close` 和 `host_stop` 均有五秒超时。超时后旧 UI、宠物和资源仍被保留，状态收敛为
+  `recovery_required` 并带明确错误；绝不在未知 worker 尚在访问 Lua、LVGL 或 PSRAM 时删除 root
+  或释放缓存。受控重启可以恢复，后续重试则会等待旧 worker 的确认。
+- 宠物预加载 worker 的停止协议改为非阻塞 acknowledge：先设置 stop 并唤醒 semaphore，worker
+  完成 SD/zlib 工作后自行清空 thread 句柄。`host_stop` 返回 `-RT_EBUSY`，由 Runtime timer 轮询，
+  而不是 `rt_thread_mdelay()` 忙等。只有 worker 已退出时才删除 semaphore 和释放预加载 PSRAM。
+- 新增 `scripts/firmware_release.py` 和 `docs/firmware-release-and-recovery.md`。每个 USB 固件
+  发布包都必须包含并签名 `firmware-release.json`，其中锁定 board、版本、sftool flash 地址、文件
+  长度和 SHA-256。升级和回退都先用外部钉住的 Ed25519 公钥验证，再调用 `flash.py`，并要求 boot
+  日志确认。回退是刷入上一个已验证的完整 release，不能从当前板子猜测或读取未知镜像。
+- Companion 状态明确公开 `verified_usb_recovery` 与 `wirelessDfu=false`。当前 flash table 构建时
+  会报告 `img "dfu" not found`，所以双镜像无线 DFU 在完成分区迁移、swap 断电测试和真机回退前
+  不得向用户开放，更不能把 Runtime App 的 BLE 安装描述为固件升级。
+
+#### 回归要求
+
+1. 连续执行至少 20 次宠物 reload；每轮检查 `reload_phase` 最终回到 `idle`、`reloading=0`，
+   `uiTicks` 持续增长，且九个资产状态仍可切换。
+2. 人为让 Lua close 或预加载 worker 不返回时，五秒内状态必须变为 `recovery_required`；屏幕仍应
+   保持可见，不能黑屏、死帧或释放正在使用的缓存。
+3. 每个发布候选必须执行 `firmware_release.py create`、`verify` 和 `apply --dry-run`；仅在 USB
+   真机确认启动后记录为 last-good。回退候选必须使用同一流程刷入上一个签名 release。
+
+### 问题三十八：固件恢复和诊断能力必须与普通宠物部署隔离
+
+#### 问题根源
+
+Runtime App 的 BLE 安装已经可以稳定部署九状态宠物，但这条链路不具备
+bootloader、flash table 或 Runtime 固件的完整性保证。把它直接扩展成固件
+升级会在单分区设备上留下不可启动的半成品。与此同时，Companion 的诊断
+包如果按目录中的“最新 ZIP”返回，在两个任务并发完成时可能下载错任务，
+并且固件下载 ZIP 如果未先检查成员路径，会带来路径穿越风险。
+
+#### 已落地的解决方案
+
+- 固件发布包由 `firmware_release.py` 生成并用钉住的 Ed25519 公钥验签，锁定
+  board、地址、长度和 SHA-256；更新、健康检查、last-good 记录和自动回滚
+  由 `companion_firmware.py` 统一编排，和宠物 BLE 安装保持不同 API/状态。
+- 下载的固件 ZIP 在解压前逐项拒绝绝对路径、`..` 路径和符号链接；验证通过后
+  才能进入临时目录，避免归档文件写出 staging 根目录。
+- 双分区方案由 `dual_bank_dfu.py` 作为迁移门禁和离线故障模拟工具维护。当前
+  `wirelessDfu=false`，因为生产 flash table 仍是单分区；不能通过 Companion
+  或 Runtime 隐式开启。
+- 一键诊断通过 `companion_diagnostics.py` 生成每任务唯一文件名，job 结果保存
+  `bundlePath`，下载时校验固定文件名和 support 目录边界。内容只保留有限日志尾部，
+  并递归清理 token、密码、私钥、凭据和 Hook command。
+
+#### 回归要求
+
+1. `python3 scripts/firmware_release.py --self-test`、`python3 scripts/dual_bank_dfu.py self-test`
+   和 Companion 自测必须通过。
+2. 构造包含 `../escape`、绝对路径和符号链接的固件 ZIP，必须在验签前拒绝并且 staging
+   目录外没有新文件。
+3. 并发创建两个诊断任务，分别只能下载自己的 `bundlePath`；ZIP 内不得出现 token、password、
+   private key 或 Hook command。
+4. 真实板子更新仍须 USB boot-log、Runtime health 和九状态 sweep；无线 DFU 在 ptab/bootloader
+   迁移完成前必须保持关闭。
+
+### 问题三十九：动态诊断 JSON 不是一次性快照
+
+#### 问题根源
+
+BLE/串口 Runtime 状态包含心跳、耗时和恢复计数。读取 `json_read` 的过程中字段可能从 576
+字节增长到 577 字节，旧客户端按首次返回的总长度读取会误报 JSON 长度不一致，导致诊断或部署
+流程失败。另一个现场陷阱是重新打开串口会触发 USB bridge 冷复位，跨进程保存的故障注入计数不能
+用来证明同一次测试仍在运行。
+
+#### 已落地的解决方案
+
+- `runtime_transport.py` 在 `json_read` 总长度变化时从 offset 0 重新开始读取，并限制重试次数；
+  不再把动态字段变化误判为设备损坏。
+- 重试故障和 watchdog 故障测试使用同一个 SerialTransport 会话，测试脚本明确记录冷复位边界，
+  避免把新启动的板子状态当成注入后的状态。
+- `runtime_recovery_soak.py` 将 20 次 reload、九状态 sweep 和点击跳动检查固化为可重复的真机门禁。
+
+#### 结果
+
+最新固件已通过 20 次 Runtime reload（失败/超时均为 0）、九状态 sweep、点击跳动恢复、一次注入
+重试故障和一次注入 GUI heartbeat watchdog 重启；watchdog reset reason 为 `0x56420001`，板子
+重启后重新广播并恢复连接。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：

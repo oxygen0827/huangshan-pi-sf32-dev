@@ -6,6 +6,7 @@ project/__pycache__/
 .venv/
 .venv-ble/
 .local/
+scripts/companion_node/node_modules/
 *.pyc
 compile_commands.json
 .DS_Store

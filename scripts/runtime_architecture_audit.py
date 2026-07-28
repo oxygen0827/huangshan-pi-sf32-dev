@@ -367,6 +367,18 @@ def audit_codex_pet_bridge() -> None:
     for token in ("vb_pet_drain_flows", "preloaded_data", "vb_pet_publish_status"):
         if token not in helper:
             fail("codex_pet_bridge", f"board pet concurrency guard is missing {token!r}")
+    for token in (
+        "VB_BLE_HEALTH_CHECK_MS",
+        "VB_BLE_LINK_GRACE_MS",
+        "link_conn_idx",
+        "vb_ble_health_check",
+        "connection_manager_get_connection_state",
+        "int link_present = g_vb_ble.link_active || g_vb_ble.connected",
+        "if (g_vb_ble.advertising)",
+        "rt_tick_from_millisecond(VB_BLE_HEALTH_CHECK_MS)",
+    ):
+        if token not in runtime_main:
+            fail("codex_pet_bridge", f"BLE advertising self-heal is missing {token!r}")
     project_config = read("project/proj.conf")
     if "CONFIG_IMAGE_CACHE_IN_PSRAM_SIZE=2100000" not in project_config:
         fail("codex_pet_bridge", "compressed Petdex preload requires the 2.1 MB PSRAM image pool")
@@ -750,6 +762,35 @@ def audit_direct_transport_usage() -> None:
         ok("direct_transport_usage", "direct Bleak use is limited to RuntimeTransport")
 
 
+def audit_recovery_and_release_gates() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    transport = read("scripts/runtime_transport.py")
+    required_files = (
+        "scripts/runtime_recovery_soak.py",
+        "scripts/companion_firmware.py",
+        "scripts/companion_diagnostics.py",
+        "scripts/dual_bank_dfu.py",
+        "docs/firmware-release-and-recovery.md",
+    )
+    for rel in required_files:
+        require_file("recovery_release_gates", rel)
+    for token in (
+        "VB_RUNTIME_RECOVERY_RETRY_LIMIT",
+        "vb_runtime_watchdog_entry",
+        "RTC_BACKUP_MODULE_RECORD",
+        "reload_phase",
+    ):
+        if token not in main:
+            fail("recovery_release_gates", f"main.c missing recovery invariant {token!r}")
+    for token in ("snapshot_restarts = 0", "snapshot_restarts > 5"):
+        if token not in transport:
+            fail("recovery_release_gates", f"runtime transport missing dynamic JSON guard {token!r}")
+    if "wirelessDfu" not in read("scripts/companion_firmware.py") or '"enabled": False' not in read("scripts/dual_bank_dfu.py"):
+        fail("recovery_release_gates", "firmware update must remain USB-only until dual-bank migration")
+    if not any(item[0] == "fail" and item[1].startswith("recovery_release_gates") for item in CHECKS):
+        ok("recovery_release_gates", "Runtime recovery, signed release, diagnostics, and DFU migration gates are present")
+
+
 def run_audit() -> int:
     CHECKS.clear()
     audit_runtime_transport()
@@ -770,6 +811,7 @@ def run_audit() -> int:
     audit_codex_pet_mcp()
     audit_codex_pet_audio()
     audit_direct_transport_usage()
+    audit_recovery_and_release_gates()
     failures = [message for status, message in CHECKS if status == "fail"]
     for status, message in CHECKS:
         print(f"[{status}] {message}")

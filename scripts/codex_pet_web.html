@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="cache-control" content="no-store">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://assets.petdex.dev data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
+  <meta name="vibeboard-companion-download" content="">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://assets.petdex.dev http://127.0.0.1:8790 data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:8790">
   <title>Codex Pet</title>
   <style>
     :root {
@@ -91,6 +92,7 @@
       font-weight: 740;
     }
     .compact-button { min-height: 32px; padding: 0 11px; background: var(--surface-2); border-color: var(--line); color: var(--text); }
+    a.compact-button { display: inline-flex; align-items: center; text-decoration: none; }
     .hook-alert {
       border-top: 1px solid color-mix(in srgb, var(--coral) 58%, var(--line));
       border-bottom: 1px solid color-mix(in srgb, var(--coral) 58%, var(--line));
@@ -111,6 +113,12 @@
     .hook-alert[data-severity="warning"] .hook-alert-detail { color: #d8c98f; }
     .hook-alert-solution { color: var(--muted); font-size: 12px; line-height: 1.45; }
     .hook-alert-solution code { color: var(--text); font-weight: 760; }
+    .maintenance { border-bottom: 1px solid var(--line); background: #171a17; }
+    .maintenance-row { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; }
+    .maintenance-copy { min-width: 0; }
+    .maintenance-title { font-size: 13px; font-weight: 760; }
+    .maintenance-detail { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .maintenance-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     main { padding: 26px 0 104px; }
     .gallery-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
     .gallery-head h2 { margin: 0; font-size: 19px; }
@@ -207,6 +215,8 @@
       .connection:last-child { border-bottom: 0; }
       .connections { position: static; }
       .hook-alert-row { align-items: flex-start; flex-direction: column; gap: 7px; }
+      .maintenance-row { align-items: flex-start; flex-direction: column; }
+      .maintenance-actions { justify-content: flex-start; }
       .job-row { grid-template-columns: 1fr auto; padding: 14px 0; }
       .job-row .progress { grid-row: 2; grid-column: 1 / -1; }
     }
@@ -257,6 +267,17 @@
     </div>
   </header>
 
+  <section id="companionWarning" class="hook-alert" data-severity="warning" role="alert" hidden>
+    <div class="shell hook-alert-row">
+      <div>
+        <div class="hook-alert-title">VibeBoard Companion 未运行</div>
+        <div class="hook-alert-detail">启动 Companion 后即可连接板子并部署宠物。</div>
+      </div>
+      <a class="compact-button" href="vibeboard://companion/open">启动 Companion</a>
+      <a id="downloadCompanion" class="compact-button" href="#" hidden>下载 Mac 版</a>
+    </div>
+  </section>
+
   <section id="codexWarning" class="hook-alert" data-severity="error" role="alert" hidden>
     <div class="shell hook-alert-row">
       <div>
@@ -268,6 +289,20 @@
         然后重启 Codex Desktop 或新建任务。
       </div>
       <button id="copyHooksCommand" class="compact-button" type="button">复制 /hooks</button>
+    </div>
+  </section>
+
+  <section class="maintenance">
+    <div class="shell maintenance-row">
+      <div class="maintenance-copy">
+        <div class="maintenance-title">设备维护</div>
+        <div id="firmwareDetail" class="maintenance-detail">正在检查固件更新配置</div>
+      </div>
+      <div class="maintenance-actions">
+        <button id="firmwareUpdate" class="compact-button" type="button" disabled>更新固件</button>
+        <button id="firmwareRollback" class="compact-button" type="button" disabled>回滚固件</button>
+        <button id="supportBundle" class="compact-button" type="button">导出诊断包</button>
+      </div>
     </div>
   </section>
 
@@ -295,6 +330,9 @@
   <script>
     "use strict";
     const $ = id => document.getElementById(id);
+    const isLoopbackPage = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+    const companionBase = isLoopbackPage ? location.origin : "http://127.0.0.1:8790";
+    const companionURL = path => new URL(path, `${companionBase}/`).href;
     const state = {
       token: "",
       status: null,
@@ -333,6 +371,7 @@
     const stageLabels = {
       queued: "排队中", download: "下载源动画", verify: "校验宠物包", transfer: "蓝牙传输",
       restart: "重启应用", complete: "部署完成", failed: "部署失败", pair: "连接板子",
+      flash: "刷写固件", health: "健康检查", rollback: "自动回滚", collect: "收集诊断",
     };
     const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[ch]);
 
@@ -340,7 +379,7 @@
       const headers = { ...(options.headers || {}) };
       if (options.body !== undefined) headers["content-type"] = "application/json";
       if (state.token) headers.authorization = `Bearer ${state.token}`;
-      const response = await fetch(path, { ...options, headers, cache: "no-store" });
+      const response = await fetch(companionURL(path), { ...options, headers, cache: "no-store" });
       const data = await response.json().catch(() => ({}));
       if (response.status === 401 && retrySession && path !== "/v1/session") {
         state.token = "";
@@ -378,6 +417,7 @@
       const trustNeedsAction = hookTrustNeedsAction(codexState);
       const trustUnknown = bound && codexState.trustChecked && codexState.trustStatus === "unknown";
       const board = Boolean(value.board?.connected);
+      const firmware = value.firmware || {};
       setDot("companionDot", companion, !companion);
       setDot("codexDot", codex, trustNeedsAction || codexState.detected === false);
       setDot("boardDot", board, false);
@@ -392,6 +432,11 @@
       $("boardDetail").textContent = board
         ? `${value.board?.name || "VibeBoard"} · ${value.board?.bleInstall ? "Runtime BLE" : "已加密"}`
         : "等待蓝牙连接";
+      $("firmwareDetail").textContent = firmware.configured
+        ? (firmware.lastGood?.version ? `当前 ${firmware.lastGood.version} · USB 恢复更新已启用` : "已配置签名更新源 · 等待 USB 板子")
+        : (firmware.reason || "未配置签名更新源，保留手动 USB 恢复");
+      $("firmwareUpdate").disabled = state.jobActive || !firmware.configured;
+      $("firmwareRollback").disabled = state.jobActive || !firmware.configured || !firmware.lastGood?.previous;
       const showTrustWarning = trustNeedsAction || trustUnknown;
       $("codexWarning").hidden = !showTrustWarning;
       $("codexWarning").dataset.severity = trustNeedsAction ? "error" : "warning";
@@ -418,8 +463,10 @@
     async function refreshStatus() {
       try {
         state.status = await api("/v1/status");
+        $("companionWarning").hidden = true;
         renderStatus();
       } catch (error) {
+        $("companionWarning").hidden = false;
         setDot("companionDot", false, true);
         $("companionDetail").textContent = "服务不可用";
       }
@@ -430,7 +477,7 @@
         `<button type="button" class="state-button${name === "idle" ? " active" : ""}" data-state="${name}" title="Petdex · ${stateTitles[name]}">${stateLabels[name]}</button>`
       ).join("");
       return `<article class="pet-card" data-slug="${esc(pet.slug)}">
-        <div class="pet-preview"><div class="pet-sprite" data-row="0" data-rows="9" data-src="${esc(pet.previewUrl)}" data-fallback="${esc(String(pet.displayName || pet.slug).slice(0, 1).toUpperCase())}"></div></div>
+        <div class="pet-preview"><div class="pet-sprite" data-row="0" data-rows="9" data-src="${esc(companionURL(pet.previewUrl))}" data-fallback="${esc(String(pet.displayName || pet.slug).slice(0, 1).toUpperCase())}"></div></div>
         <div class="pet-body">
           <div class="pet-title"><h3>${esc(pet.displayName)}</h3><span class="kind">${esc(pet.kind)}</span></div>
           <div class="author">${esc(pet.submittedBy)}</div>
@@ -607,11 +654,15 @@
       if (job.stage === "complete") {
         if (job.kind === "build") return "保存完成";
         if (job.kind === "pair") return "连接完成";
+        if (job.kind === "support_bundle") return "诊断包完成";
+        if (job.kind.startsWith("firmware_")) return job.kind === "firmware_rollback" ? "固件回滚完成" : "固件更新完成";
         return "部署完成";
       }
       if (job.stage === "failed") {
         if (job.kind === "build") return "保存失败";
         if (job.kind === "pair") return "连接失败";
+        if (job.kind === "support_bundle") return "诊断包失败";
+        if (job.kind.startsWith("firmware_")) return "固件操作失败";
         return "部署失败";
       }
       return stageLabels[job.stage] || job.stage;
@@ -627,7 +678,7 @@
           await refreshStatus();
           if (download && job.downloadUrl) {
             const link = document.createElement("a");
-            link.href = job.downloadUrl;
+            link.href = companionURL(job.downloadUrl);
             link.download = `${job.slug}.hpet`;
             document.body.appendChild(link);
             link.click();
@@ -637,6 +688,50 @@
         }
         if (job.status === "failed") throw new Error(job.message || "任务失败");
         await new Promise(resolve => setTimeout(resolve, 650));
+      }
+    }
+
+    async function downloadSupportBundle(path) {
+      const response = await fetch(companionURL(path), { headers: { authorization: `Bearer ${state.token}` }, cache: "no-store" });
+      if (!response.ok) throw new Error(`诊断包下载失败 (${response.status})`);
+      const blob = await response.blob();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "vibeboard-support.zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(link.href);
+    }
+
+    async function updateFirmware(rollback = false) {
+      showJob(rollback ? "回滚 VibeBoard 固件" : "更新 VibeBoard 固件");
+      try {
+        const value = await api(rollback ? "/v1/firmware/rollback" : "/v1/firmware/update", { method: "POST", body: "{}" });
+        await pollJob(value.jobId);
+      } catch (error) {
+        $("jobTitle").textContent = "固件操作失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        renderStatus();
+      }
+    }
+
+    async function exportSupportBundle() {
+      showJob("导出诊断包");
+      try {
+        const value = await api("/v1/support/bundle", { method: "POST", body: "{}" });
+        const job = await pollJob(value.jobId);
+        if (job.result?.downloadPath) await downloadSupportBundle(job.result.downloadPath);
+      } catch (error) {
+        $("jobTitle").textContent = "诊断包失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        renderStatus();
       }
     }
 
@@ -739,10 +834,16 @@
     async function boot() {
       const params = new URLSearchParams(location.search);
       consumeInstallDeepLink(params);
+      const downloadURL = document.querySelector('meta[name="vibeboard-companion-download"]')?.content || "";
+      if (/^https:\/\//.test(downloadURL)) {
+        $("downloadCompanion").href = downloadURL;
+        $("downloadCompanion").hidden = false;
+      }
       try {
         state.token = (await api("/v1/session", { method: "POST", body: "{}" })).token;
+        $("companionWarning").hidden = true;
       } catch (error) {
-        showToast("Companion 会话创建失败");
+        $("companionWarning").hidden = false;
         return;
       }
       await Promise.all([refreshStatus(), loadPets()]);
@@ -753,6 +854,9 @@
 
     $("codexAction").addEventListener("click", bindCodex);
     $("boardAction").addEventListener("click", pairBoard);
+    $("firmwareUpdate").addEventListener("click", () => updateFirmware(false));
+    $("firmwareRollback").addEventListener("click", () => updateFirmware(true));
+    $("supportBundle").addEventListener("click", exportSupportBundle);
     $("loadMore").addEventListener("click", () => loadPets({ append: true }));
     $("jobClose").addEventListener("click", () => { $("jobPanel").hidden = true; });
     $("copyHooksCommand").addEventListener("click", async () => {

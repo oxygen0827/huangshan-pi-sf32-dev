@@ -47,10 +47,27 @@ requireSource(/先连接板子/,
   "deploy must explain that the board connection is required");
 requireSource(/state\.jobActive \|\| !\(board && codex\)/,
   "deploy must be disabled until binding and board connection are ready");
+requireHtml(/id="firmwareUpdate"/, "firmware update control is missing");
+requireHtml(/id="firmwareRollback"/, "firmware rollback control is missing");
+requireHtml(/id="supportBundle"/, "support bundle control is missing");
+requireSource(/\/v1\/firmware\/update/, "firmware update must use the Companion API");
+requireSource(/\/v1\/firmware\/rollback/, "firmware rollback must use the Companion API");
+requireSource(/\/v1\/support\/bundle/, "support bundle must use the Companion API");
+requireSource(/Authorization|authorization/, "support downloads must carry the Companion session");
 requireSource(/job\.kind === ["']build["'][\s\S]*保存完成/,
   "build completion must not be reported as board deployment");
 requireSource(/response\.status === 401[\s\S]*\/v1\/session/,
   "expired Companion sessions must refresh once");
+requireSource(/http:\/\/127[.]0[.]0[.]1:8790/,
+  "a public gallery must target the fixed loopback Companion API");
+requireSource(/fetch\(companionURL\(path\)/,
+  "all Companion API calls must pass through the loopback URL resolver");
+requireHtml(/name="vibeboard-companion-download"/,
+  "a public gallery must expose a configurable Companion download URL");
+requireHtml(/href="vibeboard:\/\/companion\/open"/,
+  "an offline public gallery must offer the Companion launch deep link");
+requireHtml(/connect-src[^>]*http:\/\/127[.]0[.]0[.]1:8790/,
+  "the CSP must allow only the fixed loopback Companion endpoint");
 requireSource(/getImageData\(/,
   "sprite animation must inspect frames instead of displaying transparent frames");
 requireSource(/data-frames|frameList|visibleFrames/,
