@@ -800,10 +800,12 @@ def audit_recovery_and_release_gates() -> None:
     companion = read("scripts/codex_pet_companion.py")
     firmware = read("scripts/companion_firmware.py")
     diagnostics = read("scripts/companion_diagnostics.py")
+    companion_state = read("scripts/companion_state.py")
     required_files = (
         "scripts/runtime_recovery_soak.py",
         "scripts/companion_firmware.py",
         "scripts/companion_diagnostics.py",
+        "scripts/companion_state.py",
         "scripts/dual_bank_dfu.py",
         "docs/firmware-release-and-recovery.md",
     )
@@ -835,6 +837,12 @@ def audit_recovery_and_release_gates() -> None:
     for token in ("secrets.token_hex", "job_id: str | None", "Authorization: [redacted]"):
         if token not in diagnostics:
             fail("recovery_release_gates", f"diagnostics boundary is missing {token!r}")
+    for token in ("class JobJournal", "class PackageCache", "TERMINAL_JOB_STATES"):
+        if token not in companion_state:
+            fail("recovery_release_gates", f"Companion state boundary is missing {token!r}")
+    for token in ("JobJournal", "PackageCache", 'path == "/v1/health"'):
+        if token not in companion:
+            fail("recovery_release_gates", f"Companion integration is missing {token!r}")
     if not any(item[0] == "fail" and item[1].startswith("recovery_release_gates") for item in CHECKS):
         ok("recovery_release_gates", "Runtime recovery, authenticated diagnostics, signed release, and DFU migration gates are present")
 

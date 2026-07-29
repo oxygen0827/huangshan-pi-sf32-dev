@@ -10,6 +10,12 @@ App 是菜单栏常驻工具，内部包含：
 - Node.js、Sharp、Petdex 九状态转换器和 Ed25519 工具；
 - Codex Hook 入口、Companion 网页和 `codex_pet` Runtime App 模板。
 
+Companion 状态目录还保存受限的任务 journal（`jobs.json`）和 `.hpet` 缓存。任务状态采用原子
+替换写入；服务重启时，所有未完成任务会标记为 `interrupted`/失败，不会伪装成仍在传输。缓存
+默认最多保留 24 个包、128 MiB，并保护当前包与回滚所需的上一个包。网页可读取
+`GET /v1/health`，其中 `serviceReady` 表示本地服务和资源配置完整，`boardReady` 还要求板子已
+连接；部署按钮必须同时满足这两个边界。
+
 首次启动会先启动本地 Agent，再打开设置页。用户可选择登录时自动启动。菜单栏可查看板子与
 Codex 状态、打开图库、重新配对、检查更新和打开诊断日志。
 

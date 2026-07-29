@@ -45,8 +45,14 @@ requireSource(/hookTrustNeedsAction/,
   "the status renderer must distinguish untrusted hooks from an unbound project");
 requireSource(/先连接板子/,
   "deploy must explain that the board connection is required");
-requireSource(/state\.jobActive \|\| !\(board && codex\)/,
+requireSource(/state\.jobActive \|\| !\(board && codex && serviceReady\)/,
   "deploy must be disabled until binding and board connection are ready");
+requireSource(/\/v1\/health/,
+  "the gallery must consume the Companion health endpoint");
+requireSource(/serviceReady/,
+  "deploy must be gated by Companion service readiness");
+requireSource(/任务因 Companion 重启而中断/,
+  "interrupted persistent jobs need an actionable status label");
 requireHtml(/id="firmwareUpdate"/, "firmware update control is missing");
 requireHtml(/id="firmwareRollback"/, "firmware rollback control is missing");
 requireHtml(/id="supportBundle"/, "support bundle control is missing");

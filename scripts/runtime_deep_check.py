@@ -121,6 +121,7 @@ def python_compile_targets() -> list[str]:
         "scripts/firmware_release.py",
         "scripts/companion_firmware.py",
         "scripts/companion_diagnostics.py",
+        "scripts/companion_state.py",
         "scripts/dual_bank_dfu.py",
         "scripts/runtime_recovery_soak.py",
         "scripts/codex_pet_appserver.py",
@@ -184,6 +185,7 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
         Check("pass1-architecture", "firmware release self-test", [PYTHON, "scripts/firmware_release.py", "--self-test"]),
         Check("pass1-architecture", "dual-bank DFU migration self-test", [PYTHON, "scripts/dual_bank_dfu.py", "self-test"]),
         Check("pass1-architecture", "Companion self-test", [PYTHON, "scripts/codex_pet_companion.py", "--self-test"]),
+        Check("pass1-architecture", "Companion state self-test", [PYTHON, "scripts/companion_state.py"]),
         Check("pass1-architecture", "app store bridge self-test", [PYTHON, "scripts/app_store_server.py", "--self-test"]),
         Check("pass1-architecture", "runtime transport self-test", [PYTHON, "scripts/runtime_transport.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet app-server self-test", [PYTHON, "scripts/codex_pet_appserver.py", "--self-test"]),
@@ -309,6 +311,7 @@ def run_self_test() -> None:
     assert "scripts/runtime_deep_check.py" in python_compile_targets()
     assert "scripts/codex_pet_appserver.py" in python_compile_targets()
     assert "scripts/firmware_release.py" in python_compile_targets()
+    assert "scripts/companion_state.py" in python_compile_targets()
     assert "scripts/codex_pet_protocol.py" in python_compile_targets()
     assert "scripts/codex_pet_bridge.py" in python_compile_targets()
     assert "scripts/codex_pet_monitor.py" in python_compile_targets()
@@ -321,6 +324,7 @@ def run_self_test() -> None:
     assert "scripts/peer_reliability.py" in python_compile_targets()
     assert any(check.label == "runtime deep check self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "firmware release self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Companion state self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet app-server self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet protocol self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet Bridge self-test" for check in build_checks(include_swift=False))

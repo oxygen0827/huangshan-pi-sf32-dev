@@ -120,6 +120,7 @@ for resource in \
   codex_pet_web.html \
   petdex_pets.json \
   petdex_state_contract.json \
+  companion_state.py \
   hpet_crypto.js \
   build_hpet_petdex.js; do
   cp "$ROOT/scripts/$resource" "$RESOURCES/AgentRoot/scripts/$resource"

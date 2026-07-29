@@ -30,6 +30,8 @@ from companion_firmware import FirmwareManager, FirmwareManagerError
 from companion_diagnostics import create_support_bundle
 from companion_diagnostics import run_self_test as diagnostics_self_test
 from companion_firmware import run_self_test as firmware_self_test
+from companion_state import JobJournal, PackageCache
+from companion_state import run_self_test as companion_state_self_test
 from firmware_release import FirmwareReleaseError
 from hpet_package import (
     DEFAULT_CACHE_DIR,
@@ -151,6 +153,21 @@ def _read_json(path: Path, default: object) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return default
+
+
+def _coerce_float(value: object, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result == result else default
+
+
+def _coerce_progress(value: object) -> int:
+    try:
+        return max(0, min(100, int(value or 0)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _fetch_json(url: str, *, max_bytes: int, timeout: float = 20.0) -> object:
@@ -748,7 +765,41 @@ class CompanionJob:
     result: dict[str, object] | None = None
     log: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _persist: Callable[["CompanionJob"], None] | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, object],
+        *,
+        persist: Callable[["CompanionJob"], None] | None = None,
+    ) -> "CompanionJob":
+        log = value.get("log")
+        result = value.get("result")
+        created_at = value.get("createdAt")
+        updated_at = value.get("updatedAt")
+        return cls(
+            job_id=str(value.get("jobId") or ""),
+            kind=str(value.get("kind") or "unknown"),
+            slug=str(value.get("slug") or "unknown"),
+            status=str(value.get("status") or "failed"),
+            stage=str(value.get("stage") or "unknown"),
+            progress=_coerce_progress(value.get("progress")),
+            message=str(value.get("message") or "")[:240],
+            digest=str(value["digest"]) if isinstance(value.get("digest"), str) else None,
+            download_url=str(value["downloadUrl"]) if isinstance(value.get("downloadUrl"), str) else None,
+            result=dict(result) if isinstance(result, dict) else None,
+            log=[str(item)[:500] for item in log[-160:]] if isinstance(log, list) else [],
+            created_at=_coerce_float(created_at, time.time()),
+            updated_at=_coerce_float(updated_at, time.time()),
+            _persist=persist,
+        )
+
+    def _notify(self) -> None:
+        if self._persist is not None:
+            self._persist(self)
 
     def update(self, *, stage: str | None = None, progress: int | None = None, message: str | None = None) -> None:
         with self._lock:
@@ -758,11 +809,15 @@ class CompanionJob:
                 self.progress = max(0, min(100, int(progress)))
             if message is not None:
                 self.message = message[:240]
+            self.updated_at = time.time()
+        self._notify()
 
     def append(self, value: str) -> None:
         with self._lock:
             self.log.append(value[:500])
             self.log[:] = self.log[-160:]
+            self.updated_at = time.time()
+        self._notify()
 
     def to_dict(self) -> dict[str, object]:
         with self._lock:
@@ -778,6 +833,8 @@ class CompanionJob:
                 "downloadUrl": self.download_url,
                 "result": self.result,
                 "log": list(self.log),
+                "createdAt": self.created_at,
+                "updatedAt": self.updated_at,
             }
 
 
@@ -797,6 +854,15 @@ class CompanionState:
         self.state_dir = state_dir.expanduser()
         self.cache_dir = self.state_dir / "packages"
         self.key_dir = self.state_dir / "keys"
+        self.package_cache = PackageCache(self.cache_dir)
+        active = _read_json(self.state_dir / "active.json", {})
+        active_digest = active.get("digest") if isinstance(active, dict) else None
+        previous_digest = active.get("previousDigest") if isinstance(active, dict) else None
+        self.package_cache.prune(
+            active_digest=active_digest if isinstance(active_digest, str) else None,
+            preserve=(previous_digest,) if isinstance(previous_digest, str) else (),
+        )
+        self.job_journal = JobJournal(self.state_dir / "jobs.json")
         self.catalog = PetdexCatalog(cache_path=self.state_dir / "petdex-manifest.json")
         self.hooks = CodexHookBinding(hooks_path)
         self.hooks.trust_probe = CodexHookTrustProbe(
@@ -807,8 +873,12 @@ class CompanionState:
         )
         self.ble_cache = ble_cache
         self.firmware = FirmwareManager(self.state_dir, root=ROOT_DIR)
-        self.jobs: dict[str, CompanionJob] = {}
         self._jobs_lock = threading.Lock()
+        self.jobs = {
+            str(row["jobId"]): CompanionJob.from_dict(row, persist=self._persist_job)
+            for row in self.job_journal.rows(limit=200)
+            if isinstance(row.get("jobId"), str)
+        }
         self._install_lock: asyncio.Lock | None = None
         self._sessions: dict[str, float] = {}
         self._sessions_lock = threading.Lock()
@@ -839,6 +909,8 @@ class CompanionState:
             "companion": {"connected": True, "version": 1},
             "codex": self.hooks.status(),
             "firmware": self.firmware.status(),
+            "jobs": self.job_journal.summary(),
+            "packageCache": self.package_cache.status(),
             "board": {
                 "connected": bool(self.device.connected),
                 "name": cache.get("name") or "VibeBoard",
@@ -847,6 +919,45 @@ class CompanionState:
                 "bleInstall": (capabilities.get("ins") or {}).get("ble") == 1
                 if isinstance(capabilities.get("ins"), dict) else False,
             },
+        }
+
+    def health(self) -> dict[str, object]:
+        checks: list[dict[str, object]] = []
+
+        def add(name: str, status: str, detail: str) -> None:
+            checks.append({"name": name, "status": status, "detail": detail})
+
+        resources = (
+            ("web", WEB_PATH),
+            ("petdexConfig", PETDEX_CONFIG_PATH),
+            ("stateContract", PETDEX_STATE_CONTRACT_PATH),
+            ("runtimeTemplate", ROOT_DIR / "scripts" / "runtime_apps" / "codex_pet" / "manifest.json"),
+        )
+        for name, path in resources:
+            add(name, "ok" if path.is_file() else "error", str(path))
+
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            fd, probe_name = tempfile.mkstemp(prefix=".health.", dir=self.state_dir)
+            os.close(fd)
+            os.unlink(probe_name)
+        except OSError as exc:
+            add("stateDirectory", "error", f"not writable: {exc}")
+        else:
+            add("stateDirectory", "ok", str(self.state_dir))
+
+        cache = self.package_cache.status()
+        add("packageCache", "ok" if cache["withinLimits"] else "error", f"{cache['entries']} packages, {cache['bytes']} bytes")
+        add("board", "ok" if self.device.connected else "warning", "connected" if self.device.connected else "waiting for VibeBoard")
+        hook_status = self.hooks.status()
+        add("codexHooks", "ok" if hook_status.get("bound") else "warning", str(hook_status.get("trustStatus") or "not bound"))
+        service_ready = not any(item["status"] == "error" for item in checks)
+        return {
+            "schemaVersion": 1,
+            "checkedAt": int(time.time()),
+            "serviceReady": service_ready,
+            "boardReady": service_ready and bool(self.device.connected),
+            "checks": checks,
         }
 
     def _remember_board_keychain(self, cache: Mapping[str, str]) -> None:
@@ -868,12 +979,20 @@ class CompanionState:
         with self._jobs_lock:
             return self.jobs.get(job_id)
 
+    def list_jobs(self, *, limit: int = 100) -> list[dict[str, object]]:
+        return self.job_journal.rows(limit=limit)
+
+    def _persist_job(self, job: CompanionJob) -> None:
+        snapshot = job.to_dict()
+        self.job_journal.upsert(snapshot, force=snapshot.get("status") in {"done", "failed"})
+
     def _new_job(self, kind: str, slug: str) -> CompanionJob:
-        job = CompanionJob(f"pet-{secrets.token_hex(8)}", kind, slug)
+        job = CompanionJob(f"pet-{secrets.token_hex(8)}", kind, slug, _persist=self._persist_job)
         with self._jobs_lock:
             self.jobs[job.job_id] = job
-            cutoff = time.time() - 3600
+            cutoff = time.time() - 24 * 60 * 60
             self.jobs = {key: value for key, value in self.jobs.items() if value.created_at >= cutoff}
+        self._persist_job(job)
         return job
 
     def firmware_available(self) -> dict[str, object]:
@@ -969,18 +1088,30 @@ class CompanionState:
         except HpetError as exc:
             if "fetch failed" not in str(exc).lower():
                 raise
-            _, public_key = await asyncio.to_thread(ensure_signing_keys, self.key_dir)
-            package_path, package = await asyncio.to_thread(
-                _cached_v2_hpet_for_slug,
-                self.cache_dir,
-                public_key,
-                str(pet["slug"]),
-            )
+            source_error = str(exc)
+            try:
+                _, public_key = await asyncio.to_thread(ensure_signing_keys, self.key_dir)
+                package_path, package = await asyncio.to_thread(
+                    _cached_v2_hpet_for_slug,
+                    self.cache_dir,
+                    public_key,
+                    str(pet["slug"]),
+                )
+            except HpetError as cache_error:
+                raise HpetError(
+                    f"{source_error}; verified cache fallback unavailable: {cache_error}"
+                ) from exc
             job.append(f"source fetch failed; using verified v2 cache digest={package.digest}")
         job.digest = package.digest
         job.download_url = f"/api/packages/{package.digest}.hpet"
         job.update(stage="verify", progress=30, message="Signature and animation states verified")
         job.append(f"verified hpet digest={package.digest} bytes={package_path.stat().st_size}")
+        active = _read_json(self.state_dir / "active.json", {})
+        active_digest = active.get("digest") if isinstance(active, dict) else None
+        self.package_cache.prune(
+            active_digest=active_digest if isinstance(active_digest, str) else None,
+            preserve=(package.digest,),
+        )
         return package_path, package, public_key
 
     async def _run_package_job(
@@ -1041,7 +1172,19 @@ class CompanionState:
                         job.append(f"rollback also failed: {type(rollback_error).__name__}: {rollback_error}")
             raise install_error
         job.update(stage="verify", progress=96, message="Verifying board animation")
-        _atomic_json(self.state_dir / "active.json", {"slug": package.slug, "digest": package.digest, "installedAt": int(time.time())})
+        _atomic_json(
+            self.state_dir / "active.json",
+            {
+                "slug": package.slug,
+                "digest": package.digest,
+                "previousDigest": previous_digest if isinstance(previous_digest, str) else None,
+                "installedAt": int(time.time()),
+            },
+        )
+        self.package_cache.prune(
+            active_digest=package.digest,
+            preserve=(previous_digest,) if isinstance(previous_digest, str) else (),
+        )
         job.result = dict(result)
         job.status = "done"
         job.update(stage="complete", progress=100, message=f"{package.manifest['name']} is active")
@@ -1234,11 +1377,22 @@ class CompanionHandler(BaseHTTPRequestHandler):
             if path == "/v1/status":
                 self._json(200, self.state.status())
                 return
+            if path == "/v1/health":
+                self._json(200, self.state.health())
+                return
             if path == "/v1/firmware/status":
                 self._json(200, self.state.status()["firmware"])
                 return
             if path == "/v1/firmware/available":
                 self._json(200, self.state.firmware_available())
+                return
+            if path == "/v1/jobs":
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                limit = int(query.get("limit", ["100"])[0])
+                self._json(200, {"jobs": self.state.list_jobs(limit=limit)})
                 return
             if path.startswith("/v1/jobs/"):
                 if not self._authorized():
@@ -1389,6 +1543,7 @@ async def _standalone(port: int, open_browser: bool) -> None:
 def run_self_test() -> None:
     firmware_self_test()
     diagnostics_self_test()
+    companion_state_self_test()
     assert parse_install_url("vibeboard://pet/install?source=petdex&slug=shinchan") == "shinchan"
     for bad in ("https://pet/install?source=petdex&slug=shinchan", "vibeboard://pet/install?source=other&slug=shinchan", "vibeboard://pet/install?source=petdex&slug=../bad"):
         try:
@@ -1496,6 +1651,65 @@ def run_self_test() -> None:
             raise AssertionError("missing cached pet was accepted")
         except HpetError as exc:
             assert "no verified nine-state" in str(exc)
+    with tempfile.TemporaryDirectory(prefix="companion-source-error-test-") as cache_text:
+        state = CompanionState.__new__(CompanionState)
+        state.cache_dir = Path(cache_text) / "packages"
+        state.key_dir = Path(cache_text) / "keys"
+        job = CompanionJob("pet-source-error", "install", "missing-pet")
+        original_builder = globals()["build_petdex_hpet"]
+        original_keys = globals()["ensure_signing_keys"]
+        original_cache_lookup = globals()["_cached_v2_hpet_for_slug"]
+
+        def failing_builder(*_args: object, **_kwargs: object) -> tuple[Path, HpetPackage, Path]:
+            raise HpetError("build_hpet_petdex: source fetch failed: ETIMEDOUT")
+
+        def fake_keys(_path: Path) -> tuple[Path, Path]:
+            return Path(cache_text) / "private.pem", Path(cache_text) / "public.pem"
+
+        def missing_cache(*_args: object, **_kwargs: object) -> tuple[Path, HpetPackage]:
+            raise HpetError("no verified nine-state v2 package is cached for missing-pet")
+
+        globals()["build_petdex_hpet"] = failing_builder
+        globals()["ensure_signing_keys"] = fake_keys
+        globals()["_cached_v2_hpet_for_slug"] = missing_cache
+        try:
+            asyncio.run(state._build_package(job, {"slug": "missing-pet"}))
+        except HpetError as exc:
+            message = str(exc)
+            assert "source fetch failed: ETIMEDOUT" in message
+            assert "no verified nine-state v2 package is cached" in message
+        else:
+            raise AssertionError("cache miss hid the original Petdex network failure")
+        finally:
+            globals()["build_petdex_hpet"] = original_builder
+            globals()["ensure_signing_keys"] = original_keys
+            globals()["_cached_v2_hpet_for_slug"] = original_cache_lookup
+    with tempfile.TemporaryDirectory(prefix="companion-recovery-test-") as temp_text:
+        async def state_recovery_check() -> None:
+            state_dir = Path(temp_text) / "state"
+            hooks_path = Path(temp_text) / "hooks.json"
+            first = CompanionState(
+                loop=asyncio.get_running_loop(),
+                device=OfflineDevice(),
+                state_dir=state_dir,
+                hooks_path=hooks_path,
+            )
+            job = first._new_job("install", "shinchan")
+            job.status = "running"
+            job.update(stage="transfer", progress=42, message="transfer in progress")
+            second = CompanionState(
+                loop=asyncio.get_running_loop(),
+                device=OfflineDevice(),
+                state_dir=state_dir,
+                hooks_path=hooks_path,
+            )
+            recovered_job = second.get_job(job.job_id)
+            assert recovered_job is not None
+            assert recovered_job.status == "failed" and recovered_job.stage == "interrupted"
+            health = second.health()
+            assert health["serviceReady"] is True and health["boardReady"] is False
+
+        asyncio.run(state_recovery_check())
     with tempfile.TemporaryDirectory(prefix="companion-test-") as temp_text:
         hooks_path = Path(temp_text) / ".codex" / "hooks.json"
         hooks_path.parent.mkdir()

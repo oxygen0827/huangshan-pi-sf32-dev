@@ -336,6 +336,7 @@
     const state = {
       token: "",
       status: null,
+      health: null,
       pets: [],
       total: 0,
       offset: 0,
@@ -411,6 +412,7 @@
     function renderStatus() {
       const value = state.status || {};
       const companion = Boolean(value.companion?.connected);
+      const serviceReady = state.health?.serviceReady !== false;
       const codexState = value.codex || {};
       const bound = Boolean(codexState.bound);
       const codex = isCodexReady(codexState);
@@ -421,7 +423,9 @@
       setDot("companionDot", companion, !companion);
       setDot("codexDot", codex, trustNeedsAction || codexState.detected === false);
       setDot("boardDot", board, false);
-      $("companionDetail").textContent = companion ? `本地服务 v${value.companion?.version || 1}` : "未连接";
+      $("companionDetail").textContent = !companion
+        ? "未连接"
+        : (serviceReady ? `本地服务 v${value.companion?.version || 1}` : "服务需要修复 · 查看健康检查");
       $("codexDetail").textContent = codex
         ? `${codexState.events?.length || 0} 个 Hooks 已绑定并信任`
         : (trustNeedsAction
@@ -450,10 +454,10 @@
       $("boardAction").disabled = board || state.jobActive;
       $("jobClose").disabled = state.jobActive;
       document.querySelectorAll("[data-deploy]").forEach(button => {
-        button.disabled = state.jobActive || !(board && codex);
+        button.disabled = state.jobActive || !(board && codex && serviceReady);
         button.textContent = state.jobActive
           ? "处理中"
-          : (!codex ? "先绑定 Codex" : (!board ? "先连接板子" : "部署到板子"));
+          : (!serviceReady ? "先修复 Companion" : (!codex ? "先绑定 Codex" : (!board ? "先连接板子" : "部署到板子")));
       });
       document.querySelectorAll("[data-download]").forEach(button => {
         button.disabled = state.jobActive || !companion;
@@ -462,7 +466,7 @@
 
     async function refreshStatus() {
       try {
-        state.status = await api("/v1/status");
+        [state.status, state.health] = await Promise.all([api("/v1/status"), api("/v1/health")]);
         $("companionWarning").hidden = true;
         renderStatus();
       } catch (error) {
@@ -658,11 +662,12 @@
         if (job.kind.startsWith("firmware_")) return job.kind === "firmware_rollback" ? "固件回滚完成" : "固件更新完成";
         return "部署完成";
       }
-      if (job.stage === "failed") {
+      if (job.status === "failed" || job.stage === "failed") {
         if (job.kind === "build") return "保存失败";
         if (job.kind === "pair") return "连接失败";
         if (job.kind === "support_bundle") return "诊断包失败";
         if (job.kind.startsWith("firmware_")) return "固件操作失败";
+        if (job.stage === "interrupted") return "任务因 Companion 重启而中断";
         return "部署失败";
       }
       return stageLabels[job.stage] || job.stage;
@@ -736,6 +741,10 @@
     }
 
     async function deploy(slug, digest = null) {
+      if (state.health?.serviceReady === false) {
+        showToast("Companion 健康检查未通过，请先查看服务状态");
+        return;
+      }
       if (!isCodexReady(state.status?.codex)) {
         showToast(state.status?.codex?.bound ? "请先信任 Codex Hooks" : "请先绑定 Codex");
         return;

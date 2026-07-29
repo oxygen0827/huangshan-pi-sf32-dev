@@ -21,6 +21,7 @@ const MIN_FRAMES_PER_STATE = 2;
 const FRAME_MS = 120;
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_METADATA_BYTES = 64 * 1024;
+const FETCH_RETRY_DELAYS_MS = [400, 800, 1600];
 const PETDEX_CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, "petdex_state_contract.json"), "utf8"));
 const SOURCE_STATES = [...PETDEX_CONTRACT.states]
   .sort((left, right) => left.row - right.row)
@@ -64,25 +65,73 @@ function resolveAssetRedirect(current, location) {
   return validateAssetUrl(new URL(location, current).href);
 }
 
-async function download(url, maxBytes) {
+function retryableStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function fetchError(message, { cause = null, retryable = false } = {}) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.retryable = retryable;
+  return error;
+}
+
+function networkErrorDetail(error) {
+  const message = String(error?.message || error || "unknown network error");
+  const cause = String(error?.cause?.code || error?.cause?.message || "");
+  return cause && cause !== message ? `${message} (${cause})` : message;
+}
+
+async function downloadAttempt(url, maxBytes, fetchImpl) {
   let current = validateAssetUrl(url);
   let response;
   for (let redirects = 0; redirects <= 4; redirects++) {
     try {
-      response = await fetch(current, { redirect: "manual" });
+      response = await fetchImpl(current, { redirect: "manual" });
     } catch (error) {
-      throw new Error(`source fetch failed: ${error.message}`);
+      throw fetchError(`source fetch failed: ${networkErrorDetail(error)}`, {
+        cause: error,
+        retryable: true,
+      });
     }
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     if (redirects === 4) throw new Error("source fetch failed: too many Petdex redirects");
     current = resolveAssetRedirect(current, response.headers.get("location"));
   }
-  if (!response?.ok) throw new Error(`source fetch failed (${response?.status || "unknown"}): ${current}`);
+  if (!response?.ok) {
+    throw fetchError(`source fetch failed (${response?.status || "unknown"}): ${current}`, {
+      retryable: retryableStatus(response?.status || 0),
+    });
+  }
   const declared = Number(response.headers.get("content-length") || 0);
   if (declared > maxBytes) throw new Error(`download exceeds ${maxBytes} bytes: ${url}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
+  let bytes;
+  try {
+    bytes = Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    throw fetchError(`source fetch failed while reading response: ${networkErrorDetail(error)}`, {
+      cause: error,
+      retryable: true,
+    });
+  }
   if (bytes.length > maxBytes) throw new Error(`download exceeds ${maxBytes} bytes: ${url}`);
   return bytes;
+}
+
+async function download(url, maxBytes, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const sleepImpl = options.sleepImpl || (delay => new Promise(resolve => setTimeout(resolve, delay)));
+  const retryDelaysMs = options.retryDelaysMs || FETCH_RETRY_DELAYS_MS;
+  let lastError;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+    try {
+      return await downloadAttempt(url, maxBytes, fetchImpl);
+    } catch (error) {
+      lastError = error;
+      if (!error.retryable || attempt === retryDelaysMs.length) throw error;
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastError;
 }
 
 async function inputBytes(entry, remoteKey, localKey, maxBytes, allowLocal) {
@@ -305,6 +354,29 @@ async function selfTest() {
       throw new Error("unsafe Petdex redirect passed");
     } catch (error) {
       if (error.message === "unsafe Petdex redirect passed") throw error;
+    }
+    const retryDelays = [];
+    let fetchAttempts = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchAttempts++;
+      if (fetchAttempts < 3) throw new Error("temporary network failure");
+      return new Response(Buffer.from("retry-ok"), {
+        status: 200,
+        headers: { "content-length": "8" },
+      });
+    };
+    try {
+      const retried = await download("https://assets.petdex.dev/retry.bin", 32, {
+        retryDelaysMs: [10, 20, 40],
+        sleepImpl: async delay => retryDelays.push(delay),
+      });
+      if (retried.toString("utf8") !== "retry-ok" || fetchAttempts !== 3 ||
+          JSON.stringify(retryDelays) !== JSON.stringify([10, 20])) {
+        throw new Error("Petdex fetch retry/backoff contract failed");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
     }
     const width = CELL_WIDTH * 8;
     const height = CELL_HEIGHT * 9;
