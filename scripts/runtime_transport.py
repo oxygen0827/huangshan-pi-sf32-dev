@@ -68,6 +68,10 @@ BLE_BULK_V2_RETRIES = 5
 BLE_BULK_V2_RECONNECT_RETRIES = 4
 BLE_INSTALL_SESSION_RESTARTS = 2
 BLE_BULK_V2_ALREADY_APPLIED_RC = -7  # RT-Thread -RT_EBUSY after a lost completion ACK.
+# `install_begin` can clean a prior staging directory on the SD card, and a
+# forced reconnect needs time for encryption and CCCD state to settle.  The
+# normal four-second Runtime command timeout is too short for either path.
+BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS = 20.0
 SERIAL_BLOB_CHUNK_BYTES = 3072
 SERIAL_BLOB_WRITE_BYTES = 256
 # CoreBluetooth may need a full service-change/bond window on the first link.
@@ -840,6 +844,28 @@ def ble_bulk_ack_confirms_progress(
         and ack.offset == expected_offset
         and ack.next_sequence == expected_next_sequence
         and (ack.ok or ack.rc == BLE_BULK_V2_ALREADY_APPLIED_RC)
+    )
+
+
+def ble_bulk_ack_is_stale(
+    ack: BLEBulkAck,
+    transfer_id: int,
+    expected_offset: int,
+    expected_next_sequence: int,
+) -> bool:
+    """Return whether an ACK belongs to an earlier frame in this transfer.
+
+    Status notifications are delivered asynchronously. A previous frame's ACK
+    can arrive after the host has started waiting for the next one. It is not
+    a transfer error and must not cause the next retry to clear the correct
+    ACK that is already in flight.
+    """
+    return (
+        ack.transfer_id == transfer_id
+        and ack.ok
+        and ack.offset <= expected_offset
+        and ack.next_sequence <= expected_next_sequence
+        and (ack.offset < expected_offset or ack.next_sequence < expected_next_sequence)
     )
 
 
@@ -2377,7 +2403,7 @@ class BLETransport:
         status = await self.read_matching(
             abort_command,
             lambda current, command=abort_command: install_ack_matches(current, command),
-            timeout=max(4.0, self.options.final_wait + 3.0),
+            timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
             response_wait=max(self.options.response_wait, 0.12),
         )
         if status.startswith("err ") or " rc=-" in status:
@@ -2433,6 +2459,16 @@ class BLETransport:
                     ack = parse_ble_bulk_ack(status)
                     if ack is None or ack.transfer_id != transfer_id:
                         continue
+                    if ble_bulk_ack_is_stale(
+                        ack,
+                        transfer_id,
+                        expected_offset,
+                        expected_next_sequence,
+                    ):
+                        # Keep waiting: this is a delayed ACK for the prior
+                        # frame, while the current frame's ACK can still be in
+                        # the notification queue.
+                        continue
                     last_status = status
                     attempt_status = status
                     if ble_bulk_ack_confirms_progress(
@@ -2444,6 +2480,13 @@ class BLETransport:
                     status = await self.read_status_retrying(self.options.response_wait)
                     ack = parse_ble_bulk_ack(status)
                     if ack is not None and ack.transfer_id == transfer_id:
+                        if ble_bulk_ack_is_stale(
+                            ack,
+                            transfer_id,
+                            expected_offset,
+                            expected_next_sequence,
+                        ):
+                            continue
                         last_status = status
                         attempt_status = status
                         if ble_bulk_ack_confirms_progress(
@@ -2467,7 +2510,7 @@ class BLETransport:
             try:
                 await self.connect()
                 await self.verify_connection(
-                    timeout=max(4.0, self.options.final_wait + 3.0)
+                    timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0)
                 )
                 return
             except asyncio.CancelledError:
@@ -2501,7 +2544,7 @@ class BLETransport:
                 return await self.read_matching(
                     command,
                     matcher,
-                    timeout=max(4.0, self.options.final_wait + 3.0),
+                    timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
                     response_wait=max(self.options.response_wait, 0.12),
                 )
             except asyncio.CancelledError:
@@ -2724,7 +2767,7 @@ class BLETransport:
             last_status = await self.read_matching(
                 current_command,
                 lambda status, command=current_command: install_ack_matches(status, command),
-                timeout=max(4.0, self.options.final_wait + 3.0),
+                timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
                 response_wait=max(self.options.response_wait, 0.12),
             )
             current_ack_received = True
@@ -2736,7 +2779,7 @@ class BLETransport:
                 last_status = await self.read_matching(
                     "status",
                     lambda status: f"active={package_id}" in status,
-                    timeout=max(4.0, self.options.final_wait + 3.0),
+                    timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
                     response_wait=max(self.options.final_wait, 0.25),
                 )
             return last_status
@@ -2790,7 +2833,7 @@ class BLETransport:
                 last_status = await self.read_matching(
                     command,
                     lambda status, command=command: install_ack_matches(status, command),
-                    timeout=max(4.0, self.options.final_wait + 3.0),
+                    timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
                     response_wait=max(self.options.response_wait, 0.12),
                 )
                 current_ack_received = True
@@ -2802,7 +2845,7 @@ class BLETransport:
                 last_status = await self.read_matching(
                     "status",
                     lambda status: f"active={package_id}" in status,
-                    timeout=max(4.0, self.options.final_wait + 3.0),
+                    timeout=max(BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS, self.options.final_wait + 3.0),
                     response_wait=max(self.options.final_wait, 0.25),
                 )
             return last_status
@@ -3014,6 +3057,7 @@ def run_self_test() -> None:
     assert MAX_INSTALL_CHUNK_BYTES == 240
     assert BLE_INSTALL_COMMAND_MAX_CHARS == 255
     assert BLE_INSTALL_COMMAND_MAX_CHARS <= 255
+    assert BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS >= 20.0
     probe_payload = bytes(range(32))
     probe_frame = build_ble_bulk_frame(
         7, 3, 64, probe_payload, request_ack=True
@@ -3807,6 +3851,8 @@ def run_self_test() -> None:
                 response_wait: float | None = None,
             ) -> str:
                 self.commands.append(command)
+                if command.startswith("vb_runtime_install_"):
+                    assert timeout >= BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS
                 if command.startswith("vb_runtime_install_begin "):
                     response = "ok install_begin app=demo rc=0"
                 elif command.startswith("vb_runtime_install_bulk "):
@@ -3846,6 +3892,56 @@ def run_self_test() -> None:
         assert transport.data_failures == 0
         assert transport._client.ack_count == 11
         assert transport._client.binary_writes == 11
+
+        class StaleThenCurrentAckClient:
+            """Delivers a delayed prior ACK before the requested frame ACK."""
+
+            def __init__(self, transport: BLETransport) -> None:
+                self.transport = transport
+                self.writes = 0
+
+            async def write_gatt_char(self, uuid: str, frame: bytes, *, response: bool) -> None:
+                assert uuid == COMMAND_UUID and not response
+                self.writes += 1
+                _, _, _, payload_size, transfer_id, sequence, offset, _ = BLE_BULK_V2_HEADER.unpack(
+                    frame[: BLE_BULK_V2_HEADER.size]
+                )
+                self.transport._handle_status_notification(
+                    None,
+                    bytearray(
+                        (
+                            f"ok install_bulk_data id={transfer_id} seq={sequence - 1} "
+                            f"next={sequence} offset={offset} rc=0"
+                        ).encode("utf-8")
+                    ),
+                )
+
+                async def send_current_ack() -> None:
+                    await asyncio.sleep(0)
+                    self.transport._handle_status_notification(
+                        None,
+                        bytearray(
+                            (
+                                f"ok install_bulk_data id={transfer_id} seq={sequence} "
+                                f"next={sequence + 1} offset={offset + payload_size} rc=0"
+                            ).encode("utf-8")
+                        ),
+                    )
+
+                asyncio.create_task(send_current_ack())
+
+        stale_transport = BLETransport(BLETransportOptions(disconnect_pause=0))
+        stale_client = StaleThenCurrentAckClient(stale_transport)
+        stale_transport._client = stale_client
+        stale_frame = build_ble_bulk_frame(41, 1, 220, b"x" * 20, request_ack=True)
+        stale_result = await stale_transport._send_bulk_window(
+            41,
+            [stale_frame],
+            expected_offset=240,
+            expected_next_sequence=2,
+        )
+        assert "next=2 offset=240" in stale_result
+        assert stale_client.writes == 1
 
         class InterruptedInstallTransport(BulkTransport):
             def __init__(self, failure_rc: int) -> None:

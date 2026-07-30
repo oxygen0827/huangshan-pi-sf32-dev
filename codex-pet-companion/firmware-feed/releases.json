@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "board": "sf32lb52-lchspi-ulp",
+  "releases": [
+    {
+      "version": "1.0.1",
+      "url": "https://ldcx.tech/static/codex-pet/firmware/VibeBoard-Firmware-1.0.1-sf32lb52-lchspi-ulp.zip",
+      "sha256": "ef98600bb99806fceb894c66b90fc29f3a933e4679e31289b21248966d6a7afe"
+    },
+    {
+      "version": "1.0.0",
+      "url": "https://ldcx.tech/static/codex-pet/firmware/VibeBoard-Firmware-1.0.0-sf32lb52-lchspi-ulp.zip",
+      "sha256": "5a3ae5a30c3edd1ff98b36b5eac169292ef3e531b7bd5c5eefc37cb8794b15f8"
+    }
+  ]
+}

@@ -108,3 +108,4 @@ docs/
 - [../docs/codex-pet-bridge.md](../docs/codex-pet-bridge.md) — 协议细节、状态归并逻辑、事故复盘
 - [../docs/codex-pet-one-click-deploy.md](../docs/codex-pet-one-click-deploy.md) — 宠物部署架构与安装恢复
 - [../docs/macos-companion-release.md](../docs/macos-companion-release.md) — macOS 打包、域名、签名、公证与发布 Gate
+- [FIRMWARE-UPDATES.md](FIRMWARE-UPDATES.md) — Codex Pet 固件检查、签名发布与未来 BLE DFU 边界

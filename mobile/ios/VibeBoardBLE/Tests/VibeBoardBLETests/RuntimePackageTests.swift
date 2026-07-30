@@ -488,12 +488,13 @@ private func runtimeManifest(_ appId: String, components: String = "[]") -> Data
 
 @Test func decodesRuntimeCapabilities() throws {
     let json = """
-    {"api":"vibeboard-huangshan-capabilities/v1","rt":"vibeboard-huangshan-runtime/v1","ble":"vibeboard-huangshan-ble-install/v1","sens":"vibeboard-huangshan-sensors/v1","touch":"vibeboard-huangshan-touch/v1","flow":"vibeboard-huangshan-info-flow/v1","voice":"vibeboard-huangshan-voice-bridge/v1","pwr":"vibeboard-huangshan-power/v1","disp":"vibeboard-huangshan-display/v1","gpio":"vibeboard-huangshan-gpio/v1","rgb":"vibeboard-huangshan-rgb/v1","fs":1,"ins":{"ser":1,"ble":1,"max":240},"app":{"lua":"script-subset","comp":8},"hw":{"disp":1,"touch":1,"sens":1,"voice":1,"flow":1,"batt":1,"chg":1,"gpio":1,"rgb":1}}
+    {"api":"vibeboard-huangshan-capabilities/v1","firmwareVersion":"1.0.0","rt":"vibeboard-huangshan-runtime/v1","ble":"vibeboard-huangshan-ble-install/v1","sens":"vibeboard-huangshan-sensors/v1","touch":"vibeboard-huangshan-touch/v1","flow":"vibeboard-huangshan-info-flow/v1","voice":"vibeboard-huangshan-voice-bridge/v1","pwr":"vibeboard-huangshan-power/v1","disp":"vibeboard-huangshan-display/v1","gpio":"vibeboard-huangshan-gpio/v1","rgb":"vibeboard-huangshan-rgb/v1","fs":1,"ins":{"ser":1,"ble":1,"max":240},"app":{"lua":"script-subset","comp":8},"hw":{"disp":1,"touch":1,"sens":1,"voice":1,"flow":1,"batt":1,"chg":1,"gpio":1,"rgb":1}}
     """
 
     let capabilities = try JSONDecoder().decode(VibeBoardRuntimeCapabilities.self, from: Data(json.utf8))
 
     #expect(capabilities.api == "vibeboard-huangshan-capabilities/v1")
+    #expect(capabilities.firmwareVersion == "1.0.0")
     #expect(capabilities.ins.max == 240)
     #expect(capabilities.ins.stage == 0)
     #expect(capabilities.app.lua == "script-subset")

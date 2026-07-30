@@ -53,11 +53,16 @@ requireSource(/serviceReady/,
   "deploy must be gated by Companion service readiness");
 requireSource(/任务因 Companion 重启而中断/,
   "interrupted persistent jobs need an actionable status label");
+requireHtml(/id="firmwareCheck"/, "firmware check control is missing");
 requireHtml(/id="firmwareUpdate"/, "firmware update control is missing");
 requireHtml(/id="firmwareRollback"/, "firmware rollback control is missing");
 requireHtml(/id="supportBundle"/, "support bundle control is missing");
+requireSource(/\/v1\/firmware\/check/, "firmware checks must use the Companion API");
 requireSource(/\/v1\/firmware\/update/, "firmware update must use the Companion API");
 requireSource(/\/v1\/firmware\/rollback/, "firmware rollback must use the Companion API");
+requireSource(/function checkFirmware\(/, "the firmware check control needs a dedicated action");
+requireSource(/firmwareCheck\.state !== "update_available"/, "firmware installation must require a successful update check");
+requireSource(/firmwareCheck\.canInstall !== true/, "the browser must obey the Companion delivery decision");
 requireSource(/\/v1\/support\/bundle/, "support bundle must use the Companion API");
 requireSource(/Authorization|authorization/, "support downloads must carry the Companion session");
 requireSource(/job\.kind === ["']build["'][\s\S]*保存完成/,
@@ -72,6 +77,27 @@ requireHtml(/name="vibeboard-companion-download"/,
   "a public gallery must expose a configurable Companion download URL");
 requireHtml(/href="vibeboard:\/\/companion\/open"/,
   "an offline public gallery must offer the Companion launch deep link");
+requireHtml(/id="onboardingCompanion"/, "the unboxing guide must expose the Companion step");
+requireHtml(/id="onboardingBoardStep"/, "the unboxing guide must expose the board step");
+requireHtml(/id="onboardingCodexStep"/, "the unboxing guide must expose the Codex step");
+requireHtml(/id="onboardingDeployStep"/, "the unboxing guide must expose the deployment step");
+requireHtml(/id="onboardingDownload"/, "the unboxing guide must expose the Companion download action");
+requireHtml(/a[.]compact-button\[hidden\]\s*\{\s*display:\s*none;/,
+  "hidden Companion links must not be revived by the compact-button display rule");
+requireSource(/function renderOnboarding\(/,
+  "the unboxing guide must render from live Companion status");
+requireSource(/const codexReadyAfterBoard = board && codex[\s\S]*const deployReady = companion && codexReadyAfterBoard/,
+  "the unboxing guide must not unlock deployment before every prerequisite is ready");
+requireSource(/\$\("onboardingBoard"\)\.addEventListener\("click", pairBoard\)/,
+  "the board onboarding action must use the existing pairing flow");
+requireSource(/\$\("onboardingCodex"\)\.addEventListener\("click", advanceCodexOnboarding\)/,
+  "the Codex onboarding action must respect the trust-review flow");
+requireSource(/function advanceCodexOnboarding\(/,
+  "the unboxing guide must offer /hooks review after a partial Codex binding");
+requireSource(/!board \? "等待连接" : \(codex \? "已绑定"/,
+  "a locked Codex step must not be visually reported as completed");
+requireSource(/\$\("onboardingGallery"\)\.addEventListener\("click"[\s\S]*scrollIntoView/,
+  "the final onboarding action must lead to the pet gallery");
 requireHtml(/connect-src[^>]*http:\/\/127[.]0[.]0[.]1:8790/,
   "the CSP must allow only the fixed loopback Companion endpoint");
 requireSource(/getImageData\(/,

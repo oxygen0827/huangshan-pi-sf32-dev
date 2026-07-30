@@ -14,6 +14,50 @@
 - 后续规则：以后写同类 App 要怎么避免。
 - 验证方式：用什么命令或真机操作确认。
 
+## 2026-07-30：macOS 固件归档混入 AppleDouble 文件，发布哈希不稳定
+
+### 现象
+
+首次将签名固件 release 目录用 macOS `ditto` 打包后，ZIP 中出现 `._*` AppleDouble 文件。固件
+本体没有变化，但归档 SHA-256 与无 sidecar 的归档不同，发布源中的哈希校验因此会拒绝客户端
+下载的非同一归档。
+
+### 真正原因
+
+`ditto` 会保留 macOS 文件系统元数据。固件发布包是跨平台的不可变字节对象，不能把宿主机的
+扩展属性或 Finder 资源叉带入其中。
+
+### 修复方式
+
+`scripts/firmware_release.py archive` 现在从已经验签的 release 目录按固定顺序和固定 ZIP
+metadata 创建归档，并在写入前重新解压、验签。该命令拒绝现有目标文件和非 `.zip` 输出，也会
+拒绝任何 `._*` 或 `.DS_Store` 条目。
+
+### 后续规则与验证
+
+所有上传到官方发布源的固件 ZIP 都必须由该命令产生。上传前记录其输出的 SHA-256，将该值写入
+`codex-pet-companion/firmware-feed/releases.json`；上传后再通过 HTTPS 下载一次并比较相同哈希。
+
+## 2026-07-30：单次 TLS EOF 被错误呈现为“官方固件发布源不可用”
+
+### 现象
+
+Companion 已成功读取过 `1.0.1` 发布源，但随后一次“检查固件更新”出现
+`SSL: UNEXPECTED_EOF_WHILE_READING`，网页立即显示发布源不可用。服务器侧 Nginx 容器仍健康，
+同一 TLS vhost 连续五次请求均返回 HTTP 200 且证书校验成功。
+
+### 真正原因
+
+固件源读取是幂等 GET，但 `_open_https` 把一次短暂的握手 EOF 当作最终业务失败，没有恢复机会。
+这既不能说明发布源文件损坏，也不能说明板子或蓝牙有问题。
+
+### 修复方式与后续规则
+
+Companion 现在仅为 feed 和 release archive 的 HTTPS GET 增加最多三次有限重试与短退避。HTTP
+错误、证书验证错误以及达到上限后的错误仍立即向用户报告，绝不通过禁用 TLS 验证来“修复”。每次
+发布后应验证服务器本地 vhost 和真实 Companion 两条路径；一次 TLS EOF 必须先看重试后的结果，再
+判断服务器故障。
+
 ## 2026-07-24：Codex Pet 显示已连接但运行状态不更新
 
 ### 日期 / App
@@ -2076,6 +2120,68 @@ BLE/串口 Runtime 状态包含心跳、耗时和恢复计数。读取 `json_rea
    当前占用，不能依赖用户手动清理磁盘。
 3. C 端入口先调用 `/v1/health`，再允许部署；`serviceReady` 和 `boardReady` 不得用一个布尔值
    混淆服务故障、未连接和可部署状态。
+
+### 问题四十二：BLE 部署失败由旧 Companion 进程和延迟 ACK 共同触发
+
+#### 现象
+
+网页在宠物包已下载、组合完成后报错：
+
+```text
+BLE install begin interrupted: Did not receive expected BLE status response
+```
+
+一次失败停留在 `Starting transactional install`；另一次在分包传输中收到
+`ok install_bulk_data` 后重连并最终失败。板子仍可被扫描为 `VibeBoard`，因此不能直接把
+该现象归因为板端停止广播或宠物包损坏。
+
+#### 已确认根因
+
+这是两个会叠加的主机端问题：
+
+1. 已重建 `.local/VibeBoard Companion.app`，但实际持有 CoreBluetooth 连接的旧 App/Agent
+   进程仍在运行。磁盘上的新包不会替换已加载到内存的 Python transport；旧进程继续使用已超时的
+   CoreBluetooth 会话，`connect` 最终达到 deadline。只看网页或构建成功不能证明修复已生效。
+2. BLE status notification 是异步队列。上一帧的成功 ACK 可以在主机开始等待下一帧时才到达。
+   旧 transport 将该 ACK 当作当前帧不匹配，进入重试并清空队列，连同随后到达的正确 ACK 一起丢弃。
+   主机为重连主动关闭 GATT 时，板端出现的 `host disconnected reason=19` 是这个恢复动作的结果，
+   不能误判为板子先断开。
+
+另一个放大因素是 `install_begin` 可能清理 SD 卡上的 staging 目录，重连后加密和 CCCD 恢复也需要
+时间；普通 Runtime 命令使用的 4 秒窗口不足以判断安装控制命令失败。
+
+#### 已落地的解决方案
+
+- `runtime_transport.py` 新增 `ble_bulk_ack_is_stale()`：只要 ACK 属于同一 transfer id 且 offset 或
+  next sequence 落后于当前等待帧，即保留通知队列并继续等当前 ACK。未知 transfer id、错误 ACK 和
+  不符合当前事务的确认仍然按异常处理，不能无限忽略。
+- 所有 `install_begin`、`install_end`、事务状态确认、abort 和重连验证统一至少使用
+  `BLE_INSTALL_CONTROL_ACK_TIMEOUT_SECONDS = 20`。这只放宽安装控制路径，普通命令仍使用原有响应
+  时间，避免全局超时掩盖故障。
+- Companion 在安装失败后进入明确的 `rollback` 阶段，持续报告恢复旧宠物的进度，成功恢复后再返回
+  原部署失败。页面不再长时间停留在上一笔传输进度而看不出正在回滚。
+- 部署验证前必须停止并确认退出实际运行的 App/Agent PID，再启动刚构建的 bundle；通过
+  `/v1/status` 确认 `board.connected=true`、`bleInstall=true`，不能只根据进程存在或网页可打开判断。
+
+#### 回归与真机证据
+
+- `runtime_transport.py --self-test` 增加“先到上一帧 ACK、后到当前 ACK”的桩，断言单次写入即可
+  成功，防止后续修改重新清空正确的 ACK。
+- `codex_pet_companion.py --self-test`、`verify_codex_pet_companion_app.sh` 和补丁格式检查均通过。
+- 重启新版 Companion 后，板子自动恢复连接。真实部署宠物 `002` 完成 `install_begin`、`5038` 个
+  数据块传输、提交和激活确认，作业到达 100%；板端返回 `pet=002`、`assetStates=9`、`frames=6`。
+
+#### 后续规则
+
+1. 每次改动 Companion 运行时代码后，发布或真机验证前都要同时记录新 PID/启动时间、
+   `/v1/status` 的 BLE 能力和实际安装作业终态；重建产物本身不是验证。
+2. BLE 事务 ACK 必须按 transaction id、offset 和 sequence 关联。对于可证明属于较早帧的 ACK，继续
+   等待；不要立即断连、清队列或重发当前帧。对于身份不符、错误码或超出事务边界的消息，仍须显式
+   失败并走有限恢复。
+3. 观察到 `reason=19` 时，先核对 Companion 是否因重试主动关闭客户端，再判断板端广告/连接自愈；
+   排障必须按主机写入、通知到达、连接关闭的时间线归因。
+4. 新的 BLE 安装修复必须至少跑一次真实大于 1 MiB 的九状态宠物，覆盖 staging 清理、长分包传输、
+   提交确认和回滚 UI，不得只用小型模拟包判断成功。
 
 ## 待继续沉淀的问题
 

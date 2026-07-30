@@ -30,6 +30,8 @@ from companion_firmware import FirmwareManager, FirmwareManagerError
 from companion_diagnostics import create_support_bundle
 from companion_diagnostics import run_self_test as diagnostics_self_test
 from companion_firmware import run_self_test as firmware_self_test
+from codex_pet_firmware_update import check_for_firmware_update
+from codex_pet_firmware_update import run_self_test as firmware_update_check_self_test
 from companion_state import JobJournal, PackageCache
 from companion_state import run_self_test as companion_state_self_test
 from firmware_release import FirmwareReleaseError
@@ -998,7 +1000,27 @@ class CompanionState:
     def firmware_available(self) -> dict[str, object]:
         return self.firmware.available()
 
+    def firmware_update_check(self) -> dict[str, object]:
+        capabilities = getattr(self.device, "runtime_capabilities", {})
+        if not isinstance(capabilities, Mapping):
+            capabilities = {}
+        return check_for_firmware_update(
+            self.firmware,
+            board_connected=bool(self.device.connected),
+            runtime_capabilities=capabilities,
+        )
+
     def start_firmware_job(self, *, version: str | None = None, rollback: bool = False) -> CompanionJob:
+        if not rollback:
+            check = self.firmware_update_check()
+            if check.get("state") != "update_available":
+                raise CompanionError(str(check.get("message") or "no verified firmware update is available"))
+            latest = check.get("latest")
+            if not isinstance(latest, str):
+                raise CompanionError("firmware update check did not return a release version")
+            if version is not None and version != latest:
+                raise CompanionError("only the latest verified firmware release can be installed")
+            version = latest
         job = self._new_job("firmware_rollback" if rollback else "firmware_update", "firmware")
 
         def progress(stage: str, percent: int, message: str) -> None:
@@ -1153,6 +1175,15 @@ class CompanionState:
             elif command.startswith("vb_runtime_install_end"):
                 job.update(stage="restart", progress=88, message="Committing and restarting Codex Pet")
 
+        def rollback_progress(command: str, index: int, total: int) -> None:
+            if command.startswith("vb_runtime_install_begin"):
+                job.update(stage="rollback", progress=40, message="Restoring the previous pet")
+            elif command.startswith(("vb_runtime_install_file", "vb_runtime_install_bulk")):
+                percent = 40 + int(index / max(total, 1) * 48)
+                job.update(stage="rollback", progress=min(88, percent), message=f"Restoring {index}/{total}")
+            elif command.startswith("vb_runtime_install_end"):
+                job.update(stage="rollback", progress=90, message="Restarting the restored pet")
+
         job.append(f"compose runtime files={len(files)} bytes={sum(map(len, files.values()))}")
         try:
             result = await self.device.install_codex_pet(files, package.slug, progress=progress)
@@ -1161,13 +1192,19 @@ class CompanionState:
                 previous_path = self.cache_dir / f"{previous_digest}.hpet"
                 if previous_path.is_file():
                     job.append(f"restoring previous pet digest={previous_digest}")
+                    job.update(stage="rollback", progress=38, message="Deployment failed; restoring the previous pet")
                     try:
                         await self.device.reconnect()
                         public_key = ensure_signing_keys(self.key_dir)[1]
                         previous_package = await asyncio.to_thread(read_hpet, previous_path.read_bytes(), public_key=public_key)
                         _, previous_files = await asyncio.to_thread(compose_codex_pet_runtime, previous_package)
-                        await self.device.install_codex_pet(previous_files, previous_package.slug)
+                        await self.device.install_codex_pet(
+                            previous_files,
+                            previous_package.slug,
+                            progress=rollback_progress,
+                        )
                         job.append("previous pet restored")
+                        job.update(stage="rollback", progress=94, message="Previous pet restored; reporting deployment failure")
                     except Exception as rollback_error:
                         job.append(f"rollback also failed: {type(rollback_error).__name__}: {rollback_error}")
             raise install_error
@@ -1386,6 +1423,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
             if path == "/v1/firmware/available":
                 self._json(200, self.state.firmware_available())
                 return
+            if path == "/v1/firmware/check":
+                self._json(200, self.state.firmware_update_check())
+                return
             if path == "/v1/jobs":
                 if not self._authorized():
                     self._error(401, "valid Companion session required")
@@ -1542,6 +1582,24 @@ async def _standalone(port: int, open_browser: bool) -> None:
 
 def run_self_test() -> None:
     firmware_self_test()
+    firmware_update_check_self_test()
+    unconfigured_state = CompanionState.__new__(CompanionState)
+    unconfigured_state.device = OfflineDevice()
+
+    class UnconfiguredFirmware:
+        def status(self) -> dict[str, object]:
+            return {"configured": False, "updateMode": "verified_usb_recovery", "wirelessDfu": False}
+
+        def available(self) -> dict[str, object]:
+            raise AssertionError("an unconfigured update must not read the feed")
+
+    unconfigured_state.firmware = UnconfiguredFirmware()
+    try:
+        unconfigured_state.start_firmware_job()
+    except CompanionError as exc:
+        assert "尚未配置" in str(exc)
+    else:
+        raise AssertionError("firmware update started without a successful Companion check")
     diagnostics_self_test()
     companion_state_self_test()
     assert parse_install_url("vibeboard://pet/install?source=petdex&slug=shinchan") == "shinchan"

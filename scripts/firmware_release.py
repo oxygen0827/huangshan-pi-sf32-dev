@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,60 @@ def verify_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def archive_release(args: argparse.Namespace) -> int:
+    """Create a portable release archive without host-specific metadata.
+
+    Firmware archives are consumed by Companion on a different computer.  Use
+    Python's explicit ZipInfo metadata rather than a platform archiver, which
+    can insert macOS AppleDouble sidecars (``._*``) into the signed payload.
+    """
+    _, public_key = release_keys(args, signing=False)
+    release_dir = args.release.resolve()
+    manifest = validate_release(release_dir, public_key)
+    destination = args.output.resolve()
+    if destination.exists():
+        raise FirmwareReleaseError(f"refusing to overwrite existing firmware archive: {destination}")
+    if destination.suffix.lower() != ".zip":
+        raise FirmwareReleaseError("firmware archive output must end in .zip")
+
+    prefix = str(manifest["version"])
+    files = [
+        release_dir / item["path"]
+        for item in manifest["files"]
+    ] + [release_dir / "sftool_param.json", release_dir / RELEASE_MANIFEST, release_dir / RELEASE_SIGNATURE]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            archive.writestr(f"{prefix}/", b"")
+            for source in files:
+                relative = source.relative_to(release_dir).as_posix()
+                info = zipfile.ZipInfo(f"{prefix}/{relative}", date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, source.read_bytes())
+        with zipfile.ZipFile(temporary) as archive:
+            names = archive.namelist()
+            if any(name.rsplit("/", 1)[-1].startswith("._") or name.endswith(".DS_Store") for name in names):
+                raise FirmwareReleaseError("firmware archive contains host-specific metadata")
+            with tempfile.TemporaryDirectory(prefix="firmware-archive-verify-") as staging_text:
+                staging = Path(staging_text)
+                archive.extractall(staging)
+                validate_release(staging / prefix, public_key)
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    print(json.dumps({
+        "ok": True,
+        "archive": str(destination),
+        "board": manifest["board"],
+        "version": manifest["version"],
+        "sha256": sha256_file(destination),
+    }))
+    return 0
+
+
 def write_last_success(release_dir: Path, manifest: dict[str, Any]) -> None:
     state_dir = Path.home() / ".vibeboard" / "companion" / "firmware"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +364,9 @@ def self_test() -> int:
             private_key=str(private), public_key=str(public),
         ))
         verify_release(argparse.Namespace(release=output, private_key=None, public_key=str(public)))
+        archive = root / "firmware.zip"
+        archive_release(argparse.Namespace(release=output, output=archive, private_key=None, public_key=str(public)))
+        assert archive.is_file() and archive.stat().st_size > 0
         (output / "main.bin").write_bytes(b"tampered")
         try:
             validate_release(output, public)
@@ -335,6 +393,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     verify.add_argument("--release", type=Path, required=True)
     verify.add_argument("--public-key", type=Path)
     verify.add_argument("--private-key", type=Path)
+    archive = subparsers.add_parser("archive", help="create a clean, portable ZIP from a verified signed release")
+    archive.add_argument("--release", type=Path, required=True)
+    archive.add_argument("--output", type=Path, required=True)
+    archive.add_argument("--public-key", type=Path)
+    archive.add_argument("--private-key", type=Path)
     apply = subparsers.add_parser("apply", help="USB flash a verified release; use an earlier release to roll back")
     apply.add_argument("--release", type=Path, required=True)
     apply.add_argument("--port", required=True)
@@ -356,6 +419,8 @@ def main(argv: list[str]) -> int:
         return create_release(args)
     if args.command == "verify":
         return verify_release(args)
+    if args.command == "archive":
+        return archive_release(args)
     if args.command == "apply":
         return apply_release(args)
     raise FirmwareReleaseError("choose create, verify, or apply")

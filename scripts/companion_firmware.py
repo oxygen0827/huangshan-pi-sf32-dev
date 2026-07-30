@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import ssl
 import stat
 import subprocess
 import tempfile
@@ -27,6 +28,8 @@ from firmware_release import FirmwareReleaseError, validate_release
 
 MAX_FEED_BYTES = 256 * 1024
 MAX_RELEASE_BYTES = 32 * 1024 * 1024
+HTTPS_READ_ATTEMPTS = 3
+HTTPS_READ_RETRY_SECONDS = 0.35
 
 
 class FirmwareManagerError(RuntimeError):
@@ -69,8 +72,28 @@ class _HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, file_pointer, code, message, headers, safe_url)
 
 
+def _retryable_https_read_error(error: OSError) -> bool:
+    """Retry transient transport failures, but never hide certificate errors."""
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        return "CERTIFICATE_VERIFY_FAILED" not in str(reason).upper()
+    return True
+
+
 def _open_https(request: urllib.request.Request, *, timeout: float):
-    return urllib.request.build_opener(_HTTPSRedirectHandler()).open(request, timeout=timeout)
+    """Open an idempotent firmware GET with bounded transport recovery."""
+    for attempt in range(HTTPS_READ_ATTEMPTS):
+        try:
+            return urllib.request.build_opener(_HTTPSRedirectHandler()).open(request, timeout=timeout)
+        except OSError as exc:
+            if attempt + 1 >= HTTPS_READ_ATTEMPTS or not _retryable_https_read_error(exc):
+                raise
+            time.sleep(HTTPS_READ_RETRY_SECONDS * (attempt + 1))
+    raise AssertionError("unreachable")
 
 
 def _safe_extract(package: zipfile.ZipFile, destination: Path) -> None:
@@ -351,6 +374,10 @@ def run_self_test() -> None:
                 pass
             else:
                 raise AssertionError(f"unsafe HTTPS URL accepted: {unsafe_url}")
+        assert _retryable_https_read_error(urllib.error.URLError(ssl.SSLEOFError("transient EOF")))
+        assert not _retryable_https_read_error(
+            urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+        )
         archive_path = root / "unsafe.zip"
         with zipfile.ZipFile(archive_path, "w") as archive:
             archive.writestr("../escape", b"must not extract")

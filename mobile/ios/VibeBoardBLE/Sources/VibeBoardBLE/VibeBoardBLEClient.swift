@@ -104,6 +104,7 @@ public struct VibeBoardRuntimeHardwareCapabilities: Codable, Equatable, Sendable
 
 public struct VibeBoardRuntimeCapabilities: Codable, Equatable, Sendable {
     public let api: String
+    public let firmwareVersion: String?
     public let rt: String
     public let ble: String
     public let sens: String

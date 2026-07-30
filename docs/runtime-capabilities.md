@@ -11,6 +11,7 @@ ESP32-S3 GPL Runtime 的完整能力集合。
 | 能力 | 板端命令 / App helper | 说明 |
 | --- | --- | --- |
 | Runtime 状态 | `vb_runtime_status`、`vb_runtime_app` | active app、运行状态、错误、计数 |
+| 固件身份 | `vb_runtime_capabilities` 的 `firmwareVersion` | 已发布基础固件的语义版本；Companion 用它与官方签名发布源比较，不能用 Runtime API 版本替代 |
 | App 管理 | `vb_runtime_apps`、`apps_page`、`launch/stop/delete` | Web/iOS/桌面管理入口 |
 | 安装 | `install_begin/file/end/abort` | serial/BLE 共用，提交前校验包完整性 |
 | Display | `vb_runtime_display [brightness]`、`vibe_display_label`、`vibe_display_brightness` | CO5300 尺寸、状态、亮度 |

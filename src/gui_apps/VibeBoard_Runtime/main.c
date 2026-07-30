@@ -68,6 +68,7 @@
 #endif
 
 #define APP_ID "vb_runtime"
+#define VIBEBOARD_FIRMWARE_VERSION "1.0.1"
 #define VIBEBOARD_RUNTIME_API_VERSION "vibeboard-huangshan-runtime/v1"
 #define VIBEBOARD_RUNTIME_APP_MANAGER_API_VERSION "vibeboard-huangshan-app-manager/v1"
 #define VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION "vibeboard-huangshan-capabilities/v1"
@@ -2706,13 +2707,14 @@ static int vb_runtime_capabilities_json(char *dst, rt_size_t cap)
     sensor_api = 0;
 #endif
     used = rt_snprintf(dst, cap,
-                       "{\"api\":\"%s\",\"rt\":\"%s\",\"ble\":\"%s\",\"sens\":\"%s\",\"touch\":\"%s\","
+                       "{\"api\":\"%s\",\"firmwareVersion\":\"%s\",\"rt\":\"%s\",\"ble\":\"%s\",\"sens\":\"%s\",\"touch\":\"%s\","
                        "\"flow\":\"%s\",\"peer\":\"%s\",\"voice\":\"%s\",\"audio\":\"%s\",\"pwr\":\"%s\",\"disp\":\"%s\",\"gpio\":\"%s\",\"rgb\":\"%s\",\"fs\":%d,"
                        "\"ins\":{\"ser\":1,\"ble\":%d,\"max\":%d},"
                        "\"app\":{\"lua\":\"%s\",\"comp\":%d},"
                        "\"hw\":{\"disp\":%d,\"touch\":1,\"sens\":%d,\"voice\":%d,\"audio\":%d,\"flow\":1,\"peer\":1,"
                        "\"batt\":%d,\"chg\":%d,\"gpio\":%d,\"rgb\":%d}}",
                        VIBEBOARD_RUNTIME_CAPABILITY_API_VERSION,
+                       VIBEBOARD_FIRMWARE_VERSION,
                        VIBEBOARD_RUNTIME_API_VERSION,
                        VIBEBOARD_RUNTIME_BLE_API_VERSION,
                        VIBEBOARD_RUNTIME_SENSOR_API_VERSION,
