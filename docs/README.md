@@ -4,6 +4,7 @@
 
 | 主题 | 文档 |
 | --- | --- |
+| 产品介绍 | `product-introduction.md`（源码）、`product-introduction.pdf`（发布版） |
 | Runtime App 包、能力和边界 | `runtime-package-format.md`、`runtime-capabilities.md`、`runtime-boundary.md` |
 | 板端开发与历史问题 | `runtime-app-development-notes.md`、`board-bringup.md`、`runtime-app-plan-writer.md` |
 | Codex Pet 与 Companion | `codex-pet-one-click-deploy.md`、`codex-pet-bridge.md`、`macos-companion-release.md` |

@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+from companion_paths import companion_root
 from runtime_package import RuntimePackageError, build_install_commands, fail, load_package_from_dir, load_package_from_json, safe_package_id
 from runtime_transport import (
     CODEX_PET_API,
@@ -20,7 +21,7 @@ from runtime_transport import (
     validate_flow_roundtrip_output,
 )
 
-PETDEX_STATE_CONTRACT = Path(__file__).with_name("petdex_state_contract.json")
+PETDEX_STATE_CONTRACT = companion_root() / "scripts" / "petdex_state_contract.json"
 
 
 
@@ -452,7 +453,7 @@ def run_standard_transport_command(args: argparse.Namespace) -> int | None:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install a Huangshan Runtime app package over serial MSH.")
     parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbserial-13220")
     source = parser.add_mutually_exclusive_group()
@@ -500,7 +501,7 @@ def main() -> int:
     parser.add_argument("--stop-before-end", action="store_true", help="Write package chunks but do not commit; used to verify staging safety")
     parser.add_argument("--no-echo", action="store_true")
     parser.add_argument("--self-test", action="store_true", help="Run offline CLI routing checks and exit")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.self_test:
         run_self_test()

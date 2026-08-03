@@ -21,8 +21,9 @@ Companion 也兼容读取 `firmware_version`、`fw` 或 `firmware.version`，但
 兼容性合同，不等于固件发布版本；`firmwareVersion` 必须与签名 release 的 `version` 完全一致。
 
 旧板在首次迁移时没有这个字段。它可以连接并读取官方发布源，但 Companion 必须显示“当前板子
-未上报固件版本”，而不能猜测它是否为最新或自动刷写。开发板需要先用 USB 刷入一个已签名的基础
-版本，之后 Companion 才能精确比较和显示升级入口。
+未上报固件版本”，而不能猜测它是否为最新或自动刷写。网页在本机 Companion 已识别唯一的 USB
+UART 时会显示“安装基础固件”；用户必须在浏览器确认覆盖，Companion 才会安装发布源中唯一标记
+`baseline: true` 的签名版本。开发板完成该迁移后，Companion 才能精确比较和显示常规升级入口。
 
 当前固件传输方式是 `verified_usb_recovery`，不是蓝牙 DFU。只有签名检查发现更新，
 页面才会显示“使用 USB 更新”。宠物或 Runtime App 的 BLE 部署不能描述为固件更新。

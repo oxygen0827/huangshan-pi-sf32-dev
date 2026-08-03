@@ -58,9 +58,12 @@ def _result(
     current: str | None = None,
     latest: str | None = None,
     current_source: str = "unknown",
+    baseline: str | None = None,
 ) -> dict[str, object]:
     update_mode = str(firmware_status.get("updateMode") or "unavailable")
     wireless_dfu = firmware_status.get("wirelessDfu") is True
+    usb = firmware_status.get("usbRecovery")
+    usb_ready = isinstance(usb, Mapping) and usb.get("ready") is True
     return {
         "schemaVersion": 1,
         "state": state,
@@ -69,6 +72,7 @@ def _result(
         "current": current,
         "currentSource": current_source,
         "latest": latest,
+        "baseline": baseline,
         "delivery": {
             "executor": "companion",
             "updateMode": update_mode,
@@ -77,6 +81,14 @@ def _result(
         # The current signed manager is intentionally USB-only.  Do not turn a
         # release-discovery result into a false claim of Bluetooth DFU.
         "canInstall": state == "update_available" and update_mode == "verified_usb_recovery" and not wireless_dfu,
+        "canInstallBaseline": (
+            state == "current_version_unknown"
+            and baseline is not None
+            and usb_ready
+            and update_mode == "verified_usb_recovery"
+            and not wireless_dfu
+        ),
+        "usbRecovery": dict(usb) if isinstance(usb, Mapping) else {"ready": False},
     }
 
 
@@ -108,6 +120,8 @@ def check_for_firmware_update(
 
     latest_row = available.get("latest")
     latest = _safe_version(latest_row.get("version")) if isinstance(latest_row, Mapping) else None
+    baseline_row = available.get("baseline")
+    baseline = _safe_version(baseline_row.get("version")) if isinstance(baseline_row, Mapping) else None
     if not latest:
         return _result(
             state="no_release",
@@ -126,15 +140,23 @@ def check_for_firmware_update(
 
     current = board_firmware_version(runtime_capabilities)
     if not current:
+        usb = status.get("usbRecovery")
+        usb_ready = isinstance(usb, Mapping) and usb.get("ready") is True
+        detail = (
+            f"已找到最新固件 {latest}，但当前板子未上报固件版本，"
+            "无法安全判断是否需要升级。"
+        )
+        if baseline and usb_ready:
+            detail += f" 已识别 USB 串口，可安装签名基础固件 {baseline}。"
+        elif baseline:
+            detail += " 请通过 USB 数据线连接板子后安装签名基础固件。"
         return _result(
             state="current_version_unknown",
-            message=(
-                f"已找到最新固件 {latest}，但当前板子未上报固件版本，"
-                "无法安全判断是否需要升级。"
-            ),
+            message=detail,
             firmware_status=status,
             board_connected=True,
             latest=latest,
+            baseline=baseline,
         )
 
     comparison = _version_key(current)
@@ -175,25 +197,30 @@ def check_for_firmware_update(
 
 def run_self_test() -> None:
     class FakeFirmwareSource:
-        def __init__(self, *, configured: bool = True, latest: str | None = "1.2.0") -> None:
+        def __init__(self, *, configured: bool = True, latest: str | None = "1.2.0", usb_ready: bool = True) -> None:
             self.configured = configured
             self.latest = latest
+            self.usb_ready = usb_ready
 
         def status(self) -> dict[str, object]:
             return {
                 "configured": self.configured,
                 "updateMode": "verified_usb_recovery",
                 "wirelessDfu": False,
+                "usbRecovery": {"ready": self.usb_ready, "port": "/dev/cu.usbserial-test"},
             }
 
         def available(self) -> dict[str, object]:
             rows = [] if not self.latest else [{"version": self.latest, "url": "https://downloads.example.com/release.zip"}]
-            return {"latest": rows[0] if rows else None, "releases": rows}
+            baseline = {"version": "1.0.0", "baseline": True} if rows else None
+            return {"latest": rows[0] if rows else None, "baseline": baseline, "releases": rows}
 
     source = FakeFirmwareSource()
     assert check_for_firmware_update(source, board_connected=False, runtime_capabilities={})["state"] == "board_disconnected"
     unknown = check_for_firmware_update(source, board_connected=True, runtime_capabilities={})
     assert unknown["state"] == "current_version_unknown" and unknown["canInstall"] is False
+    assert unknown["baseline"] == "1.0.0" and unknown["canInstallBaseline"] is True
+    assert check_for_firmware_update(FakeFirmwareSource(usb_ready=False), board_connected=True, runtime_capabilities={})["canInstallBaseline"] is False
     available = check_for_firmware_update(source, board_connected=True, runtime_capabilities={"fw": "1.1.0"})
     assert available["state"] == "update_available" and available["canInstall"] is True
     assert check_for_firmware_update(source, board_connected=True, runtime_capabilities={"firmware": {"version": "1.2.0"}})["state"] == "up_to_date"

@@ -16,6 +16,8 @@ compile_commands.json
 .superpowers/
 .voice_terminal.env
 captures/
+/output/
+/tmp/
 assets/lvgl-official/upstream-master/
 scripts/runtime_apps/codex_pet/assets/rocky/
 scripts/runtime_apps/codex_pet/assets/pets/

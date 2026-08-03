@@ -9,6 +9,7 @@
     },
     {
       "version": "1.0.0",
+      "baseline": true,
       "url": "https://ldcx.tech/static/codex-pet/firmware/VibeBoard-Firmware-1.0.0-sf32lb52-lchspi-ulp.zip",
       "sha256": "5a3ae5a30c3edd1ff98b36b5eac169292ef3e531b7bd5c5eefc37cb8794b15f8"
     }

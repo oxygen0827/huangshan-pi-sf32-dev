@@ -1,6 +1,6 @@
 # Codex Pet Bridge 与 pet/v1
 
-更新时间：2026-07-24
+更新时间：2026-08-03
 
 ## 进程边界
 
@@ -50,6 +50,34 @@ Bridge 到板端使用这些 Flow channel：
 - `pet.tasks`：所选任务、可见任务总数和正在执行的任务数。
 - `pet.approval`：受限审批请求及一次性 ID。
 - `pet.select`：从 Codex/MCP 选择板端宠物，payload 是不超过 24 字符的安全 slug。
+- `pet.usage`：当前所选 Codex task 的 Token、上下文占用和价格估算。
+
+`pet.quota` 使用不超过 184 字节的 JSON 快照，字段约定如下：
+
+- `status` 为 `live`、`stale` 或 `unavailable`；stale 只允许展示最近一次成功快照。
+- `pU`/`sU` 是 primary/secondary 窗口的已用百分比，`pW`/`sW` 是窗口分钟数。
+- `pD`/`sD` 是从发送时刻开始计算的剩余秒数。板端使用自己的单调 tick 倒计时，不能假设板端有可信 Unix 时间。
+- `pD`/`sD` 缺失表示上游没有提供重置时间；不能把它解释为立即重置。
+
+`--mode monitor` 会额外启动一个只读 Codex App Server 客户端采集 `account/rateLimits/read`，不复用
+Monitor 的 Hook 事件流。该接口需要 ChatGPT 登录；API key 登录时会发布 `status=unavailable`、
+`error=auth`，板端显示 `ChatGPT sign-in required`。切换认证后需重启 Monitor，让 quota 客户端重新建立会话。
+
+`pet.usage` 从 `~/.codex/sessions/**/*.jsonl` 中只归并 `session_meta`、`turn_context` 和
+`token_count` 数字字段，不读取或发送 prompt/response 正文。Monitor 任务选择变化时切换到对应 session，
+JSONL 使用增量 offset 读取；只有快照变化时才写 BLE。紧凑字段如下：
+
+- `a`：当前 task 累计 Token；`t`：最近一次 `task_started` 之后的本轮增量。
+- `x`/`w`：最近一次模型调用的输入上下文 Token 和模型上下文窗口。
+- `i`/`c`/`o`：累计未缓存输入、缓存输入和输出 Token。reasoning Token 已包含在输出中，不能重复相加。
+- `d`/`e`：当前 task 与本轮估算成本，单位为 micro-USD；无可靠费率时字段必须省略。
+- `m`：不超过 24 字符的模型名。整个快照不得超过 184 字节。
+
+官方 OpenAI provider 的已知模型使用内置标准处理费率，按未缓存输入、缓存输入、输出分别计算。
+金额只是本地估算，不代表账单或账户余额。自定义 provider/中转站默认只显示 Token；开发部署可以同时设置
+`CODEX_PET_PRICE_INPUT_PER_M`、`CODEX_PET_PRICE_CACHED_INPUT_PER_M` 和
+`CODEX_PET_PRICE_OUTPUT_PER_M`，并可用 `CODEX_PET_PRICE_MODEL` 限定模型。三项费率单位都是
+USD / 1M Token，缺少任意一项时不得显示价格。
 
 心跳每 10 秒发送一次，TTL 固定为 30 秒。板端不能依赖“断开通知”；最后一个有效心跳
 到期时必须自行降级到 `disconnected` 并清除临时灯效。

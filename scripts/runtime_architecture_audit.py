@@ -78,7 +78,11 @@ def audit_runtime_transport() -> None:
 def audit_ble_status_ownership() -> None:
     main = read("src/gui_apps/VibeBoard_Runtime/main.c")
     sections: list[tuple[str, str]] = []
-    for function in ("vb_ble_advertising_event", "vb_ble_advertising_start"):
+    for function in (
+        "vb_ble_advertising_event",
+        "vb_ble_advertising_start",
+        "vb_ble_advertising_force_restart",
+    ):
         function_start = main.find(f"static uint8_t {function}(")
         function_end = main.find("\nstatic ", function_start + 1)
         if function_start < 0 or function_end < 0:
@@ -102,6 +106,29 @@ def audit_ble_status_ownership() -> None:
         fail("ble_status_ownership", "advertising diagnostics are not retained as serial-only logs")
     else:
         ok("ble_status_ownership", "advertising work cannot overwrite BLE command responses")
+
+
+def audit_ble_advertising_recovery() -> None:
+    main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    health_start = main.find("static void vb_ble_health_check(void)\n{")
+    health_end = main.find("\nstatic ", health_start + 1)
+    if health_start < 0 or health_end < 0:
+        fail("ble_advertising_recovery", "BLE advertising health check could not be audited")
+        return
+    health = main[health_start:health_end]
+    if "VB_BLE_ADV_START_CONFIRM_MS" not in main:
+        fail("ble_advertising_recovery", "BLE advertising confirmation deadline is missing")
+        return
+    for marker in (
+        "adv_start_requested_tick",
+        "advertising confirmation timeout",
+        "vb_ble_advertising_force_restart(0)",
+        "if (g_vb_ble.adv_start_requested_tick)\n        return;",
+    ):
+        if marker not in health:
+            fail("ble_advertising_recovery", f"BLE advertising confirmation recovery is missing {marker!r}")
+            return
+    ok("ble_advertising_recovery", "unconfirmed advertising start is force-recovered without a live link")
 
 
 def audit_ble_secure_link() -> None:
@@ -334,8 +361,62 @@ def audit_voice_stop_contract() -> None:
 def audit_codex_pet_bridge() -> None:
     protocol = read("scripts/codex_pet_protocol.py")
     bridge = read("scripts/codex_pet_bridge.py")
+    status_module = read("scripts/codex_pet_status.py")
     helper = read("src/gui_apps/VibeBoard_Runtime/vb_runtime_codex_pet.c")
     runtime_main = read("src/gui_apps/VibeBoard_Runtime/main.c")
+    home_visibility_start = helper.find("static void vb_pet_set_home_visible")
+    quota_visibility_start = helper.find("static void vb_pet_set_quota_visible", home_visibility_start)
+    home_visibility = (
+        helper[home_visibility_start:quota_visibility_start]
+        if home_visibility_start >= 0 and quota_visibility_start > home_visibility_start
+        else ""
+    )
+    for token in (
+        "int show_fallback;",
+        "show_fallback = visible && !g_pet.custom_available && !g_pet.rocky_available;",
+        "vb_pet_set_hidden(g_pet.pet_body, !show_fallback);",
+        "vb_pet_set_hidden(g_pet.pet_tail, !show_fallback);",
+        "vb_pet_set_hidden(g_pet.left_ear, !show_fallback);",
+        "vb_pet_set_hidden(g_pet.right_ear, !show_fallback);",
+        "vb_pet_set_hidden(g_pet.pet_face, !show_fallback);",
+    ):
+        if token not in home_visibility:
+            fail("codex_pet_bridge", f"home pet layer visibility is missing {token!r}")
+    frame_start = helper.find("static void vb_pet_update_custom_frame")
+    frame_end = helper.find("static void vb_pet_activate_cache_bank", frame_start)
+    frame_body = helper[frame_start:frame_end] if frame_start >= 0 and frame_end > frame_start else ""
+    for token in (
+        "if (g_pet.page == VB_PET_PAGE_QUOTA)",
+        "lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);",
+        "else\n        lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);",
+    ):
+        if token not in frame_body:
+            fail("codex_pet_bridge", f"quota pet layer guard is missing {token!r}")
+    for token in (
+        "class CodexPetQuotaService:",
+        "await self._refresh_quota()",
+        "self._refresh_task = asyncio.create_task",
+    ):
+        if token not in status_module:
+            fail("codex_pet_bridge", f"quota service is missing {token!r}")
+    monitor_start = bridge.find('if args.mode == "monitor":')
+    monitor_end = bridge.find("codex = CodexAppServerClient", monitor_start)
+    monitor_body = bridge[monitor_start:monitor_end] if monitor_start >= 0 and monitor_end > monitor_start else ""
+    for token in (
+        "CodexPetQuotaService(",
+        "CodexAppServerClient(codex_bin=args.codex_bin)",
+        "quota=quota_service",
+    ):
+        if token not in monitor_body:
+            fail("codex_pet_bridge", f"monitor quota wiring is missing {token!r}")
+    for token in (
+        "self._quota_snapshot: tuple[str, int] | None = None",
+        "self._quota_snapshot = (payload, self.clock_ms())",
+        "if self._quota_snapshot is not None:",
+        'await self.commands.call("flow_send", QUOTA_CHANNEL, self.sequencer.next(), payload)',
+    ):
+        if token not in bridge:
+            fail("codex_pet_bridge", f"quota snapshot replay is missing {token!r}")
     for token in (
         "VB_PET_RECONNECT_AFTER_MS",
         '"Reconnecting %lus"',
@@ -553,6 +634,7 @@ def audit_codex_pet_voice_app() -> None:
         ("scripts/codex_pet_status.py", "class CodexPetStatusService:"),
         ("scripts/codex_pet_status.py", "async def observe_external("),
         ("scripts/codex_pet_status.py", 'QUOTA_CHANNEL = "pet.quota"'),
+        ("scripts/codex_pet_usage.py", 'USAGE_CHANNEL = "pet.usage"'),
         ("scripts/codex_pet_hook.py", '"PermissionRequest": ("needs_input", "approval", "Approval required")'),
         ("scripts/codex_pet_hook.py", 'str(Path(tempfile.gettempdir()) / f"huangshan-codex-pet-{os.getuid()}.sock")'),
         ("scripts/codex_pet_hook.py", "def ack_accepted("),
@@ -851,6 +933,7 @@ def run_audit() -> int:
     CHECKS.clear()
     audit_runtime_transport()
     audit_ble_status_ownership()
+    audit_ble_advertising_recovery()
     audit_ble_secure_link()
     audit_app_store_bridge()
     audit_desktop_voice_bridge()

@@ -7,7 +7,7 @@
 - macOS 13 或更高版本，蓝牙已开启；
 - 已安装并登录 Codex Desktop；
 - VibeBoard 已开机并运行出厂 Runtime 固件；
-- 从官方站点下载与 Mac 架构匹配、已签名并公证的 Companion DMG。
+- 从 `https://ldcx.tech/pet/` 下载与 Mac 架构匹配、已签名并公证的 Companion DMG。
 
 ## 安装 Companion
 
@@ -19,7 +19,7 @@ Companion 自带全部运行环境。不要从 DMG 内长期运行，也不需�
 
 ## 完成连接
 
-首次启动会自动打开 Companion 页面。页面顶部依次确认：
+首次启动会自动在浏览器打开官网 Companion 页面；本地 App 保持在菜单栏运行。页面顶部依次确认：
 
 1. `Companion` 为绿色。
 2. 点击 `VibeBoard` 的“连接”，在 macOS 配对提示中允许连接。
@@ -50,6 +50,16 @@ Companion。
 - 打开诊断日志。
 
 退出菜单栏 Companion 会同时停止 BLE 连接和 Codex 状态同步。
+
+在宠物主页从屏幕上边缘向下滑，可以打开当前 Codex task 的用量页；向上滑返回宠物页。页面显示：
+
+- 当前 task 的累计 Token 和最近一轮新增 Token；
+- 当前上下文占用，以及未缓存输入、缓存输入、输出的拆分；
+- 官方 OpenAI provider 的本地价格估算；金额不是账单或账户余额；
+- ChatGPT 登录可读取时的两个限额窗口和重置倒计时。
+
+使用 API Key 时没有可查询的账户总额度，Token 和价格估算仍然正常显示，限额窗口会标记不可用。
+自定义 provider 或中转站没有可靠费率时只显示 Token，不会套用官方价格。
 
 ## 出现问题
 

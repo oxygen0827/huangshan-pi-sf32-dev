@@ -1049,6 +1049,40 @@ class CompanionState:
         asyncio.run_coroutine_threadsafe(run(), self.loop)
         return job
 
+    def start_firmware_baseline_job(self) -> CompanionJob:
+        check = self.firmware_update_check()
+        if check.get("state") != "current_version_unknown" or check.get("canInstallBaseline") is not True:
+            raise CompanionError(str(check.get("message") or "signed baseline firmware is not available"))
+        baseline = check.get("baseline")
+        if not isinstance(baseline, str):
+            raise CompanionError("official firmware feed did not return a baseline version")
+        job = self._new_job("firmware_baseline", "firmware")
+
+        def progress(stage: str, percent: int, message: str) -> None:
+            job.update(stage=stage, progress=percent, message=message)
+            job.append(message)
+
+        async def run() -> None:
+            job.status = "running"
+            try:
+                result = await asyncio.to_thread(self.firmware.install_baseline, progress, expected_version=baseline)
+                if result.get("version") != baseline or result.get("baseline") is not True:
+                    raise FirmwareManagerError("baseline install returned an unexpected release")
+                job.result = result
+                job.status = "done"
+                job.update(stage="complete", progress=100, message="Baseline firmware installed")
+            except (FirmwareManagerError, FirmwareReleaseError) as exc:
+                job.status = "failed"
+                job.update(stage="failed", message=str(exc))
+                job.append(f"ERROR {type(exc).__name__}: {exc}")
+            except Exception as exc:
+                job.status = "failed"
+                job.update(stage="failed", message=str(exc))
+                job.append(f"ERROR {type(exc).__name__}: {exc}")
+
+        asyncio.run_coroutine_threadsafe(run(), self.loop)
+        return job
+
     def start_support_bundle_job(self) -> CompanionJob:
         job = self._new_job("support_bundle", "support")
 
@@ -1486,6 +1520,13 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 job = self.state.start_firmware_job(version=version)
                 self._json(202, {"jobId": job.job_id})
                 return
+            if path == "/v1/firmware/baseline":
+                body = self._read_json()
+                if body.get("confirm") != "INSTALL_BASELINE_FIRMWARE":
+                    raise CompanionError("confirm INSTALL_BASELINE_FIRMWARE before installing baseline firmware")
+                job = self.state.start_firmware_baseline_job()
+                self._json(202, {"jobId": job.job_id})
+                return
             if path == "/v1/firmware/rollback":
                 self._read_json()
                 job = self.state.start_firmware_job(rollback=True)
@@ -1600,6 +1641,12 @@ def run_self_test() -> None:
         assert "尚未配置" in str(exc)
     else:
         raise AssertionError("firmware update started without a successful Companion check")
+    try:
+        unconfigured_state.start_firmware_baseline_job()
+    except CompanionError as exc:
+        assert "尚未配置" in str(exc)
+    else:
+        raise AssertionError("baseline firmware install started without a successful Companion check")
     diagnostics_self_test()
     companion_state_self_test()
     assert parse_install_url("vibeboard://pet/install?source=petdex&slug=shinchan") == "shinchan"

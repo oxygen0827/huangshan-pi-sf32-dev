@@ -6,6 +6,7 @@ Ask for specific fixes rather than a general opinion.
 ## Blocking Usability
 
 - Text is clipped, overlapped, or unreadable.
+- Glyphs have dotted, hollow, broken, or visibly rough strokes on the AMOLED.
 - Buttons, cards, charts, or badges overlap each other.
 - Critical content is hidden near the rounded display edge or bezel.
 - The primary action or current status is unclear.
@@ -30,6 +31,12 @@ Ask for specific fixes rather than a general opinion.
 - Spacing follows a simple 4/8 px rhythm.
 - Similar cards, buttons, and status labels share styling.
 - Font hierarchy is limited and readable.
+- Board C UI uses the established SiFli font manager (`lv_ext_set_local_font`/
+  `FONT_*`) unless a target-verified bitmap-font exception is documented.
+- Critical and supporting information is at least 16 px on this 390x450 target;
+  do not judge a 12 px label from a desktop preview alone.
+- Label height includes breathing room for the actual managed font; descenders,
+  curved strokes, and numeric glyphs remain filled and continuous.
 - Status colors match device semantics: ready, warning, danger, disabled.
 - The page does not look like a web dashboard shrunk onto a watch-sized screen.
 
@@ -50,4 +57,5 @@ Return:
 2. Visual consistency issues.
 3. MCU performance or memory risks.
 4. Concrete code changes, naming the component/style/page area to edit.
+5. Font path, smallest information text size, and any glyph rasterization risk.
 ```

@@ -2183,6 +2183,121 @@ BLE install begin interrupted: Did not receive expected BLE status response
 4. 新的 BLE 安装修复必须至少跑一次真实大于 1 MiB 的九状态宠物，覆盖 staging 清理、长分包传输、
    提交确认和回滚 UI，不得只用小型模拟包判断成功。
 
+## 2026-08-02：广告启动返回成功但未确认导致 BLE 自动断开
+
+#### 现象与证据
+
+Companion 连续报告 `Could not find BLE device named 'VibeBoard'`，macOS 的系统级 BLE 扫描可以
+发现其他设备，但 `VibeBoard` 匹配数为 0。通过串口读取 Runtime 状态得到：
+
+```text
+power=1 service=1 adv=0 conn=0 secure=0 start_rc=0 stops=1 restarts=1
+```
+
+这说明射频和 GATT 服务已经初始化，板子没有被另一个中心连接；故障是广告已经停止，之后的启动请求
+虽然返回成功，却没有收到 `ADV_STARTED` 确认回调。打开串口触发复位后，启动日志恢复为
+`adv started name=VibeBoard status=0`，Companion 随后完成加密、Service Changed、MTU 和通知订阅。
+
+#### 根因
+
+旧健康检查只在 `advertising == 0` 时再次调用 `sibles_advertising_start()`。SiFli 广告上下文在
+控制器状态丢失或异步状态转换后可能出现“调用返回 `SIBLES_ADV_NO_ERR`，但 started 事件不再到达”的
+半死状态。健康检查把这个返回值当成恢复成功，因而不会重建上下文，板子永久处于不可发现状态。
+
+#### 解决方案
+
+- Runtime 记录每次广告启动请求的 tick；3 秒内没有 `ADV_STARTED` 确认且不存在活动连接时，健康
+  worker 执行一次受限的 stop/start 强制恢复。
+- 强制恢复路径只写串口诊断，不再异步改写 GATT status characteristic；手动 `vb_runtime_ble_restart`
+  仍由明确的命令路径写回结果。
+- `vb_runtime_ble_status` 增加 `forced` 计数，便于区分普通断连恢复和广告确认超时恢复。
+- 架构审计固定检查确认超时、请求 tick 和 `vb_ble_advertising_force_restart(0)`，防止将来回退到
+  只重复 `start()` 的实现。
+
+#### 回归
+
+- `runtime_architecture_audit.py --self-test` 通过。
+- Sifli 固件完整编译、刷写和启动日志通过；复位后出现 `adv started ... status=0`，并自动连接
+  `codex_pet`，板端九状态预载正常。
+- Companion 强制重新配对任务成功，随后连续 60 秒 `/v1/status` 均保持 `board.connected=true`。
+
+#### 后续规则
+
+1. BLE 状态机中，任何“异步 start 返回成功”的 API 都必须等待事件确认，不能把返回码当成已生效状态。
+2. 排查“找不到 VibeBoard”时，先做系统级 fresh scan，再读取 `vb_runtime_ble_status`；只有看到
+   `power=1 service=1 adv=0 conn=0` 才进入广告确认超时路径，不能先清缓存或改设备名。
+3. 每次 BLE 广告状态机修改都要同时完成固件编译、真机扫描、重新配对和至少 60 秒连接保持验证。
+
+## 2026-08-03：Codex Pet 用量页的文字渲染与信息密度复盘
+
+### 日期 / App
+
+2026-08-03，`codex_pet` Runtime 用量页（390x450 CO5300 AMOLED）。
+
+### 现象与真机证据
+
+第一版用量页把动态字段拼成整行字符串，真机照片出现了右上角状态折行、
+`New / Cache / Out` 拆行，以及拆行内容和本轮 Token 行互相覆盖。底部限额空状态
+也使用了居中的多行长文案，信息重心偏低。
+
+第一次重排后，坐标和容器已经稳定，但为了获得不同字号，代码直接指定了
+`lv_font_montserrat_12/16/20/28`。真机照片随后显示所有字形变得颗粒、断笔，
+小字难以阅读；这不是照片对焦造成的，因为同一块屏上大数字和旧版系统字体均清晰。
+
+最终修复后的正视照片确认：标题、模型、价格、上下文、三列 Token、单次消耗和
+API Key 限额说明均清晰，无重叠、无裁切，内容位于圆角可视区内。
+
+### 根因
+
+1. 动态数据没有稳定的字段边界。LVGL 默认长文本行为允许行高和换行参与布局，
+   代码按较小字号估算宽度，无法覆盖真机实际字体和最长数据。
+2. `vb_pet_label()` 原本继承项目主题字体；项目的 390x450 路径启用了 SiFli
+   FreeType/资源管理器。显式设置 `lv_font_montserrat_*` 绕过了该管线，导致物理
+   AMOLED 上的字形质量显著下降。
+3. 静态坐标审计只能发现边界和尺寸风险，不能判断字形是否有颗粒、空心、断笔或
+   在正常观看距离下是否可读；一次成功编译也不能替代目标屏幕验证。
+
+### 修复方式
+
+- 用固定三列替代 `New | Cache | Out` 长字符串，分别显示 `New input`、`Cached`、
+  `Output`，并为每列固定宽度、行高和截断模式。
+- 模型名、总 Token、价格、上下文、单次消耗和限额说明拆成稳定行；压缩重复标题，
+  不再通过缩小字号解决宽度问题。
+- 用 `lv_ext_set_local_font()` 恢复 SiFli 管理字体，采用 `FONT_SMALL=16`、
+  `FONT_NORMAL=20`、`FONT_SUBTITLE=24`、`FONT_TITLE=28` 的板端字号层级。
+- 所有关键动态标签设定固定容器，单行字段使用 `LV_LABEL_LONG_CLIP`，多行限额
+  说明使用固定高度并预留行高余量。
+- 主要正文收进推荐焦点区 `x=48..341`；页面布局预算为标题/状态、模型和总量、
+  价格、上下文、三列指标、本轮消耗、分隔线、限额说明，底部结束于 `y=394`，
+  低于 Runtime 安全底边 `y=413`。
+
+### 关键验证
+
+- 字体回归检查确认用量页不再直接引用 `lv_font_montserrat_*`，全部走
+  `lv_ext_set_local_font`。
+- 坐标回归检查确认主体、状态、三列和底部说明均在安全范围内，旧的长字符串模板
+  已删除。
+- 固件构建成功；移除直接位图字体引用后，`main.bin` 从约 3,236,488 B 降至
+  约 3,165,864 B，减少约 70 KiB，证明上一版确实额外链接了多套位图字体。
+- 构建、刷写、冷启动、`codex_pet` 启动、BLE 加密连接和真机正视照片均通过。
+- `audit-ui.sh` 的绝对坐标和小尺寸 warning 已逐项复核：用量页的小对象是只读文字、
+  进度条或分隔线，不是交互控件；触摸由整屏手势承载。
+
+### 后续规则
+
+1. 修改板端 C UI 前，先检查该路径的 label helper、主题和字体管理器；本项目的
+   Runtime/built-in C UI 默认使用 `lv_ext_set_local_font(label, FONT_*, color)`。
+2. 未经真机对比，不得直接把 `lv_font_montserrat_*` 位图字体当作字号工具使用；如
+   确有像素字体或内存理由，必须附带正视照片、最长字符串检查和固件体积对比。
+3. 390x450 屏的关键和辅助信息默认不低于 16px。页面过满时先缩短文案、拆列、删重复
+   标题或增加滚动，不得直接降到 12px。
+4. 动态数值必须使用固定列/固定容器，并测试最长的模型名、Token 值、价格、空数据、
+   API Key 无限额和两条限额窗口状态。
+5. 真机验收除了检查安全区、重叠和裁切，还要检查正常观看距离下的字形填充、边缘平滑、
+   笔画连续性、对比度和小数字可读性；矩形截图与编译成功都不能代替这一项。
+6. `huangshan-screen-ui` 审计现在会提示直接 Montserrat 位图引用和低于 16px 的
+   `lv_ext_*font` 调用；warning 必须在 handoff 中说明，不能整体忽略。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：

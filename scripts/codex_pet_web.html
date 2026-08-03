@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="cache-control" content="no-store">
-  <meta name="vibeboard-companion-download" content="https://ldcx.tech/static/codex-pet/companion/VibeBoard-Companion-1.0.0-macOS-arm64.dmg">
+  <meta name="vibeboard-companion-download" content="">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://assets.petdex.dev http://127.0.0.1:8790 data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:8790">
   <title>Codex Pet</title>
   <style>
@@ -341,11 +341,12 @@
   <section id="companionWarning" class="hook-alert" data-severity="warning" role="alert" hidden>
     <div class="shell hook-alert-row">
       <div>
-        <div class="hook-alert-title">VibeBoard Companion 未运行</div>
-        <div class="hook-alert-detail">启动 Companion 后即可连接板子并部署宠物。</div>
+        <div id="companionWarningTitle" class="hook-alert-title">VibeBoard Companion 未运行</div>
+        <div id="companionWarningDetail" class="hook-alert-detail">启动 Companion 后即可连接板子并部署宠物。</div>
       </div>
       <a class="compact-button" href="vibeboard://companion/open">启动 Companion</a>
       <a id="downloadCompanion" class="compact-button" href="#" hidden>下载 Mac 版</a>
+      <a id="openLocalCompanion" class="compact-button" href="http://127.0.0.1:8790/" hidden>打开本地控制台</a>
     </div>
   </section>
 
@@ -371,6 +372,7 @@
       </div>
       <div class="maintenance-actions">
         <button id="firmwareCheck" class="compact-button" type="button">检查固件更新</button>
+        <button id="firmwareBaseline" class="compact-button" type="button" hidden disabled>安装基础固件</button>
         <button id="firmwareUpdate" class="compact-button" type="button" hidden disabled>使用 USB 更新</button>
         <button id="firmwareRollback" class="compact-button" type="button" hidden disabled>回滚固件</button>
         <button id="supportBundle" class="compact-button" type="button">导出诊断包</button>
@@ -403,8 +405,12 @@
     "use strict";
     const $ = id => document.getElementById(id);
     const isLoopbackPage = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+    const isSafariBrowser = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
     const companionBase = isLoopbackPage ? location.origin : "http://127.0.0.1:8790";
     const companionURL = path => new URL(path, `${companionBase}/`).href;
+    function companionFetchOptions(options = {}, sameOrigin = isLoopbackPage) {
+      return sameOrigin ? { ...options } : { ...options, targetAddressSpace: "loopback" };
+    }
     const state = {
       token: "",
       status: null,
@@ -454,7 +460,7 @@
       const headers = { ...(options.headers || {}) };
       if (options.body !== undefined) headers["content-type"] = "application/json";
       if (state.token) headers.authorization = `Bearer ${state.token}`;
-      const response = await fetch(companionURL(path), { ...options, headers, cache: "no-store" });
+      const response = await fetch(companionURL(path), companionFetchOptions({ ...options, headers, cache: "no-store" }));
       const data = await response.json().catch(() => ({}));
       if (response.status === 401 && retrySession && path !== "/v1/session") {
         state.token = "";
@@ -525,6 +531,17 @@
       $("onboardingProgress").textContent = deployReady ? "已准备就绪" : `已完成 ${completed}/4`;
     }
 
+    function renderCompanionUnavailable() {
+      const useLocalPage = !isLoopbackPage && isSafariBrowser;
+      $("openLocalCompanion").hidden = !useLocalPage;
+      $("companionWarningTitle").textContent = useLocalPage
+        ? "Safari 无法直接访问本机 Companion"
+        : "VibeBoard Companion 未运行";
+      $("companionWarningDetail").textContent = useLocalPage
+        ? "请打开本地控制台完成连接；Safari 会阻止公网 HTTPS 页面访问本机服务。"
+        : "启动 Companion 后即可连接板子并部署宠物。";
+    }
+
     function renderStatus() {
       const value = state.status || {};
       const companion = Boolean(value.companion?.connected);
@@ -558,6 +575,8 @@
           ? (board ? "已连接 VibeBoard，点击检查固件更新" : "连接 VibeBoard 后检查官方固件版本")
           : "尚未配置官方签名固件发布源");
       $("firmwareCheck").disabled = state.jobActive;
+      $("firmwareBaseline").hidden = firmwareCheck.state !== "current_version_unknown" || firmwareCheck.canInstallBaseline !== true;
+      $("firmwareBaseline").disabled = state.jobActive || firmwareCheck.canInstallBaseline !== true;
       $("firmwareUpdate").hidden = firmwareCheck.state !== "update_available";
       $("firmwareUpdate").disabled = state.jobActive || firmwareCheck.canInstall !== true;
       $("firmwareRollback").hidden = !firmware.lastGood?.previous;
@@ -598,6 +617,7 @@
         state.status = null;
         state.health = null;
         $("companionWarning").hidden = false;
+        renderCompanionUnavailable();
         setDot("companionDot", false, true);
         $("companionDetail").textContent = "服务不可用";
         renderOnboarding();
@@ -787,14 +807,18 @@
         if (job.kind === "build") return "保存完成";
         if (job.kind === "pair") return "连接完成";
         if (job.kind === "support_bundle") return "诊断包完成";
-        if (job.kind.startsWith("firmware_")) return job.kind === "firmware_rollback" ? "固件回滚完成" : "固件更新完成";
+        if (job.kind.startsWith("firmware_")) {
+          if (job.kind === "firmware_rollback") return "固件回滚完成";
+          if (job.kind === "firmware_baseline") return "基础固件安装完成";
+          return "固件更新完成";
+        }
         return "部署完成";
       }
       if (job.status === "failed" || job.stage === "failed") {
         if (job.kind === "build") return "保存失败";
         if (job.kind === "pair") return "连接失败";
         if (job.kind === "support_bundle") return "诊断包失败";
-        if (job.kind.startsWith("firmware_")) return "固件操作失败";
+        if (job.kind.startsWith("firmware_")) return job.kind === "firmware_baseline" ? "基础固件安装失败" : "固件操作失败";
         if (job.stage === "interrupted") return "任务因 Companion 重启而中断";
         return "部署失败";
       }
@@ -825,7 +849,7 @@
     }
 
     async function downloadSupportBundle(path) {
-      const response = await fetch(companionURL(path), { headers: { authorization: `Bearer ${state.token}` }, cache: "no-store" });
+      const response = await fetch(companionURL(path), companionFetchOptions({ headers: { authorization: `Bearer ${state.token}` }, cache: "no-store" }));
       if (!response.ok) throw new Error(`诊断包下载失败 (${response.status})`);
       const blob = await response.blob();
       const link = document.createElement("a");
@@ -844,6 +868,34 @@
         await pollJob(value.jobId);
       } catch (error) {
         $("jobTitle").textContent = "固件操作失败";
+        $("jobMessage").textContent = error.message;
+        showToast(error.message);
+      } finally {
+        state.jobActive = false;
+        state.firmwareCheck = null;
+        renderStatus();
+      }
+    }
+
+    async function installBaselineFirmware() {
+      const firmwareCheck = state.firmwareCheck || {};
+      if (firmwareCheck.state !== "current_version_unknown" || firmwareCheck.canInstallBaseline !== true) {
+        throw new Error("请先连接 USB 数据线并重新检查固件更新");
+      }
+      const version = firmwareCheck.baseline || "基础版本";
+      const confirmed = window.confirm(
+        `将通过 USB 安装签名基础固件 ${version}。这会覆盖板子现有固件；请保持 USB 数据线连接，期间不要断电。继续吗？`,
+      );
+      if (!confirmed) return;
+      showJob("安装 VibeBoard 基础固件");
+      try {
+        const value = await api("/v1/firmware/baseline", {
+          method: "POST",
+          body: JSON.stringify({ confirm: "INSTALL_BASELINE_FIRMWARE" }),
+        });
+        await pollJob(value.jobId);
+      } catch (error) {
+        $("jobTitle").textContent = "基础固件安装失败";
         $("jobMessage").textContent = error.message;
         showToast(error.message);
       } finally {
@@ -1015,6 +1067,7 @@
         $("companionWarning").hidden = true;
       } catch (error) {
         $("companionWarning").hidden = false;
+        renderCompanionUnavailable();
         return;
       }
       await Promise.all([refreshStatus(), loadPets()]);
@@ -1029,6 +1082,7 @@
     $("onboardingCodex").addEventListener("click", advanceCodexOnboarding);
     $("onboardingGallery").addEventListener("click", () => $("gallery").scrollIntoView({ behavior: "smooth", block: "start" }));
     $("firmwareCheck").addEventListener("click", checkFirmware);
+    $("firmwareBaseline").addEventListener("click", installBaselineFirmware);
     $("firmwareUpdate").addEventListener("click", () => updateFirmware(false));
     $("firmwareRollback").addEventListener("click", () => updateFirmware(true));
     $("supportBundle").addEventListener("click", exportSupportBundle);

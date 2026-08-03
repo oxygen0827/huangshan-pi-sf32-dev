@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 import ServiceManagement
 
+private struct CompanionUpdateManifest: Decodable {
+    let version: String
+    let build: String
+    let downloadURL: String
+    let sha256: String
+}
+
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private let dashboardBase = URL(string: "http://127.0.0.1:8790/")!
     private let defaults = UserDefaults.standard
@@ -57,6 +64,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         return url
     }
 
+    private var webEntryURL: URL {
+        publicSiteURL ?? dashboardBase
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureMenuBar()
@@ -71,9 +82,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             presentWelcome()
             defaults.set(true, forKey: "completedFirstLaunch")
         }
-        var target = dashboardBase
+        var target = webEntryURL
         if firstLaunch {
-            var components = URLComponents(url: dashboardBase, resolvingAgainstBaseURL: false)!
+            var components = URLComponents(url: webEntryURL, resolvingAgainstBaseURL: false)!
             components.queryItems = [URLQueryItem(name: "setup", value: "1")]
             target = components.url ?? dashboardBase
         }
@@ -332,7 +343,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     private func localDashboardURL(for source: URL) -> URL? {
         if source.scheme == "vibeboard", source.host == "companion", source.path == "/open" {
-            return dashboardBase
+            return webEntryURL
         }
         guard source.scheme == "vibeboard", source.host == "pet", source.path == "/install",
               let components = URLComponents(url: source, resolvingAgainstBaseURL: false) else { return nil }
@@ -341,7 +352,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
               slug.range(of: "^[a-z0-9][a-z0-9-]{0,23}$", options: .regularExpression) != nil else { return nil }
         if let digest = values["digest"],
            digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) == nil { return nil }
-        var dashboard = URLComponents(url: dashboardBase, resolvingAgainstBaseURL: false)!
+        var dashboard = URLComponents(url: webEntryURL, resolvingAgainstBaseURL: false)!
         dashboard.queryItems = [
             URLQueryItem(name: "source", value: "petdex"),
             URLQueryItem(name: "install", value: slug),
@@ -353,21 +364,21 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openDashboard() {
-        openWhenReady(dashboardBase)
+        openWhenReady(webEntryURL)
     }
 
     @objc private func openPetGallery() {
         if let publicSiteURL {
             NSWorkspace.shared.open(publicSiteURL)
         } else {
-            openDashboard()
+            openWhenReady(dashboardBase)
         }
     }
 
     @objc private func openSetup() {
-        var components = URLComponents(url: dashboardBase, resolvingAgainstBaseURL: false)!
+        var components = URLComponents(url: webEntryURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "setup", value: "1")]
-        openWhenReady(components.url ?? dashboardBase)
+        openWhenReady(components.url ?? webEntryURL)
     }
 
     @objc private func openLog() {
@@ -414,13 +425,24 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             if error != nil || (response as? HTTPURLResponse)?.statusCode != 200 || data == nil {
                 message = "无法检查更新，请稍后重试。"
             } else if let data,
-                      let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let version = manifest["version"] as? String,
-                      let urlText = manifest["downloadURL"] as? String,
-                      let url = URL(string: urlText), url.scheme == "https" {
-                let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-                if current.compare(version, options: .numeric) == .orderedAscending {
-                    message = "VibeBoard Companion \(version) 已发布。"
+                      let manifest = try? JSONDecoder().decode(CompanionUpdateManifest.self, from: data),
+                      manifest.version.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil,
+                      Int(manifest.build) != nil,
+                      manifest.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                      let url = URL(string: manifest.downloadURL),
+                      let updateOrigin = URLComponents(url: updateManifestURL, resolvingAgainstBaseURL: false),
+                      let downloadOrigin = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                      url.scheme == "https", url.user == nil, url.password == nil, url.fragment == nil,
+                      url.port == nil || url.port == 443,
+                      updateOrigin.scheme == downloadOrigin.scheme,
+                      updateOrigin.host == downloadOrigin.host,
+                      (updateOrigin.port ?? 443) == (downloadOrigin.port ?? 443) {
+                let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+                let currentBuild = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0
+                let releaseBuild = Int(manifest.build) ?? 0
+                let versionOrder = currentVersion.compare(manifest.version, options: .numeric)
+                if versionOrder == .orderedAscending || (versionOrder == .orderedSame && currentBuild < releaseBuild) {
+                    message = "VibeBoard Companion \(manifest.version) (\(manifest.build)) 已发布。"
                     downloadURL = url
                 } else if reportCurrent {
                     message = "当前已是最新版本。"
@@ -434,7 +456,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
                 alert.messageText = "VibeBoard Companion"
                 alert.informativeText = message
                 if downloadURL != nil {
-                    alert.addButton(withTitle: "下载")
+                    alert.addButton(withTitle: "更新")
                     alert.addButton(withTitle: "稍后")
                 } else {
                     alert.addButton(withTitle: "好")

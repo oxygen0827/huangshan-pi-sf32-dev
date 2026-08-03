@@ -54,15 +54,21 @@ requireSource(/serviceReady/,
 requireSource(/任务因 Companion 重启而中断/,
   "interrupted persistent jobs need an actionable status label");
 requireHtml(/id="firmwareCheck"/, "firmware check control is missing");
+requireHtml(/id="firmwareBaseline"/, "baseline firmware control is missing");
 requireHtml(/id="firmwareUpdate"/, "firmware update control is missing");
 requireHtml(/id="firmwareRollback"/, "firmware rollback control is missing");
 requireHtml(/id="supportBundle"/, "support bundle control is missing");
 requireSource(/\/v1\/firmware\/check/, "firmware checks must use the Companion API");
 requireSource(/\/v1\/firmware\/update/, "firmware update must use the Companion API");
+requireSource(/\/v1\/firmware\/baseline/, "baseline firmware install must use the Companion API");
 requireSource(/\/v1\/firmware\/rollback/, "firmware rollback must use the Companion API");
 requireSource(/function checkFirmware\(/, "the firmware check control needs a dedicated action");
 requireSource(/firmwareCheck\.state !== "update_available"/, "firmware installation must require a successful update check");
 requireSource(/firmwareCheck\.canInstall !== true/, "the browser must obey the Companion delivery decision");
+requireSource(/firmwareCheck\.state !== "current_version_unknown"/, "baseline installation must require an unknown legacy version");
+requireSource(/firmwareCheck\.canInstallBaseline !== true/, "baseline installation must require Companion USB readiness");
+requireSource(/INSTALL_BASELINE_FIRMWARE/, "baseline installation must require an explicit confirmation token");
+requireSource(/window\.confirm\(/, "baseline installation must require browser confirmation");
 requireSource(/\/v1\/support\/bundle/, "support bundle must use the Companion API");
 requireSource(/Authorization|authorization/, "support downloads must carry the Companion session");
 requireSource(/job\.kind === ["']build["'][\s\S]*保存完成/,
@@ -73,8 +79,30 @@ requireSource(/http:\/\/127[.]0[.]0[.]1:8790/,
   "a public gallery must target the fixed loopback Companion API");
 requireSource(/fetch\(companionURL\(path\)/,
   "all Companion API calls must pass through the loopback URL resolver");
+requireSource(/function companionFetchOptions\(/,
+  "public Companion requests must use a dedicated local-network fetch policy");
+requireSource(/targetAddressSpace:\s*["']loopback["']/,
+  "public Companion requests must declare the loopback target address space for Safari");
+requireSource(/fetch\(companionURL\(path\),\s*companionFetchOptions\(/,
+  "all Companion fetches must apply the local-network fetch policy");
+requireHtml(/id="openLocalCompanion"[^>]*href="http:\/\/127[.]0[.]0[.]1:8790\/"[^>]*hidden/,
+  "Safari must offer a hidden local Companion fallback without weakening public-page security");
+requireHtml(/id="companionWarningTitle"/, "the Companion warning title must support an actionable Safari fallback");
+requireHtml(/id="companionWarningDetail"/, "the Companion warning detail must support an actionable Safari fallback");
+requireSource(/const isSafariBrowser =/,
+  "the public page must distinguish Safari before presenting the local-page fallback");
+requireSource(/function renderCompanionUnavailable\(/,
+  "Companion startup failures need a dedicated browser-aware renderer");
+requireSource(/const useLocalPage = !isLoopbackPage && isSafariBrowser/,
+  "the local-page fallback must be limited to public pages in Safari");
+requireSource(/\$\("openLocalCompanion"\)\.hidden = !useLocalPage/,
+  "the Safari local-page fallback must remain hidden in other environments");
+requireSource(/catch \(error\) \{[\s\S]*renderCompanionUnavailable\(\)/,
+  "Companion connection failures must render the Safari fallback");
 requireHtml(/name="vibeboard-companion-download"/,
   "a public gallery must expose a configurable Companion download URL");
+requireHtml(/name="vibeboard-companion-download" content=""/,
+  "the source gallery must not expose an unvalidated Companion build");
 requireHtml(/href="vibeboard:\/\/companion\/open"/,
   "an offline public gallery must offer the Companion launch deep link");
 requireHtml(/id="onboardingCompanion"/, "the unboxing guide must expose the Companion step");
@@ -116,6 +144,25 @@ for (const [state, label] of [
 }
 requireHtml(/\.states\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/,
   "nine Petdex state buttons must use a stable three-column grid");
+
+const companionFetchOptionsFunction = script.match(
+  /function companionFetchOptions\([^\n]*\) \{\n[\s\S]*?\n    }/,
+);
+if (!companionFetchOptionsFunction) {
+  throw new Error("Companion fetch policy must be executable in isolation");
+}
+const companionFetchOptionsSource = companionFetchOptionsFunction[0];
+const companionFetchOptions = new Function(
+  `${companionFetchOptionsSource}; return companionFetchOptions;`,
+)();
+const publicFetchOptions = companionFetchOptions({ cache: "no-store" }, false);
+if (publicFetchOptions.targetAddressSpace !== "loopback" || publicFetchOptions.cache !== "no-store") {
+  throw new Error(`public Companion fetch policy is incomplete: ${JSON.stringify(publicFetchOptions)}`);
+}
+const localFetchOptions = companionFetchOptions({ cache: "no-store" }, true);
+if ("targetAddressSpace" in localFetchOptions || localFetchOptions.cache !== "no-store") {
+  throw new Error(`local Companion fetch policy must remain same-origin: ${JSON.stringify(localFetchOptions)}`);
+}
 
 const visibleFrameFunction = script.match(
   /function visibleSpriteFrames\([\s\S]*?\n    }\n\n    function loadSprite/,

@@ -168,6 +168,7 @@
 #define VB_BLE_ADV_FORCE_RESTART_ATTEMPTS 8
 #define VB_BLE_HEALTH_CHECK_MS 1000
 #define VB_BLE_LINK_GRACE_MS 5000
+#define VB_BLE_ADV_START_CONFIRM_MS 3000
 #define VB_BLE_TRACKED_CONNECTIONS 8
 #define VB_SENSOR_JSON_MAX 512
 #define VB_POWER_JSON_MAX 384
@@ -829,6 +830,8 @@ typedef struct
     uint32_t adv_start_events;
     uint32_t adv_stop_events;
     uint32_t adv_restart_requests;
+    uint32_t adv_force_restarts;
+    uint32_t adv_start_requested_tick;
     uint16_t notify_cccd;
     uint16_t voice_cccd;
     uint8_t conn_idx;
@@ -2823,7 +2826,7 @@ BLE_GATT_SERVICE_DEFINE_128(vb_ble_install_att_db)
 
 SIBLES_ADVERTISING_CONTEXT_DECLAR(g_vb_ble_install_adv_context);
 
-static uint8_t vb_ble_advertising_force_restart(void);
+static uint8_t vb_ble_advertising_force_restart(int report_status);
 static void vb_ble_health_check(void);
 
 void vb_peer_advertising_changed(uint8_t flags)
@@ -3017,7 +3020,7 @@ static int vb_ble_execute_line(char *line)
     if (rt_strcmp(argv[0], "ble_status") == 0 ||
         rt_strcmp(argv[0], "vb_runtime_ble_status") == 0)
     {
-        vb_ble_set_status("ok ble api=%s init=%d power=%d service=%d adv=%d conn=%d secure=%d mtu=%d state=%d idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu",
+        vb_ble_set_status("ok ble api=%s init=%d power=%d service=%d adv=%d conn=%d secure=%d mtu=%d state=%d idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu forced=%lu",
                           VIBEBOARD_RUNTIME_BLE_API_VERSION,
                           g_vb_ble.initialized, g_vb_ble.power_on, g_vb_ble.service_ready,
                           g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.encrypted, g_vb_ble.mtu,
@@ -3029,13 +3032,17 @@ static int vb_ble_execute_line(char *line)
                           (int)g_vb_ble.last_adv_stop_reason,
                           (unsigned long)g_vb_ble.adv_start_events,
                           (unsigned long)g_vb_ble.adv_stop_events,
-                          (unsigned long)g_vb_ble.adv_restart_requests);
+                          (unsigned long)g_vb_ble.adv_restart_requests,
+                          (unsigned long)g_vb_ble.adv_force_restarts);
         return RT_EOK;
     }
     if (rt_strcmp(argv[0], "ble_restart") == 0 ||
         rt_strcmp(argv[0], "vb_runtime_ble_restart") == 0)
     {
-        uint8_t result = vb_ble_advertising_force_restart();
+        uint8_t result = vb_ble_advertising_force_restart(1);
+        vb_ble_set_status("ble_restart rc=%u forced=%lu",
+                          (unsigned)result,
+                          (unsigned long)g_vb_ble.adv_force_restarts);
         return result == SIBLES_ADV_NO_ERR ? RT_EOK : -RT_ERROR;
     }
     if (rt_strcmp(argv[0], "app") == 0 ||
@@ -3557,6 +3564,8 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
         g_vb_ble.last_adv_start_rc = status;
         g_vb_ble.adv_start_events++;
         g_vb_ble.advertising = status == 0;
+        if (g_vb_ble.advertising)
+            g_vb_ble.adv_start_requested_tick = 0;
         rt_kprintf("[vb_runtime][ble] adv started name=%s status=%u mode=%d state=%u events=%lu\n",
                    VIBEBOARD_BLE_NAME, (unsigned)status, evt ? evt->adv_mode : -1,
                    (unsigned)vb_ble_adv_context_state(),
@@ -3572,6 +3581,7 @@ static uint8_t vb_ble_advertising_event(uint8_t event, void *context, void *data
         g_vb_ble.last_adv_stop_reason = reason;
         g_vb_ble.adv_stop_events++;
         g_vb_ble.advertising = 0;
+        g_vb_ble.adv_start_requested_tick = 0;
         rt_kprintf("[vb_runtime][ble] adv stopped reason=%u mode=%d state=%u events=%lu\n",
                    (unsigned)reason, evt ? evt->adv_mode : -1,
                    (unsigned)vb_ble_adv_context_state(),
@@ -3633,6 +3643,7 @@ static uint8_t vb_ble_advertising_start(void)
         {
             ret = SIBLES_ADV_NO_ERR;
             g_vb_ble.last_adv_start_rc = ret;
+            g_vb_ble.adv_start_requested_tick = 0;
             rt_kprintf("[vb_runtime][ble] adv already started name=%s state=%u idx=%u trans=%u\n",
                        VIBEBOARD_BLE_NAME,
                        (unsigned)vb_ble_adv_context_state(),
@@ -3642,6 +3653,8 @@ static uint8_t vb_ble_advertising_start(void)
         }
         ret = sibles_advertising_start(g_vb_ble_install_adv_context);
         g_vb_ble.last_adv_start_rc = ret;
+        if (ret == SIBLES_ADV_NO_ERR)
+            g_vb_ble.adv_start_requested_tick = rt_tick_get();
         rt_kprintf("[vb_runtime][ble] adv restart requested name=%s rc=%u state=%u idx=%u trans=%u\n",
                    VIBEBOARD_BLE_NAME, (unsigned)ret,
                    (unsigned)vb_ble_adv_context_state(),
@@ -3686,6 +3699,8 @@ static uint8_t vb_ble_advertising_start(void)
         g_vb_ble.adv_configured = 1;
         ret = sibles_advertising_start(g_vb_ble_install_adv_context);
         g_vb_ble.last_adv_start_rc = ret;
+        if (ret == SIBLES_ADV_NO_ERR)
+            g_vb_ble.adv_start_requested_tick = rt_tick_get();
         rt_kprintf("[vb_runtime][ble] adv start requested name=%s rc=%u state=%u idx=%u trans=%u\n",
                    VIBEBOARD_BLE_NAME, (unsigned)ret,
                    (unsigned)vb_ble_adv_context_state(),
@@ -3705,7 +3720,7 @@ cleanup:
     return ret;
 }
 
-static uint8_t vb_ble_advertising_force_restart(void)
+static uint8_t vb_ble_advertising_force_restart(int report_status)
 {
     uint8_t stop_rc = SIBLES_ADV_NOT_ALLOWED;
     uint8_t start_rc;
@@ -3713,14 +3728,15 @@ static uint8_t vb_ble_advertising_force_restart(void)
     int attempt;
 
     g_vb_ble.adv_restart_requests++;
+    g_vb_ble.adv_force_restarts++;
     if (!g_vb_ble.power_on || !g_vb_ble.service_ready)
     {
         start_rc = SIBLES_ADV_NOT_ALLOWED;
         g_vb_ble.last_adv_start_rc = start_rc;
-        vb_ble_set_status("ble_restart blocked power=%d service=%d rc=%u req=%lu",
-                          g_vb_ble.power_on, g_vb_ble.service_ready,
-                          (unsigned)start_rc,
-                          (unsigned long)g_vb_ble.adv_restart_requests);
+        rt_kprintf("[vb_runtime][ble] force restart blocked power=%d service=%d rc=%u req=%lu\n",
+                   g_vb_ble.power_on, g_vb_ble.service_ready,
+                   (unsigned)start_rc,
+                   (unsigned long)g_vb_ble.adv_restart_requests);
         return start_rc;
     }
     stop_events = g_vb_ble.adv_stop_events;
@@ -3742,16 +3758,16 @@ static uint8_t vb_ble_advertising_force_restart(void)
     }
 
     g_vb_ble.advertising = 0;
+    g_vb_ble.adv_start_requested_tick = 0;
     start_rc = vb_ble_advertising_start();
     g_vb_ble.last_adv_start_rc = start_rc;
-    vb_ble_set_status("ble_restart stop_rc=%u start_rc=%u adv=%d state=%u idx=%u trans=%u starts=%lu stops=%lu req=%lu",
-                      (unsigned)stop_rc, (unsigned)start_rc, g_vb_ble.advertising,
-                      (unsigned)vb_ble_adv_context_state(),
-                      (unsigned)vb_ble_adv_context_index(),
-                      (unsigned)vb_ble_adv_context_transist(),
-                      (unsigned long)g_vb_ble.adv_start_events,
-                      (unsigned long)g_vb_ble.adv_stop_events,
-                      (unsigned long)g_vb_ble.adv_restart_requests);
+    rt_kprintf("[vb_runtime][ble] %s stop_rc=%u start_rc=%u state=%u idx=%u trans=%u forced=%lu\n",
+               report_status ? "manual restart" : "force restart",
+               (unsigned)stop_rc, (unsigned)start_rc,
+               (unsigned)vb_ble_adv_context_state(),
+               (unsigned)vb_ble_adv_context_index(),
+               (unsigned)vb_ble_adv_context_transist(),
+               (unsigned long)g_vb_ble.adv_force_restarts);
     return start_rc;
 }
 
@@ -3814,6 +3830,22 @@ static void vb_ble_health_check(void)
     }
 
     if (g_vb_ble.advertising)
+    {
+        g_vb_ble.adv_start_requested_tick = 0;
+        return;
+    }
+    if (g_vb_ble.adv_start_requested_tick &&
+        now - g_vb_ble.adv_start_requested_tick >=
+        rt_tick_from_millisecond(VB_BLE_ADV_START_CONFIRM_MS))
+    {
+        rt_kprintf("[vb_runtime][ble] advertising confirmation timeout state=%u idx=%u trans=%u; forcing restart\n",
+                   (unsigned)vb_ble_adv_context_state(),
+                   (unsigned)vb_ble_adv_context_index(),
+                   (unsigned)vb_ble_adv_context_transist());
+        (void)vb_ble_advertising_force_restart(0);
+        return;
+    }
+    if (g_vb_ble.adv_start_requested_tick)
         return;
     ret = vb_ble_advertising_start();
     if (ret != SIBLES_ADV_NO_ERR)
@@ -15159,7 +15191,7 @@ static int vb_runtime_ble_status(int argc, char **argv)
                g_vb_ble.advertising, g_vb_ble.connected, g_vb_ble.encrypted,
                g_vb_ble.notify_cccd ? 1 : 0,
                g_vb_ble.mtu, (int)vb_ble_adv_context_state());
-    rt_kprintf("[vb_runtime][ble] ok ble_adv idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu\n",
+    rt_kprintf("[vb_runtime][ble] ok ble_adv idx=%d trans=%d start_rc=%d stop_rc=%d reason=%d starts=%lu stops=%lu restarts=%lu forced=%lu\n",
                (int)vb_ble_adv_context_index(),
                (int)vb_ble_adv_context_transist(),
                (int)g_vb_ble.last_adv_start_rc,
@@ -15167,7 +15199,8 @@ static int vb_runtime_ble_status(int argc, char **argv)
                (int)g_vb_ble.last_adv_stop_reason,
                (unsigned long)g_vb_ble.adv_start_events,
                (unsigned long)g_vb_ble.adv_stop_events,
-               (unsigned long)g_vb_ble.adv_restart_requests);
+               (unsigned long)g_vb_ble.adv_restart_requests,
+               (unsigned long)g_vb_ble.adv_force_restarts);
     return RT_EOK;
 #else
     rt_kprintf("[vb_runtime][ble] unavailable\n");
@@ -15181,7 +15214,7 @@ static int vb_runtime_ble_restart(int argc, char **argv)
     (void)argc;
     (void)argv;
 #if VB_RUNTIME_HAS_BLE_INSTALL
-    uint8_t result = vb_ble_advertising_force_restart();
+    uint8_t result = vb_ble_advertising_force_restart(1);
     rt_kprintf("[vb_runtime][ble] restart rc=%d\n", (int)result);
     return result == SIBLES_ADV_NO_ERR ? RT_EOK : -RT_ERROR;
 #else

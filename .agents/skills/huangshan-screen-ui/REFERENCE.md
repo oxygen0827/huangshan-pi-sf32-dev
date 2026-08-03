@@ -120,10 +120,59 @@ targets or moving controls into the rounded corners.
 - Runtime Lua: at most 96 tracked LVGL handles and 8 high-level `vibe_ui_*`
   components per app.
 
+## Board font pipeline and legibility
+
+The 390x450 firmware path enables the SiFli resource manager and FreeType font
+manager. Built-in and VibeBoard Runtime C screens should normally include
+`lv_ext_resource_manager.h` and set type through:
+
+```c
+lv_ext_set_local_font(label, FONT_NORMAL, lv_color_hex(0xf8fafc));
+```
+
+This is not interchangeable with directly assigning an LVGL bitmap font:
+
+```c
+/* Avoid by default on this target. */
+lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+```
+
+The direct bitmap call bypasses the established managed-font path. During the
+2026-08-03 Codex Pet usage-screen review, direct Montserrat 12/16/20/28 px fonts
+produced dotted, broken-looking strokes on the real AMOLED and pulled about 70
+KiB of additional font data into the firmware. Static coordinate checks and a
+successful build did not reveal the legibility failure. Returning to
+`lv_ext_set_local_font` restored clear text on target.
+
+For this resolution, the established managed scale is:
+
+| Role | Constant | Nominal size |
+| --- | --- | --- |
+| Supporting label / status | `FONT_SMALL` | 16 px |
+| Body / secondary value | `FONT_NORMAL` | 20 px |
+| Section title / metric value | `FONT_SUBTITLE` | 24 px |
+| Page title / primary value | `FONT_TITLE` | 28 px |
+| Exceptional display value | `FONT_BIGL` | 36 px |
+
+Use 16 px as the default readability floor for information. Do not solve an
+overfull page by dropping important text to 12 px. Shorten copy, remove repeated
+headings, split dynamic metrics into stable columns, or scroll the content.
+
+Label boxes must be sized for the managed font's actual line height, not merely
+the nominal size or a previous bitmap font. Allow roughly 4 px or more of
+vertical slack where fixed positioning is necessary. A target photo must confirm
+that descenders, curved strokes, and small numerals remain continuous and filled.
+
+Direct bitmap fonts remain available for an intentional pixel-art look or a
+proven memory/performance need. Such an exception requires a before/after board
+photo, longest-string check, firmware-size comparison, and an explicit handoff
+note. A desktop preview alone is not evidence.
+
 ## Evidence hierarchy
 
 1. Straight-on real-board photo/video after flashing, with the active display in
-   focus and the complete glass outline visible.
+   focus and the complete glass outline visible. Review both safe-area placement
+   and glyph quality at normal viewing scale, not only a zoomed crop.
 2. Runtime touch and interaction test on the board.
 3. Simulator/screenshot for rectangular layout and overlap checks.
 4. Static coordinate review.

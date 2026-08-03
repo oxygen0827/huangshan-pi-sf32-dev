@@ -122,6 +122,14 @@ def _version_key(value: str) -> tuple[int, ...]:
     return tuple(parts or [0])
 
 
+def _flash_failure_message(lines: list[str]) -> str:
+    """Keep the actionable post-flash error instead of mislabeling every failure."""
+    tail = " | ".join(lines[-4:]).strip()
+    if tail:
+        return f"firmware installation validation failed: {tail[:800]}"
+    return "firmware installation validation failed; no tool output was received"
+
+
 class FirmwareManager:
     def __init__(self, state_dir: Path, *, root: Path) -> None:
         self.state_dir = state_dir.expanduser() / "firmware"
@@ -170,7 +178,24 @@ class FirmwareManager:
         }
         if not self.configured:
             value["reason"] = "Set VIBEBOARD_FIRMWARE_MANIFEST_URL and VIBEBOARD_FIRMWARE_PUBLIC_KEY"
+            value["usbRecovery"] = {"ready": False, "reason": "official firmware source is not configured"}
+        else:
+            value["usbRecovery"] = self.usb_recovery_status()
         return value
+
+    def usb_recovery_status(self) -> dict[str, object]:
+        """Report whether the local Companion can unambiguously select a USB UART.
+
+        Enumeration does not open the serial port, so it cannot reset the board.
+        The actual flash operation selects it again immediately before writing.
+        """
+        try:
+            from flash import choose_port
+
+            port = choose_port(self.port or None, allow_usbmodem=False)
+        except SystemExit as exc:
+            return {"ready": False, "reason": str(exc)[:220]}
+        return {"ready": True, "port": port.path, "role": port.role}
 
     def _read_feed(self) -> dict[str, Any]:
         if not self.feed_url:
@@ -198,9 +223,25 @@ class FirmwareManager:
         feed = self._read_feed()
         releases = [row for row in feed["releases"] if isinstance(row, dict) and isinstance(row.get("version"), str)]
         releases.sort(key=lambda row: _version_key(str(row["version"])), reverse=True)
+        baseline_rows = [row for row in releases if row.get("baseline") is True]
+        baseline = baseline_rows[0] if len(baseline_rows) == 1 else None
         last = self._read_state("last-success.json").get("version")
         latest = releases[0] if releases else None
-        return {"board": feed.get("board"), "current": last, "latest": latest, "releases": releases[:10]}
+        return {
+            "board": feed.get("board"),
+            "current": last,
+            "latest": latest,
+            "baseline": baseline,
+            "releases": releases[:10],
+        }
+
+    @staticmethod
+    def _baseline_version(available: dict[str, object]) -> str:
+        row = available.get("baseline")
+        version = row.get("version") if isinstance(row, dict) else None
+        if not isinstance(version, str) or not version:
+            raise FirmwareManagerError("official firmware feed has no unique baseline release")
+        return version
 
     def _release_from_feed(self, version: str | None) -> tuple[str, Path]:
         if self.release_dir:
@@ -281,12 +322,14 @@ class FirmwareManager:
         progress("flash", 45, "Verified image; flashing over USB")
         process = subprocess.Popen(command, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         assert process.stdout is not None
+        output: list[str] = []
         for line in process.stdout:
             line = line.strip()
             if line:
+                output.append(line)
                 progress("flash", 62, line[:220])
         if process.wait() != 0:
-            raise FirmwareManagerError("firmware flash failed; current board image was not marked good")
+            raise FirmwareManagerError(_flash_failure_message(output))
         progress("health", 92, "Boot log confirmed; checking Runtime health")
 
     def update(self, version: str | None, progress: Callable[[str, int, str], None]) -> dict[str, object]:
@@ -294,6 +337,43 @@ class FirmwareManager:
             raise FirmwareManagerError("another firmware operation is already in progress")
         try:
             return self._update_locked(version, progress)
+        finally:
+            self._operation_lock.release()
+
+    def install_baseline(
+        self,
+        progress: Callable[[str, int, str], None],
+        *,
+        expected_version: str | None = None,
+    ) -> dict[str, object]:
+        """Explicitly migrate a legacy board that has no reportable release version."""
+        if not self._operation_lock.acquire(blocking=False):
+            raise FirmwareManagerError("another firmware operation is already in progress")
+        try:
+            if not self.configured:
+                raise FirmwareManagerError("firmware update is not configured for this Companion build")
+            available = self.available()
+            version = self._baseline_version(available)
+            if expected_version is not None and version != expected_version:
+                raise FirmwareManagerError("official baseline firmware changed; review the new release before installing")
+            version_value, release = self._release_from_feed(version)
+            if version_value != version:
+                raise FirmwareManagerError("downloaded baseline version does not match the official feed")
+            progress("verify", 24, f"Verified signed baseline firmware {version_value}")
+            self._write_state("last-attempt.json", {
+                "version": version_value,
+                "baseline": True,
+                "startedAt": int(time.time()),
+            })
+            self._flash(release, version_value, progress)
+            self._write_state("last-success.json", {
+                "version": version_value,
+                "release": str(release),
+                "baseline": True,
+                "updatedAt": int(time.time()),
+            })
+            progress("complete", 100, f"Baseline firmware {version_value} is healthy")
+            return {"version": version_value, "baseline": True, "rolledBack": False}
         finally:
             self._operation_lock.release()
 
@@ -389,6 +469,29 @@ def run_self_test() -> None:
             else:
                 raise AssertionError("archive traversal was accepted")
         assert not (root / "escape").exists()
+        manager._read_feed = lambda: {
+            "schemaVersion": 1,
+            "releases": [
+                {"version": "1.0.1"},
+                {"version": "1.0.0", "baseline": True},
+            ],
+        }
+        assert manager.available()["baseline"] == {"version": "1.0.0", "baseline": True}
+        manager._read_feed = lambda: {
+            "schemaVersion": 1,
+            "releases": [
+                {"version": "1.0.0", "baseline": True},
+                {"version": "0.9.0", "baseline": True},
+            ],
+        }
+        assert manager.available()["baseline"] is None
+        assert FirmwareManager._baseline_version({"baseline": {"version": "1.0.0"}}) == "1.0.0"
+        try:
+            FirmwareManager._baseline_version({"baseline": None})
+        except FirmwareManagerError:
+            pass
+        else:
+            raise AssertionError("missing baseline release was accepted")
         assert manager._operation_lock.acquire(blocking=False)
         try:
             try:
@@ -399,4 +502,8 @@ def run_self_test() -> None:
                 raise AssertionError("concurrent firmware update was accepted")
         finally:
             manager._operation_lock.release()
+    assert _flash_failure_message([]) == "firmware installation validation failed; no tool output was received"
+    assert _flash_failure_message(["written", "Runtime health check failed: status timeout"]).endswith(
+        "Runtime health check failed: status timeout"
+    )
     print("companion_firmware self-test ok")

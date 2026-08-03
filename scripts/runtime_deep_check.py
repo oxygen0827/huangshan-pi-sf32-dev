@@ -131,6 +131,7 @@ def python_compile_targets() -> list[str]:
         "scripts/codex_pet_monitor.py",
         "scripts/codex_pet_voice.py",
         "scripts/codex_pet_status.py",
+        "scripts/codex_pet_usage.py",
         "scripts/codex_pet_hook.py",
         "scripts/codex_pet_mcp.py",
         "scripts/codex_pet_soak.py",
@@ -196,6 +197,7 @@ def build_checks(include_swift: bool, hardware_gate: HardwareGate | None = None)
         Check("pass1-architecture", "Codex pet live console launcher self-test", ["./scripts/codex_pet_test_backend.command", "--self-test"]),
         Check("pass1-architecture", "Codex pet voice self-test", [PYTHON, "scripts/codex_pet_voice.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet status self-test", [PYTHON, "scripts/codex_pet_status.py", "--self-test"]),
+        Check("pass1-architecture", "Codex pet usage self-test", [PYTHON, "scripts/codex_pet_usage.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet hook self-test", [PYTHON, "scripts/codex_pet_hook.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet MCP self-test", [PYTHON, "scripts/codex_pet_mcp.py", "--self-test"]),
         Check("pass1-architecture", "Codex pet soak self-test", [PYTHON, "scripts/codex_pet_soak.py", "--self-test"]),
@@ -315,6 +317,7 @@ def run_self_test() -> None:
     assert "scripts/codex_pet_protocol.py" in python_compile_targets()
     assert "scripts/codex_pet_bridge.py" in python_compile_targets()
     assert "scripts/codex_pet_monitor.py" in python_compile_targets()
+    assert "scripts/codex_pet_usage.py" in python_compile_targets()
     assert "scripts/codex_pet_voice.py" in python_compile_targets()
     assert "scripts/codex_pet_mcp.py" in python_compile_targets()
     assert "scripts/codex_pet_audio.py" in python_compile_targets()
@@ -328,6 +331,7 @@ def run_self_test() -> None:
     assert any(check.label == "Codex pet app-server self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet protocol self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet Bridge self-test" for check in build_checks(include_swift=False))
+    assert any(check.label == "Codex pet usage self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet desktop monitor self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet monitor launcher self-test" for check in build_checks(include_swift=False))
     assert any(check.label == "Codex pet live console launcher self-test" for check in build_checks(include_swift=False))

@@ -17,6 +17,7 @@ from codex_pet_appserver import (
     AppServerUsageProvider,
     CodexAppServerError,
     CodexAppServerProtocolError,
+    RateLimitWindow,
     RateLimitSnapshot,
     UsageProvider,
     UsageReading,
@@ -251,6 +252,7 @@ def _approval_payload(pending: PendingApproval, project_name: str, *, status: st
 def quota_payload(reading: UsageReading, previous: RateLimitSnapshot | None = None) -> str:
     """Serialize quota without credentials or provider error bodies."""
     snapshot = reading.snapshot or previous
+    now = int(time.time())
     status = "live" if reading.status == "live" and reading.snapshot is not None else (
         "stale" if previous is not None else "unavailable"
     )
@@ -259,7 +261,7 @@ def quota_payload(reading: UsageReading, previous: RateLimitSnapshot | None = No
         "v": 1,
         "status": status,
         "src": reading.source[:20],
-        "at": snapshot.fetched_at if snapshot else int(time.time()),
+        "at": snapshot.fetched_at if snapshot else now,
         "stale": stale,
     }
     if snapshot is not None:
@@ -270,18 +272,91 @@ def quota_payload(reading: UsageReading, previous: RateLimitSnapshot | None = No
                 if window.window_minutes is not None:
                     value[f"{short}W"] = window.window_minutes
                 if window.resets_at is not None:
-                    value[f"{short}R"] = window.resets_at
+                    # The board has a monotonic tick but no trusted wall clock.
+                    # Send a relative countdown so it can keep rendering between
+                    # the normal 60-second Bridge refreshes.
+                    value[f"{short}D"] = max(0, window.resets_at - now)
     if status != "live":
         error = (reading.error or "unavailable").lower()
         value["error"] = "auth" if "auth" in error or "login" in error else "unavailable"
     encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > QUOTA_MAX_BYTES:
-        value.pop("sR", None)
-        value.pop("pR", None)
+        value.pop("sD", None)
+        value.pop("pD", None)
         encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > QUOTA_MAX_BYTES:
         raise ValueError(f"pet.quota payload exceeds {QUOTA_MAX_BYTES} bytes")
     return encoded
+
+
+class QuotaClient(Protocol):
+    async def start(self) -> None: ...
+    async def close(self) -> None: ...
+    async def rate_limits(self) -> RateLimitSnapshot: ...
+
+
+class CodexPetQuotaService:
+    """Publish quota independently of the Desktop task monitor stream."""
+
+    def __init__(
+        self,
+        *,
+        client: QuotaClient,
+        publish_quota: PublishQuota,
+        refresh_seconds: float = QUOTA_REFRESH_SECONDS,
+    ) -> None:
+        if refresh_seconds <= 0:
+            raise ValueError("quota refresh interval must be positive")
+        self.client = client
+        self.publish_quota = publish_quota
+        self.usage_provider = AppServerUsageProvider(client)
+        self.refresh_seconds = refresh_seconds
+        self.last_quota: RateLimitSnapshot | None = None
+        self._refresh_task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._refresh_task is not None:
+            return
+        self._stop.clear()
+        try:
+            await self.client.start()
+        except Exception as exc:
+            await self._publish_unavailable(str(exc))
+            return
+        await self._refresh_quota()
+        self._refresh_task = asyncio.create_task(self._refresh_loop(), name="codex-pet-quota-refresh")
+
+    async def stop(self) -> None:
+        task = self._refresh_task
+        self._refresh_task = None
+        self._stop.set()
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        with contextlib.suppress(Exception):
+            await self.client.close()
+
+    async def _refresh_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.refresh_seconds)
+            except asyncio.TimeoutError:
+                await self._refresh_quota()
+
+    async def _publish_unavailable(self, error: str) -> None:
+        reading = UsageReading("codex-app-server", "unavailable", None, error or "unavailable")
+        await self.publish_quota(quota_payload(reading, self.last_quota))
+
+    async def _refresh_quota(self) -> None:
+        try:
+            reading = await self.usage_provider.fetch()
+        except Exception as exc:
+            reading = UsageReading("codex-app-server", "unavailable", None, str(exc))
+        if reading.snapshot is not None:
+            self.last_quota = reading.snapshot
+        await self.publish_quota(quota_payload(reading, self.last_quota))
 
 
 class CodexPetStatusService:
@@ -618,12 +693,50 @@ async def _self_test_async() -> None:
     assert reducer.current(now=base + 2).task_id == "thr_2"
     assert reducer.current(now=base + DEFAULT_TTL_MS + 2).status == "ready"
 
-    snapshot = RateLimitSnapshot(None, None, "codex", "plus", 123)
+    now = int(time.time())
+    snapshot = RateLimitSnapshot(
+        RateLimitWindow(17, 300, now + 3600),
+        RateLimitWindow(41, 10080, now + 360000),
+        "codex",
+        "plus",
+        now,
+    )
     reading = UsageReading("codex-app-server", "live", snapshot, None)
     encoded = quota_payload(reading)
     assert len(encoded.encode("utf-8")) <= QUOTA_MAX_BYTES and '"status":"live"' in encoded
+    assert '"pD":' in encoded and '"sD":' in encoded
     stale = quota_payload(UsageReading("codex-app-server", "unavailable", None, "auth required"), snapshot)
     assert '"status":"stale"' in stale and '"error":"auth"' in stale
+
+    class _FakeQuotaClient:
+        def __init__(self) -> None:
+            self.started = False
+            self.closed = False
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def rate_limits(self) -> RateLimitSnapshot:
+            return snapshot
+
+    quota_frames: list[str] = []
+
+    async def publish_quota_frame(text: str) -> None:
+        quota_frames.append(text)
+
+    fake_quota_client = _FakeQuotaClient()
+    quota_service = CodexPetQuotaService(
+        client=fake_quota_client,
+        publish_quota=publish_quota_frame,
+        refresh_seconds=0.05,
+    )
+    await quota_service.start()
+    assert fake_quota_client.started and quota_frames and '"status":"live"' in quota_frames[0]
+    await quota_service.stop()
+    assert fake_quota_client.closed
 
     events = _FakeEvents()
     states: list[dict[str, object]] = []

@@ -35,6 +35,7 @@ export NODE
 export CODEX_PET_SHARP="$SHARP"
 
 "$AGENT" --agent-self-test
+"$AGENT" --firmware-health --self-test
 "$AGENT" --self-test
 "$NODE" "$AGENT_ROOT/scripts/hpet_crypto.js" --self-test
 "$NODE" "$AGENT_ROOT/scripts/build_hpet_petdex.js" --self-test

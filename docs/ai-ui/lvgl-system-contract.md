@@ -23,6 +23,12 @@ repository.
 - Prefer reusable component helpers and a theme file over one-off styling.
 - Reuse `src/huangshan_ui/` first. Use an app-specific prefix only for a
   component that is genuinely local to one app.
+- For built-in and VibeBoard Runtime C labels, preserve the SiFli managed-font
+  path: include `lv_ext_resource_manager.h` and use `lv_ext_set_local_font` with
+  `FONT_SMALL`, `FONT_NORMAL`, `FONT_SUBTITLE`, `FONT_TITLE`, or `FONT_BIGL`.
+  Do not directly assign `lv_font_montserrat_*` bitmap fonts without a documented
+  real-board comparison; that bypass caused visibly broken strokes in the Codex
+  Pet usage UI.
 - Separate page creation from dynamic data updates.
 - Delete timers and root objects in `ONSTOP`.
 - Use `rt_kprintf` for lifecycle and important interaction evidence.
@@ -35,6 +41,12 @@ repository.
   but keep values centralized and readable.
 - Reserve the current rounded-screen safe margins: use the project safe-area constants instead of placing critical text/buttons in the four corners.
 - Keep text short enough for English and Chinese labels.
+- On this 390x450 target, treat `FONT_SMALL` (16 px) as the default floor for
+  readable information. Shorten, split, or scroll content instead of reducing
+  critical labels to 12 px.
+- Size fixed label containers for the managed font's actual line height and leave
+  vertical slack; nominal font size alone does not prove that glyphs will not be
+  clipped.
 - Do not add a tiny top-right Home button as the only navigation path; K1 is the primary return-home affordance, and left-edge swipe can be a secondary gesture.
 - Lists and app grids must scroll when content exceeds one screen; do not hard-code an eight-item limit.
 
