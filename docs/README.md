@@ -8,7 +8,7 @@
 | 板端开发与历史问题 | `runtime-app-development-notes.md`、`board-bringup.md`、`runtime-app-plan-writer.md` |
 | Codex Pet 与 Companion | `codex-pet-one-click-deploy.md`、`codex-pet-bridge.md`、`macos-companion-release.md` |
 | 固件发布、恢复和诊断 | `firmware-release-and-recovery.md` |
-| 屏幕、传感器与网络边界 | `board-app-separation.md`、`huangshan-networking.md`、`runtime-high-risk-capabilities-evaluation.md` |
+| 硬件基线、屏幕、传感器与网络边界 | `sf32lb52-module-hardware-reference.md`、`board-app-separation.md`、`huangshan-networking.md`、`runtime-high-risk-capabilities-evaluation.md` |
 | 上游与 SDK 调研 | `upstream.md`、`sifli-sdk-map.md`、`sifli-learning-path.md` |
 
 新增设计决策或真实设备故障时，先更新最贴近主题的契约文档，再把现象、根因、修复和回归要求补进

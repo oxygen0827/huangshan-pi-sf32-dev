@@ -1,0 +1,4 @@
+interface:
+  display_name: "Publish VibeBoard Companion (Ad Hoc)"
+  short_description: "Build and publish the ad-hoc macOS Companion to ldcx.tech"
+  default_prompt: "Use $publish-vibeboard-companion-adhoc to build, upload, and verify the latest Companion release."

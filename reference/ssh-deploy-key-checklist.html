@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ldcx.tech SSH 部署密钥速查</title>
+  <style>
+    :root { color-scheme: light; --ink:#171a18; --muted:#59615b; --line:#cfd5d0; --green:#167846; --paper:#ffffff; --soft:#f4f7f4; --warn:#8a5700; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #eef1ee; color: var(--ink); font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+    main { width: min(900px, calc(100% - 32px)); margin: 28px auto; padding: 34px; background: var(--paper); border: 1px solid var(--line); }
+    h1 { margin: 0 0 6px; font-size: 28px; }
+    h2 { margin: 28px 0 8px; font-size: 18px; }
+    p { margin: 7px 0; }
+    .lede { color: var(--muted); }
+    .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 24px 0; border: 1px solid var(--line); background: var(--line); }
+    .flow div { min-height: 90px; padding: 14px; background: var(--soft); }
+    .flow strong { display: block; color: var(--green); }
+    ol { padding-left: 22px; }
+    li { margin: 10px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { overflow-x: auto; padding: 13px 15px; border-left: 3px solid var(--green); background: #111713; color: #eef8f1; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .warning { padding: 12px 14px; border-left: 3px solid #d18a00; background: #fff8e8; color: var(--warn); }
+    footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    a { color: var(--green); }
+    @media (max-width: 680px) { main { width: 100%; margin: 0; padding: 22px 16px; border: 0; } .flow { grid-template-columns: 1fr; } }
+    @media print { body { background: #fff; } main { width: 100%; margin: 0; border: 0; padding: 0; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ldcx.tech SSH 部署密钥速查</h1>
+  <p class="lede">目标：部署时不再读取桌面 root 密码，同时保留可验证、可撤销的独立凭据。</p>
+
+  <div class="flow" aria-label="SSH 公钥认证关系">
+    <div><strong>Mac 私钥</strong>只留在本机，并用口令加密。</div>
+    <div><strong>SSH 认证</strong>客户端证明持有私钥，私钥不上传。</div>
+    <div><strong>服务器公钥</strong>写入 <code>/root/.ssh/authorized_keys</code>。</div>
+  </div>
+
+  <h2>一次性迁移</h2>
+  <ol>
+    <li>生成专用 Ed25519 密钥，设置独立口令。</li>
+    <li>把私钥口令加入 macOS Keychain。</li>
+    <li>使用旧密码一次，将带 <code>restrict</code> 的公钥追加到服务器。</li>
+    <li>配置 SSH 别名，并强制只使用这把密钥。</li>
+    <li>用 <code>BatchMode=yes</code> 验证没有密码回退。</li>
+    <li>把应急密码移入密码管理器，随后删除桌面明文文件。</li>
+  </ol>
+
+  <h2>核心命令</h2>
+  <pre>ssh-keygen -t ed25519 -a 64 \
+  -f ~/.ssh/ldcx_vibeboard_deploy \
+  -C "vibeboard-deploy@ldcx.tech"
+
+ssh-add --apple-use-keychain ~/.ssh/ldcx_vibeboard_deploy
+
+awk '{print "restrict " $0}' ~/.ssh/ldcx_vibeboard_deploy.pub | \
+ssh root@47.102.197.71 \
+  'umask 077; mkdir -p /root/.ssh; touch /root/.ssh/authorized_keys; incoming=$(cat); grep -qxF -- "$incoming" /root/.ssh/authorized_keys || printf "%s\n" "$incoming" >> /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys'
+
+ssh -o BatchMode=yes ldcx-vibeboard \
+  'id -u; test -d /home/lincaigui/nginx/static/codex-pet/companion; printf "deploy-key-ok\n"'</pre>
+
+  <p class="warning"><strong>顺序不可倒置：</strong>保留原密码会话，直到另一个终端里的密钥登录验证成功。不要先删除明文文件，也不要在同一次操作中关闭服务器密码登录。</p>
+
+  <footer>
+    依据：<a href="https://man.openbsd.org/ssh-keygen">OpenSSH ssh-keygen(1)</a> 与
+    <a href="https://man.openbsd.org/sshd#AUTHORIZED_KEYS_FILE_FORMAT">sshd(8) authorized_keys</a>。
+  </footer>
+</main>
+</body>
+</html>
+
