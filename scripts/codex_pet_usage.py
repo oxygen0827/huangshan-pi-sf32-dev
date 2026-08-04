@@ -6,16 +6,23 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 
 USAGE_CHANNEL = "pet.usage"
+USAGE_SUMMARY_CHANNEL = "pet.usage.summary"
 USAGE_SNAPSHOT_MAX_BYTES = 184
 USAGE_REFRESH_SECONDS = 1.0
+USAGE_SUMMARY_REFRESH_SECONDS = 60.0
 DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+_SUMMARY_RECORD_RE = re.compile(
+    r'"type"\s*:\s*"(?:session_meta|turn_context|token_count)"'
+)
 
 
 @dataclass(frozen=True)
@@ -160,6 +167,67 @@ class UsageSnapshot:
         return encoded
 
 
+@dataclass
+class UsageDay:
+    day: date
+    tokens: int = 0
+    cost_microusd: int = 0
+    cost_complete: bool = True
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    days: tuple[UsageDay, ...]
+
+    @property
+    def today(self) -> UsageDay:
+        return self.days[-1]
+
+    @property
+    def trend_unit(self) -> str:
+        return "cost" if all(day.cost_complete for day in self.days) else "tokens"
+
+    def encode(self) -> str:
+        cost_trend = self.trend_unit == "cost"
+        trend = [day.cost_microusd if cost_trend else day.tokens for day in self.days]
+        maximum = max(trend, default=0)
+        compact_trend = [
+            (value * 1000 + maximum // 2) // maximum if maximum else 0
+            for value in trend
+        ]
+        payload: dict[str, object] = {
+            "v": 1,
+            "s": "l",
+            "t": self.today.tokens,
+            "c": 1 if self.today.cost_complete else 0,
+            "u": "c" if cost_trend else "t",
+            "w": compact_trend,
+        }
+        if self.today.cost_complete:
+            payload["d"] = self.today.cost_microusd
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > USAGE_SNAPSHOT_MAX_BYTES:
+            raise ValueError("usage summary exceeds board transport limit")
+        return encoded
+
+    def public_value(self) -> dict[str, object]:
+        return {
+            "todayTokens": self.today.tokens,
+            "todayCostMicrousd": self.today.cost_microusd if self.today.cost_complete else None,
+            "costComplete": self.today.cost_complete,
+            "trendUnit": self.trend_unit,
+            "days": [
+                {
+                    "date": day.day.isoformat(),
+                    "tokens": day.tokens,
+                    "costMicrousd": day.cost_microusd if day.cost_complete else None,
+                    "costComplete": day.cost_complete,
+                }
+                for day in self.days
+            ],
+        }
+
+
 def _compact_model(value: str) -> str:
     return "".join(character for character in value.strip() if 32 <= ord(character) < 127)[:24]
 
@@ -294,6 +362,111 @@ class CodexSessionUsageReader:
             self.context_window = window
 
 
+def _record_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.astimezone()
+
+
+class GlobalUsageReader:
+    """Reduce all local session token deltas into seven day buckets."""
+
+    def __init__(
+        self,
+        sessions_dir: Path = DEFAULT_SESSIONS_DIR,
+        *,
+        local_now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
+        self.sessions_dir = sessions_dir.expanduser()
+        self.local_now = local_now
+        self.environ = environ
+
+    def read(self) -> UsageSummary:
+        now = self.local_now()
+        today = now.date()
+        first_day = today - timedelta(days=6)
+        buckets = {
+            first_day + timedelta(days=index): UsageDay(first_day + timedelta(days=index))
+            for index in range(7)
+        }
+        if self.sessions_dir.is_dir():
+            for path in self.sessions_dir.rglob("rollout-*.jsonl"):
+                try:
+                    modified_day = datetime.fromtimestamp(path.stat().st_mtime, tz=now.tzinfo).date()
+                except OSError:
+                    continue
+                if modified_day >= first_day:
+                    self._consume_file(path, buckets, now.tzinfo)
+        return UsageSummary(tuple(buckets[key] for key in sorted(buckets)))
+
+    def _consume_file(
+        self,
+        path: Path,
+        buckets: dict[date, UsageDay],
+        local_tz: object,
+    ) -> None:
+        provider = ""
+        model = ""
+        previous = TokenCounts()
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        with handle:
+            for line in handle:
+                # Reject prompt, response, command, and file records before JSON decoding.
+                if _SUMMARY_RECORD_RE.search(line) is None:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping):
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, Mapping):
+                    continue
+                record_type = record.get("type")
+                if record_type == "session_meta":
+                    value = payload.get("model_provider")
+                    if isinstance(value, str):
+                        provider = value
+                    continue
+                if record_type == "turn_context":
+                    value = payload.get("model")
+                    if isinstance(value, str):
+                        model = value
+                    continue
+                if record_type != "event_msg" or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                if not isinstance(info, Mapping):
+                    continue
+                current = TokenCounts.from_value(info.get("total_token_usage"))
+                delta = current.delta(previous)
+                previous = current
+                if delta.total_tokens <= 0:
+                    continue
+                timestamp = _record_timestamp(record.get("timestamp"))
+                if timestamp is None:
+                    continue
+                local_day = timestamp.astimezone(local_tz).date()  # type: ignore[arg-type]
+                bucket = buckets.get(local_day)
+                if bucket is None:
+                    continue
+                bucket.tokens += delta.total_tokens
+                price = price_for_model(model, provider, self.environ)
+                if price is None:
+                    bucket.cost_complete = False
+                else:
+                    bucket.cost_microusd += price.estimate_microusd(delta)
+
+
 def _session_id_from_name(name: str) -> str:
     stem = name[:-6] if name.endswith(".jsonl") else name
     return stem[-36:] if len(stem) >= 36 else stem
@@ -305,17 +478,25 @@ class CodexPetUsageService:
         *,
         publish_usage: Callable[[str], Awaitable[None]],
         selected_session: Callable[[], str | None],
+        publish_summary: Callable[[str], Awaitable[None]] | None = None,
         sessions_dir: Path = DEFAULT_SESSIONS_DIR,
         refresh_seconds: float = USAGE_REFRESH_SECONDS,
+        summary_refresh_seconds: float = USAGE_SUMMARY_REFRESH_SECONDS,
     ) -> None:
         if refresh_seconds <= 0:
             raise ValueError("usage refresh interval must be positive")
         self.publish_usage = publish_usage
+        self.publish_summary = publish_summary
         self.selected_session = selected_session
         self.refresh_seconds = refresh_seconds
         self.reader = CodexSessionUsageReader(sessions_dir)
+        self.summary_reader = GlobalUsageReader(sessions_dir)
         self._task: asyncio.Task[None] | None = None
         self._last_payload = ""
+        self._last_summary_payload = ""
+        self._summary: UsageSummary | None = None
+        self._next_summary_at = 0.0
+        self.summary_refresh_seconds = max(refresh_seconds, summary_refresh_seconds)
 
     async def start(self) -> None:
         if self._task is not None:
@@ -335,11 +516,11 @@ class CodexPetUsageService:
     async def refresh(self) -> None:
         snapshot = self.reader.read(self.selected_session())
         payload = snapshot.encode() if snapshot is not None else '{"v":1,"s":"u"}'
-        if payload == self._last_payload:
-            return
-        await self.publish_usage(payload)
-        self._last_payload = payload
-        if snapshot is not None:
+        usage_changed = payload != self._last_payload
+        if usage_changed:
+            await self.publish_usage(payload)
+            self._last_payload = payload
+        if usage_changed and snapshot is not None:
             cost = price_for_model(snapshot.model, snapshot.provider)
             cost_text = (
                 str(cost.estimate_microusd(snapshot.total)) if cost is not None else "unavailable"
@@ -352,6 +533,18 @@ class CodexPetUsageService:
                 f"costMicrousd={cost_text}",
                 flush=True,
             )
+        now = time.monotonic()
+        if self._summary is None or now >= self._next_summary_at:
+            summary = self.summary_reader.read()
+            summary_payload = summary.encode()
+            self._summary = summary
+            self._next_summary_at = now + self.summary_refresh_seconds
+            if self.publish_summary is not None and summary_payload != self._last_summary_payload:
+                await self.publish_summary(summary_payload)
+                self._last_summary_payload = summary_payload
+
+    def public_summary(self) -> dict[str, object]:
+        return (self._summary or self.summary_reader.read()).public_value()
 
     async def _run(self) -> None:
         while True:
@@ -408,6 +601,8 @@ def self_test() -> None:
                 },
             },
         ]
+        for index, record in enumerate(records):
+            record["timestamp"] = f"2026-08-03T04:00:0{index}Z"
         path.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
         reader = CodexSessionUsageReader(root)
         snapshot = reader.read(session_id)
@@ -442,6 +637,62 @@ def self_test() -> None:
             )
         snapshot = reader.read(session_id)
         assert snapshot is not None and snapshot.turn.total_tokens == 260
+
+        second = root / "rollout-2026-08-02T00-00-00-unknown.jsonl"
+        second.write_text(
+            "\n".join(
+                json.dumps(item)
+                for item in (
+                    {
+                        "timestamp": "2026-08-02T03:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"model_provider": "relay"},
+                    },
+                    {
+                        "timestamp": "2026-08-02T03:00:01Z",
+                        "type": "turn_context",
+                        "payload": {"model": "unknown"},
+                    },
+                    {
+                        "timestamp": "2026-08-02T03:00:02Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 40,
+                                    "output_tokens": 2,
+                                    "total_tokens": 42,
+                                }
+                            },
+                        },
+                    },
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        local_now = lambda: datetime.fromisoformat("2026-08-03T12:00:00+08:00")
+        summary = GlobalUsageReader(root, local_now=local_now).read()
+        assert summary.today.tokens == 1_270 and summary.today.cost_complete
+        assert summary.trend_unit == "tokens"
+        assert summary.days[-2].tokens == 42 and not summary.days[-2].cost_complete
+        assert len(summary.encode().encode("utf-8")) <= USAGE_SNAPSHOT_MAX_BYTES
+        second.write_text("", encoding="utf-8")
+        after_truncate = GlobalUsageReader(root, local_now=local_now).read()
+        assert after_truncate.days[-2].tokens == 0 and after_truncate.trend_unit == "cost"
+
+        largest = UsageSummary(
+            tuple(
+                UsageDay(
+                    local_now().date() - timedelta(days=6 - index),
+                    tokens=(1 << 63) + index,
+                    cost_microusd=(1 << 63) + index,
+                )
+                for index in range(7)
+            )
+        )
+        assert len(largest.encode().encode("utf-8")) <= USAGE_SNAPSHOT_MAX_BYTES
 
 
 def main() -> int:

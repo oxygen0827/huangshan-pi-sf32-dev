@@ -482,11 +482,13 @@ class CodexDesktopMonitor:
         clock_ms: Callable[[], int] = now_ms,
         state_path: Path | None = None,
         managed_task: Callable[[str], bool] | None = None,
+        hook_observer: Callable[[PetEnvelope, Mapping[str, object]], None] | None = None,
     ) -> None:
         self.device = device
         self.approval_executor = approval_executor
         self.clock_ms = clock_ms
         self.managed_task = managed_task or (lambda _session_id: False)
+        self.hook_observer = hook_observer
         self.registry = DesktopTaskRegistry(clock_ms=clock_ms)
         self.state_store = DesktopTaskStateStore(state_path) if state_path is not None else None
         restored = self.state_store.load(self.registry) if self.state_store else RestoredDesktopState(False, {}, OrderedDict())
@@ -570,6 +572,14 @@ class CodexDesktopMonitor:
             if _is_soak_session(session_id):
                 if event == "Stop":
                     self.registry.remove(session_id)
+        if applied and self.hook_observer is not None:
+            try:
+                self.hook_observer(request, payload)
+            except Exception as exc:
+                print(
+                    f"[codex_pet][progress] hook observer failed: {type(exc).__name__}",
+                    flush=True,
+                )
         self._persist_state()
         self._publish_event.set()
         return make_ack(

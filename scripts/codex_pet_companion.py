@@ -32,6 +32,8 @@ from companion_diagnostics import run_self_test as diagnostics_self_test
 from companion_firmware import run_self_test as firmware_self_test
 from codex_pet_firmware_update import check_for_firmware_update
 from codex_pet_firmware_update import run_self_test as firmware_update_check_self_test
+from codex_pet_progress import CodexPetProgressService, PetProfileStore, default_preferences
+from codex_pet_usage import CodexPetUsageService
 from companion_state import JobJournal, PackageCache
 from companion_state import run_self_test as companion_state_self_test
 from firmware_release import FirmwareReleaseError
@@ -440,6 +442,13 @@ class PetdexCatalog:
         if pet is None:
             raise CompanionError("Petdex pet not found")
         return dict(pet)
+
+    def find(self, slug: str) -> dict[str, object] | None:
+        if SAFE_SLUG.fullmatch(slug) is None:
+            return None
+        self.refresh()
+        pet = self._pets.get(slug)
+        return dict(pet) if pet is not None else None
 
 
 def _hook_trust_remediation() -> dict[str, object]:
@@ -850,6 +859,8 @@ class CompanionState:
         hooks_path: Path = DEFAULT_HOOKS_PATH,
         ble_cache: Path | None = None,
         workspace: Path = ROOT_DIR,
+        progress: CodexPetProgressService | None = None,
+        usage: CodexPetUsageService | None = None,
     ) -> None:
         self.loop = loop
         self.device = device
@@ -874,6 +885,8 @@ class CompanionState:
             hook_script=self.hooks.hook_script,
         )
         self.ble_cache = ble_cache
+        self.progress = progress
+        self.usage = usage
         self.firmware = FirmwareManager(self.state_dir, root=ROOT_DIR)
         self._jobs_lock = threading.Lock()
         self.jobs = {
@@ -923,6 +936,77 @@ class CompanionState:
             },
         }
 
+    def progress_state(self) -> dict[str, object]:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        value = self.progress.public_state()
+        value["currentPet"] = self.current_pet_state(value.get("active"))
+        if self.usage is not None:
+            value["usage"] = self.usage.public_summary()
+        return value
+
+    def current_pet_state(self, active_progress: object | None = None) -> dict[str, object]:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        if not isinstance(active_progress, Mapping):
+            active_progress = self.progress.public_state().get("active")
+        active = dict(active_progress) if isinstance(active_progress, Mapping) else {}
+        slug = str(active.get("pet") or "rocky")
+        installed = _read_json(self.state_dir / "active.json", {})
+        installed_value = installed if isinstance(installed, Mapping) else {}
+        catalog_pet = self.catalog.find(slug)
+        if catalog_pet is None:
+            catalog_pet = {
+                "slug": slug,
+                "displayName": slug,
+                "submittedBy": "Local pet",
+                "kind": "pet",
+                "sourceUrl": "",
+                "previewUrl": "",
+            }
+        nickname = str(active.get("nickname") or "")
+        catalog_name = str(catalog_pet.get("displayName") or slug)
+        return {
+            "slug": slug,
+            "catalogName": catalog_name,
+            "displayName": nickname or catalog_name,
+            "nickname": nickname,
+            "submittedBy": str(catalog_pet.get("submittedBy") or "Petdex creator"),
+            "kind": str(catalog_pet.get("kind") or "pet"),
+            "sourceUrl": str(catalog_pet.get("sourceUrl") or ""),
+            "previewUrl": str(catalog_pet.get("previewUrl") or ""),
+            "installed": installed_value.get("slug") == slug,
+            "installedAt": installed_value.get("installedAt") if isinstance(installed_value.get("installedAt"), int) else None,
+            "digest": installed_value.get("digest") if isinstance(installed_value.get("digest"), str) else None,
+            "boardConnected": bool(self.device.connected),
+        }
+
+    def set_current_pet(self, value: object) -> dict[str, object]:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        if not isinstance(value, Mapping) or set(value) != {"nickname"}:
+            raise CompanionError("current pet update must contain exactly nickname")
+        self.progress.set_active_nickname(value.get("nickname"))
+        return {
+            "currentPet": self.current_pet_state(),
+            "active": self.progress.public_state()["active"],
+        }
+
+    def preferences(self) -> dict[str, object]:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        return self.progress.preferences()
+
+    def set_preferences(self, value: object) -> dict[str, object]:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        return self.progress.set_preferences(value)
+
+    def audio_test(self) -> None:
+        if self.progress is None:
+            raise CompanionError("progress service is unavailable")
+        self.loop.call_soon_threadsafe(self.progress.queue_audio_test)
+
     def health(self) -> dict[str, object]:
         checks: list[dict[str, object]] = []
 
@@ -953,6 +1037,11 @@ class CompanionState:
         add("board", "ok" if self.device.connected else "warning", "connected" if self.device.connected else "waiting for VibeBoard")
         hook_status = self.hooks.status()
         add("codexHooks", "ok" if hook_status.get("bound") else "warning", str(hook_status.get("trustStatus") or "not bound"))
+        if self.progress is None:
+            add("progress", "warning", "progress service unavailable")
+        else:
+            warning = self.progress.store.health_warning
+            add("progress", "warning" if warning else "ok", warning or "local pet profile ready")
         service_ready = not any(item["status"] == "error" for item in checks)
         return {
             "schemaVersion": 1,
@@ -1367,18 +1456,21 @@ class CompanionHandler(BaseHTTPRequestHandler):
         return header.startswith("Bearer ") and self.state.valid_session(header[7:])
 
     def _send(self, status: int, body: bytes, content_type: str, *, download: str | None = None) -> None:
-        self.send_response(status)
-        self.send_header("content-type", content_type)
-        self.send_header("content-length", str(len(body)))
-        self.send_header("cache-control", "no-store")
-        if download:
-            self.send_header("content-disposition", f'attachment; filename="{download}"')
-        origin = self.headers.get("origin")
-        if origin and self._origin_allowed():
-            self.send_header("access-control-allow-origin", origin)
-            self.send_header("vary", "origin")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("content-type", content_type)
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-store")
+            if download:
+                self.send_header("content-disposition", f'attachment; filename="{download}"')
+            origin = self.headers.get("origin")
+            if origin and self._origin_allowed():
+                self.send_header("access-control-allow-origin", origin)
+                self.send_header("vary", "origin")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _json(self, status: int, value: object) -> None:
         self._send(status, json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), "application/json; charset=utf-8")
@@ -1451,6 +1543,18 @@ class CompanionHandler(BaseHTTPRequestHandler):
             if path == "/v1/health":
                 self._json(200, self.state.health())
                 return
+            if path in {"/v1/progress", "/v1/preferences", "/v1/current-pet"}:
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
+                if path == "/v1/progress":
+                    value = self.state.progress_state()
+                elif path == "/v1/current-pet":
+                    value = {"currentPet": self.state.current_pet_state()}
+                else:
+                    value = self.state.preferences()
+                self._json(200, value)
+                return
             if path == "/v1/firmware/status":
                 self._json(200, self.state.status()["firmware"])
                 return
@@ -1511,6 +1615,18 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 self._read_json()
                 job = self.state.pair_board()
                 self._json(202, {"jobId": job.job_id})
+                return
+            if path == "/v1/preferences":
+                self._json(200, self.state.set_preferences(self._read_json()))
+                return
+            if path == "/v1/current-pet":
+                self._json(200, self.state.set_current_pet(self._read_json()))
+                return
+            if path == "/v1/audio/test":
+                if self._read_json():
+                    raise CompanionError("audio test body must be empty")
+                self.state.audio_test()
+                self._json(202, {"accepted": True})
                 return
             if path == "/v1/firmware/update":
                 body = self._read_json()
@@ -1611,7 +1727,33 @@ class OfflineDevice:
 
 
 async def _standalone(port: int, open_browser: bool) -> None:
-    state = CompanionState(loop=asyncio.get_running_loop(), device=OfflineDevice(), state_dir=Path(tempfile.gettempdir()) / "vibeboard-companion-preview")
+    async def discard(_payload: str) -> None:
+        return None
+
+    state_dir = Path(tempfile.gettempdir()) / "vibeboard-companion-preview"
+    progress = CodexPetProgressService(
+        store=PetProfileStore(state_dir / "pet-profile.json"),
+        active_pet=lambda: "rocky",
+        task_statuses=lambda: (),
+        has_pending_approval=lambda: False,
+        publish_progress=discard,
+        publish_achievement=discard,
+        publish_cue=discard,
+    )
+    usage = CodexPetUsageService(
+        publish_usage=discard,
+        publish_summary=discard,
+        selected_session=lambda: None,
+    )
+    await progress.start()
+    await usage.start()
+    state = CompanionState(
+        loop=asyncio.get_running_loop(),
+        device=OfflineDevice(),
+        state_dir=state_dir,
+        progress=progress,
+        usage=usage,
+    )
     server = CompanionServer(state, port=port, open_browser=open_browser)
     server.start()
     try:
@@ -1619,6 +1761,8 @@ async def _standalone(port: int, open_browser: bool) -> None:
             await asyncio.sleep(3600)
     finally:
         server.close()
+        await usage.stop()
+        await progress.stop()
 
 
 def run_self_test() -> None:
@@ -1815,6 +1959,102 @@ def run_self_test() -> None:
             assert health["serviceReady"] is True and health["boardReady"] is False
 
         asyncio.run(state_recovery_check())
+    with tempfile.TemporaryDirectory(prefix="companion-progress-api-test-") as temp_text:
+        async def progress_api_check() -> None:
+            async def discard(_payload: str) -> None:
+                return None
+
+            root = Path(temp_text)
+            progress = CodexPetProgressService(
+                store=PetProfileStore(root / "pet-profile.json"),
+                active_pet=lambda: "rocky",
+                task_statuses=lambda: (),
+                has_pending_approval=lambda: False,
+                publish_progress=discard,
+                publish_achievement=discard,
+                publish_cue=discard,
+            )
+            state = CompanionState(
+                loop=asyncio.get_running_loop(),
+                device=OfflineDevice(),
+                state_dir=root,
+                hooks_path=root / "hooks.json",
+                progress=progress,
+            )
+            server = CompanionServer(state, port=0, open_browser=False)
+            base = server.start()
+
+            def request(
+                path: str,
+                *,
+                method: str = "GET",
+                body: object | None = None,
+                token: str = "",
+                origin: str | None = None,
+            ) -> tuple[int, dict[str, object]]:
+                data = None if body is None else json.dumps(body).encode("utf-8")
+                headers = {"Origin": origin or base}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                http_request = urllib.request.Request(
+                    base + path, method=method, data=data, headers=headers
+                )
+                try:
+                    with urllib.request.urlopen(http_request, timeout=2) as response:
+                        return response.status, json.loads(response.read())
+                except urllib.error.HTTPError as exc:
+                    return exc.code, json.loads(exc.read())
+
+            try:
+                code, _ = await asyncio.to_thread(request, "/v1/progress")
+                assert code == 401
+                code, session = await asyncio.to_thread(
+                    request, "/v1/session", method="POST", body={}
+                )
+                assert code == 200 and isinstance(session.get("token"), str)
+                token = str(session["token"])
+                code, value = await asyncio.to_thread(request, "/v1/progress", token=token)
+                assert code == 200 and value["active"]["level"] == 1  # type: ignore[index]
+                assert value["currentPet"]["slug"] == "rocky"  # type: ignore[index]
+                code, _ = await asyncio.to_thread(
+                    request, "/v1/current-pet", method="POST",
+                    body={"nickname": "Rocky", "extra": True}, token=token,
+                )
+                assert code == 400
+                code, current = await asyncio.to_thread(
+                    request, "/v1/current-pet", method="POST",
+                    body={"nickname": "  小石头  "}, token=token,
+                )
+                assert code == 200 and current["currentPet"]["displayName"] == "小石头"  # type: ignore[index]
+                code, current = await asyncio.to_thread(request, "/v1/current-pet", token=token)
+                assert code == 200 and current["currentPet"]["nickname"] == "小石头"  # type: ignore[index]
+                invalid = default_preferences()
+                invalid["sound"]["volume"] = 16  # type: ignore[index]
+                code, _ = await asyncio.to_thread(
+                    request, "/v1/preferences", method="POST", body=invalid, token=token
+                )
+                assert code == 400 and progress.preferences()["sound"]["volume"] == 8  # type: ignore[index]
+                valid = default_preferences()
+                valid["sound"]["volume"] = 15  # type: ignore[index]
+                code, saved = await asyncio.to_thread(
+                    request, "/v1/preferences", method="POST", body=valid, token=token
+                )
+                assert code == 200 and saved["sound"]["volume"] == 15  # type: ignore[index]
+                code, _ = await asyncio.to_thread(
+                    request, "/v1/audio/test", method="POST", body={}, token=token
+                )
+                await asyncio.sleep(0)
+                assert code == 202 and len(progress._cues) == 1
+                code, _ = await asyncio.to_thread(
+                    request, "/v1/status", origin="https://evil.example"
+                )
+                assert code == 403
+            finally:
+                await asyncio.to_thread(server.close)
+
+        asyncio.run(progress_api_check())
     with tempfile.TemporaryDirectory(prefix="companion-test-") as temp_text:
         hooks_path = Path(temp_text) / ".codex" / "hooks.json"
         hooks_path.parent.mkdir()

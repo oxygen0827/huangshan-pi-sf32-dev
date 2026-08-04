@@ -23,6 +23,7 @@ typedef struct
     int (*rgb_set)(const char *color);
     int (*send_action)(const char *action, const char *request_id);
     int (*cue_play)(const char *cue);
+    int (*cue_volume)(int volume);
     void (*cue_stop)(void);
 } vb_codex_pet_ops_t;
 

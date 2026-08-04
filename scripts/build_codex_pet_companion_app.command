@@ -82,6 +82,7 @@ PYINSTALLER_CONFIG_DIR="$PYINSTALLER_CACHE" "$PYINSTALLER" \
   --hidden-import codex_pet_companion \
   --hidden-import codex_pet_monitor \
   --hidden-import codex_pet_usage \
+  --hidden-import codex_pet_progress \
   --hidden-import codex_pet_mcp \
   --hidden-import firmware_release \
   --hidden-import flash \

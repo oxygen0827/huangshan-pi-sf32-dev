@@ -386,7 +386,7 @@ def audit_codex_pet_bridge() -> None:
     frame_end = helper.find("static void vb_pet_activate_cache_bank", frame_start)
     frame_body = helper[frame_start:frame_end] if frame_start >= 0 and frame_end > frame_start else ""
     for token in (
-        "if (g_pet.page == VB_PET_PAGE_QUOTA)",
+        "if (g_pet.page != VB_PET_PAGE_HOME)",
         "lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);",
         "else\n        lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);",
     ):
@@ -635,6 +635,7 @@ def audit_codex_pet_voice_app() -> None:
         ("scripts/codex_pet_status.py", "async def observe_external("),
         ("scripts/codex_pet_status.py", 'QUOTA_CHANNEL = "pet.quota"'),
         ("scripts/codex_pet_usage.py", 'USAGE_CHANNEL = "pet.usage"'),
+        ("scripts/codex_pet_progress.py", 'PROGRESS_CHANNEL = "pet.progress"'),
         ("scripts/codex_pet_hook.py", '"PermissionRequest": ("needs_input", "approval", "Approval required")'),
         ("scripts/codex_pet_hook.py", 'str(Path(tempfile.gettempdir()) / f"huangshan-codex-pet-{os.getuid()}.sock")'),
         ("scripts/codex_pet_hook.py", "def ack_accepted("),
@@ -678,6 +679,9 @@ def audit_codex_pet_voice_app() -> None:
     for token in ("pet.quota", "vb_pet_rgb_tick", "rgb_set"):
         if token not in helper and token not in main:
             fail("codex_pet_voice_app", f"Codex Pet status/RGB flow is missing {token!r}")
+    for token in ("pet.progress", "pet.achievement", "pet.usage.summary", "pet.cue"):
+        if token not in helper:
+            fail("codex_pet_voice_app", f"companion flow is missing {token!r}")
     for token in ('rt_strcmp(channel, "pet.tasks")',
                   'lv_label_set_text(g_pet.new_label, "Allow")',
                   'lv_label_set_text(g_pet.continue_label, "Deny")',

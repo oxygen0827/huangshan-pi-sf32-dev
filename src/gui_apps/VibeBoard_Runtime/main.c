@@ -6566,16 +6566,20 @@ static int vb_codex_pet_send_action(const char *action, const char *request_id)
 
 static int vb_codex_pet_cue_play(const char *cue)
 {
+    char path[96];
     if (!cue ||
-        (rt_strcmp(cue, "listening") != 0 &&
-         rt_strcmp(cue, "submitted") != 0 &&
-         rt_strcmp(cue, "needs_input") != 0 &&
-         rt_strcmp(cue, "done") != 0 &&
-         rt_strcmp(cue, "error") != 0))
-        return -RT_EINVAL;
-    /* State changes must never block the LVGL thread on the slow audio service.
-     * Explicit user-requested WAV/tone playback remains available. */
-    return RT_EOK;
+        (rt_strcmp(cue, "listening") != 0 && rt_strcmp(cue, "submitted") != 0 &&
+         rt_strcmp(cue, "needs_input") != 0 && rt_strcmp(cue, "done") != 0 &&
+         rt_strcmp(cue, "error") != 0)) return -RT_EINVAL;
+    rt_snprintf(path, sizeof(path), "/sdcard/apps/codex_pet/assets/%s.wav", cue);
+    /* State changes must never block the LVGL thread. Playback only schedules
+     * the audio worker; busy/no-codec failures stay non-fatal. */
+    return vb_runtime_audio_play_wav(path);
+}
+
+static int vb_codex_pet_cue_volume(int volume)
+{
+    return vb_runtime_audio_set_volume(volume);
 }
 
 static void vb_codex_pet_cue_stop(void)
@@ -6592,6 +6596,7 @@ static const vb_codex_pet_ops_t g_vb_codex_pet_ops = {
     vb_codex_pet_rgb_set,
     vb_codex_pet_send_action,
     vb_codex_pet_cue_play,
+    vb_codex_pet_cue_volume,
     vb_codex_pet_cue_stop,
 };
 

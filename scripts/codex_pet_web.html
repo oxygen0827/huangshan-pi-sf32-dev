@@ -49,9 +49,16 @@
       justify-content: space-between;
       gap: 18px;
     }
-    .brand { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+    .brand { display: flex; align-items: center; gap: 22px; min-width: 0; }
+    .brand-lockup { display: flex; align-items: baseline; gap: 12px; color: var(--text); text-decoration: none; }
     h1 { margin: 0; font-size: 28px; line-height: 1; font-weight: 780; }
-    .brand span { color: var(--muted); font-size: 13px; }
+    .brand-lockup span { color: var(--muted); font-size: 13px; }
+    .nav { display: flex; align-items: center; gap: 4px; }
+    .nav a { min-height: 36px; display: inline-flex; align-items: center; padding: 0 10px; border-bottom: 2px solid transparent; color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 720; }
+    body[data-page="home"] [data-nav="home"], body[data-page="pets"] [data-nav="pets"] { border-bottom-color: var(--green); color: var(--text); }
+    .gallery-page { display: none; }
+    body[data-page="pets"] .home-page { display: none !important; }
+    body[data-page="pets"] .gallery-page { display: block; }
     .search {
       width: min(390px, 42vw);
       height: 42px;
@@ -138,6 +145,81 @@
     .maintenance-title { font-size: 13px; font-weight: 760; }
     .maintenance-detail { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .maintenance-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .companion-dashboard { border-bottom: 1px solid var(--line); background: #141714; }
+    .dashboard-grid { display: grid; grid-template-columns: 1.35fr 1fr; }
+    .dashboard-panel { min-width: 0; padding: 22px 24px; border-right: 1px solid var(--line); }
+    .dashboard-panel:first-child { padding-left: 0; }
+    .dashboard-panel:last-child { padding-right: 0; border-right: 0; }
+    .dashboard-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .dashboard-title h2 { margin: 0; font-size: 17px; }
+    .dashboard-meta { color: var(--muted); font-size: 12px; }
+    .level-value { font-size: 34px; line-height: 1; font-weight: 780; }
+    .level-progress { height: 8px; margin: 13px 0 9px; overflow: hidden; border-radius: 3px; background: #0c0e0c; }
+    .level-progress div { height: 100%; width: 0; background: var(--green); }
+    .stat-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+    .stat { min-width: 0; padding: 10px; background: var(--surface); }
+    .stat strong { display: block; font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+    .stat span { color: var(--muted); font-size: 11px; }
+    .usage-total { font-size: 24px; font-weight: 780; }
+    .usage-cost { min-height: 20px; margin-top: 4px; color: var(--green); font-size: 13px; }
+    .usage-cost.unavailable { color: var(--yellow); }
+    .week-chart { height: 92px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: end; gap: 8px; margin: 14px 0 7px; }
+    .week-column { min-width: 0; display: grid; align-items: end; grid-template-rows: 68px 18px; gap: 6px; }
+    .week-bar { width: min(24px, 100%); min-height: 3px; justify-self: center; background: var(--blue); border-radius: 3px 3px 1px 1px; }
+    .week-column:last-child .week-bar { background: var(--green); }
+    .week-label { color: var(--muted); text-align: center; font-size: 10px; white-space: nowrap; overflow: hidden; }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+    .badge { padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 11px; }
+    .badge.unlocked { border-color: #4d7659; color: var(--text); background: #1c2b20; }
+    .sound-form { display: grid; gap: 13px; }
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+    .setting-row input[type="range"] { width: min(170px, 52%); accent-color: var(--green); }
+    .setting-row input[type="time"] { width: 94px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); padding: 5px; }
+    .quiet-times { display: flex; align-items: center; gap: 6px; }
+    .current-pet { border-bottom: 1px solid var(--line); background: #171a17; }
+    .current-pet-grid { min-height: 410px; display: grid; grid-template-columns: minmax(360px, 0.9fr) minmax(480px, 1.1fr); align-items: center; gap: 54px; padding: 34px 0; }
+    .current-pet-stage { height: 330px; position: relative; display: grid; place-items: center; overflow: hidden; border: 1px solid #cfd1c8; border-radius: 8px; background: #e9e9e2; }
+    .current-pet-stage .pet-sprite { transform: scale(1.25); }
+    .current-pet-status { position: absolute; left: 14px; top: 14px; padding: 5px 8px; border-radius: 4px; background: rgba(17, 19, 17, 0.82); color: #fff; font-size: 11px; font-weight: 740; }
+    .current-pet-copy { min-width: 0; }
+    .current-pet-eyebrow { color: var(--green); font-size: 12px; font-weight: 780; text-transform: uppercase; }
+    .current-pet-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+    .current-pet-heading h2 { margin: 0; font-size: 52px; line-height: 1.04; overflow-wrap: anywhere; }
+    .current-pet-meta { margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .current-pet-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .nickname-form { max-width: 430px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; margin-top: 12px; }
+    .nickname-form[hidden] { display: none; }
+    .nickname-form input { min-width: 0; height: 40px; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); outline: none; }
+    .nickname-form input:focus { border-color: var(--blue); }
+    .current-level { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto; align-items: center; gap: 13px; margin-top: 26px; }
+    .current-level .level-value { font-size: 22px; }
+    .current-level .level-progress { margin: 0; }
+    .current-level .dashboard-meta { white-space: nowrap; }
+    .current-stats { margin-top: 14px; }
+    .achievement-band { border-bottom: 1px solid var(--line); background: #111311; }
+    .achievement-inner { padding: 28px 0 32px; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+    .section-head h2 { margin: 0; font-size: 19px; }
+    .section-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .achievement-group + .achievement-group { margin-top: 24px; }
+    .achievement-group[hidden] { display: none; }
+    .achievement-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+    .achievement-group-head h3 { margin: 0; font-size: 14px; }
+    .achievement-group-head span { color: var(--muted); font-size: 12px; }
+    .earned-achievements { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px; }
+    .earned-achievement { min-width: 0; min-height: 94px; padding: 14px; border: 1px solid #315f45; border-radius: 6px; background: #151b16; }
+    .earned-achievement-title { color: var(--green); font-size: 14px; font-weight: 760; }
+    .earned-achievement-description { margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .earned-achievement-date { margin-top: 10px; color: var(--green); font-size: 12px; }
+    .achievement-list { border-top: 1px solid var(--line); }
+    .achievement-row { display: grid; grid-template-columns: minmax(170px, 0.9fr) minmax(240px, 1.5fr) 130px 118px; align-items: center; gap: 18px; min-height: 74px; border-bottom: 1px solid var(--line); }
+    .achievement-name { font-size: 14px; font-weight: 760; }
+    .achievement-description { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .achievement-progress { height: 7px; overflow: hidden; border-radius: 3px; background: #282c28; }
+    .achievement-progress div { height: 100%; background: var(--yellow); }
+    .achievement-row.unlocked .achievement-progress div { background: var(--green); }
+    .achievement-count, .achievement-date { color: var(--muted); font-size: 12px; text-align: right; }
+    .achievement-row.unlocked .achievement-date { color: var(--green); }
     main { padding: 26px 0 104px; }
     .gallery-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
     .gallery-head h2 { margin: 0; font-size: 19px; }
@@ -239,13 +321,21 @@
       .onboarding-step:nth-child(3) { padding-left: 0; }
       .maintenance-row { align-items: flex-start; flex-direction: column; }
       .maintenance-actions { justify-content: flex-start; }
+      .dashboard-grid { grid-template-columns: 1fr; }
+      .dashboard-panel, .dashboard-panel:first-child, .dashboard-panel:last-child { padding: 18px 0; border-right: 0; border-bottom: 1px solid var(--line); }
+      .dashboard-panel:last-child { border-bottom: 0; }
       .job-row { grid-template-columns: 1fr auto; padding: 14px 0; }
       .job-row .progress { grid-row: 2; grid-column: 1 / -1; }
+      .current-pet-grid { grid-template-columns: 1fr 1fr; gap: 28px; }
+      .achievement-row { grid-template-columns: minmax(160px, 1fr) minmax(220px, 1.4fr) 100px; }
+      .achievement-date { display: none; }
     }
     @media (max-width: 620px) {
       .shell { width: min(100% - 24px, 1220px); }
       .header-row { align-items: stretch; flex-direction: column; padding: 15px 0; }
       .brand { justify-content: space-between; }
+      .brand { align-items: flex-start; flex-direction: column; gap: 12px; }
+      .nav { width: 100%; }
       .search { width: 100%; }
       .gallery { grid-template-columns: 1fr; }
       .pet-preview { height: 226px; }
@@ -254,6 +344,18 @@
       .onboarding-steps { grid-template-columns: 1fr; gap: 12px; }
       .onboarding-step, .onboarding-step + .onboarding-step, .onboarding-step:nth-child(3) { padding: 0; border-right: 0; }
       .job-row { gap: 12px; }
+      .current-pet-grid { min-height: 0; grid-template-columns: 1fr; gap: 24px; padding: 20px 0 28px; }
+      .current-pet-stage { height: 280px; }
+      .current-pet-heading h2 { font-size: 34px; }
+      .nickname-form { grid-template-columns: 1fr auto; }
+      #nicknameCancel { grid-column: 1 / -1; }
+      .current-level { grid-template-columns: auto 1fr; }
+      .current-level .dashboard-meta { grid-column: 1 / -1; }
+      .achievement-row { grid-template-columns: 1fr auto; gap: 8px 14px; padding: 13px 0; }
+      .achievement-row > div:nth-child(2) { grid-row: 2; grid-column: 1 / -1; }
+      .achievement-date { display: block; }
+      .section-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .earned-achievements { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
@@ -263,8 +365,11 @@
 <body>
   <header>
     <div class="shell header-row">
-      <div class="brand"><h1>Codex Pet</h1><span>VibeBoard</span></div>
-      <input id="search" class="search" type="search" placeholder="搜索宠物、作者或 slug" autocomplete="off">
+      <div class="brand">
+        <a class="brand-lockup" href="/"><h1>Codex Pet</h1><span>VibeBoard</span></a>
+        <nav class="nav" aria-label="主导航"><a data-nav="home" href="/">我的宠物</a><a data-nav="pets" href="/pets">宠物图库</a></nav>
+      </div>
+      <input id="search" class="search gallery-page" type="search" placeholder="搜索宠物、作者或 slug" autocomplete="off">
     </div>
     <div class="connections">
       <div class="shell connection-row">
@@ -292,7 +397,23 @@
     </div>
   </header>
 
-  <section class="onboarding" aria-label="Mac 开箱引导">
+  <section class="maintenance home-page">
+    <div class="shell maintenance-row">
+      <div class="maintenance-copy">
+        <div class="maintenance-title">设备维护</div>
+        <div id="firmwareDetail" class="maintenance-detail">连接 VibeBoard 后检查官方固件版本</div>
+      </div>
+      <div class="maintenance-actions">
+        <button id="firmwareCheck" class="compact-button" type="button">检查固件更新</button>
+        <button id="firmwareBaseline" class="compact-button" type="button" hidden disabled>安装基础固件</button>
+        <button id="firmwareUpdate" class="compact-button" type="button" hidden disabled>使用 USB 更新</button>
+        <button id="firmwareRollback" class="compact-button" type="button" hidden disabled>回滚固件</button>
+        <button id="supportBundle" class="compact-button" type="button">导出诊断包</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="onboarding" class="onboarding home-page" aria-label="Mac 开箱引导">
     <div class="shell onboarding-row">
       <div class="onboarding-head">
         <h2>开箱引导</h2>
@@ -364,23 +485,79 @@
     </div>
   </section>
 
-  <section class="maintenance">
-    <div class="shell maintenance-row">
-      <div class="maintenance-copy">
-        <div class="maintenance-title">设备维护</div>
-        <div id="firmwareDetail" class="maintenance-detail">连接 VibeBoard 后检查官方固件版本</div>
+  <section class="current-pet home-page" aria-label="当前宠物">
+    <div class="shell current-pet-grid">
+      <div id="currentPetPreview" class="current-pet-stage">
+        <div id="currentPetSprite" class="pet-sprite" data-row="0" data-rows="9" data-src="" data-fallback="P"></div>
+        <div id="currentPetStatus" class="current-pet-status">正在确认板上宠物</div>
       </div>
-      <div class="maintenance-actions">
-        <button id="firmwareCheck" class="compact-button" type="button">检查固件更新</button>
-        <button id="firmwareBaseline" class="compact-button" type="button" hidden disabled>安装基础固件</button>
-        <button id="firmwareUpdate" class="compact-button" type="button" hidden disabled>使用 USB 更新</button>
-        <button id="firmwareRollback" class="compact-button" type="button" hidden disabled>回滚固件</button>
-        <button id="supportBundle" class="compact-button" type="button">导出诊断包</button>
+      <div class="current-pet-copy">
+        <div class="current-pet-eyebrow">板上当前宠物</div>
+        <div class="current-pet-heading">
+          <h2 id="progressPet">Codex Pet</h2>
+          <span id="progressMood" class="badge unlocked">等待同步</span>
+        </div>
+        <div id="currentPetMeta" class="current-pet-meta">正在读取 Petdex 档案</div>
+        <div class="current-pet-actions">
+          <button id="nicknameEdit" class="secondary-button" type="button">改名字</button>
+          <a class="primary-button" href="/pets" style="display:inline-flex;align-items:center;text-decoration:none">更换宠物</a>
+        </div>
+        <form id="nicknameForm" class="nickname-form" hidden>
+          <input id="nicknameInput" type="text" maxlength="24" placeholder="输入昵称，留空恢复原名" autocomplete="off">
+          <button class="primary-button" type="submit">保存</button>
+          <button id="nicknameCancel" class="secondary-button" type="button">取消</button>
+        </form>
+        <div class="current-level">
+          <div id="progressLevel" class="level-value">Lv 1</div>
+          <div class="level-progress" aria-hidden="true"><div id="progressLevelFill"></div></div>
+          <div id="progressXp" class="dashboard-meta">0 / 100 XP</div>
+        </div>
+        <div class="stat-row current-stats">
+          <div class="stat"><strong id="progressTasks">0</strong><span>今日任务</span></div>
+          <div class="stat"><strong id="progressMinutes">0m</strong><span>今日陪跑</span></div>
+          <div class="stat"><strong id="progressStreak">0d</strong><span>连续陪伴</span></div>
+        </div>
+        <div id="badges" class="badges" aria-label="已解锁徽章"></div>
       </div>
     </div>
   </section>
 
-  <main class="shell">
+  <section class="achievement-band home-page" aria-label="成就记录">
+    <div class="shell achievement-inner">
+      <div class="section-head"><h2>成就记录</h2><p id="achievementSummary">0 / 5 已解锁</p></div>
+      <section id="earnedAchievementGroup" class="achievement-group" aria-label="已获得成就" hidden>
+        <div class="achievement-group-head"><h3>已获得成就</h3><span id="earnedAchievementCount">0 个</span></div>
+        <div id="earnedAchievements" class="earned-achievements"></div>
+      </section>
+      <section id="pendingAchievementGroup" class="achievement-group" aria-label="正在进行的成就">
+        <div class="achievement-group-head"><h3>正在进行</h3><span id="pendingAchievementCount">5 个</span></div>
+        <div id="achievementList" class="achievement-list"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="companion-dashboard home-page" aria-label="使用与声音设置">
+    <div class="shell dashboard-grid">
+      <div class="dashboard-panel">
+        <div class="dashboard-title"><h2>七日 Usage</h2><span id="usageUnit" class="dashboard-meta">Token</span></div>
+        <div id="usageTotal" class="usage-total">0 tokens</div>
+        <div id="usageCost" class="usage-cost unavailable">价格不可用</div>
+        <div id="weekChart" class="week-chart" aria-label="最近七日 usage"></div>
+      </div>
+      <div class="dashboard-panel">
+        <div class="dashboard-title"><h2>提示音</h2><span id="soundVolumeLabel" class="dashboard-meta">8 / 15</span></div>
+        <div class="sound-form">
+          <label class="setting-row"><span>启用提示音</span><input id="soundEnabled" type="checkbox" checked></label>
+          <label class="setting-row"><span>音量</span><input id="soundVolume" type="range" min="0" max="15" step="1" value="8"></label>
+          <label class="setting-row"><span>安静时段</span><input id="quietEnabled" type="checkbox" checked></label>
+          <div class="setting-row"><span>时段</span><div class="quiet-times"><input id="quietStart" type="time" value="22:00"><span>–</span><input id="quietEnd" type="time" value="08:00"></div></div>
+          <button id="soundTest" class="secondary-button" type="button">测试提示音</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <main class="shell gallery-page">
     <div class="gallery-head">
       <h2>宠物图库</h2>
       <div id="galleryMeta">正在同步 Petdex</div>
@@ -404,6 +581,9 @@
   <script>
     "use strict";
     const $ = id => document.getElementById(id);
+    const isPetsPage = location.pathname === "/pets" || location.pathname.startsWith("/pets/");
+    document.body.dataset.page = isPetsPage ? "pets" : "home";
+    document.title = isPetsPage ? "宠物图库 · Codex Pet" : "我的宠物 · Codex Pet";
     const isLoopbackPage = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
     const isSafariBrowser = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
     const companionBase = isLoopbackPage ? location.origin : "http://127.0.0.1:8790";
@@ -415,6 +595,7 @@
       token: "",
       status: null,
       health: null,
+      progress: null,
       pets: [],
       total: 0,
       offset: 0,
@@ -477,6 +658,211 @@
       window.setTimeout(() => { $("toast").hidden = true; }, 4200);
     }
 
+    const badgeNames = {
+      "first-task": "首次完成",
+      "five-task-day": "单日五个任务",
+      "hour-together": "单日陪跑一小时",
+      "three-day-streak": "连续三天",
+      "seven-day-streak": "连续七天",
+    };
+    const badgeDescriptions = {
+      "first-task": "和这只宠物一起完成第一个 Codex 任务",
+      "five-task-day": "同一天完成五个顶层任务",
+      "hour-together": "同一天有效陪跑达到一小时",
+      "three-day-streak": "连续三天各完成至少一个任务",
+      "seven-day-streak": "连续七天各完成至少一个任务",
+    };
+    const moodNames = {
+      focused: "专注", attentive: "等待你", concerned: "担心",
+      celebrating: "庆祝", proud: "骄傲", calm: "平静", content: "满足",
+    };
+
+    function formatMetric(value) {
+      const number = Number(value || 0);
+      if (number >= 1e9) return `${(number / 1e9).toFixed(1)}B`;
+      if (number >= 1e6) return `${(number / 1e6).toFixed(1)}M`;
+      if (number >= 1e3) return `${(number / 1e3).toFixed(1)}K`;
+      return String(number);
+    }
+
+    function formatCost(microusd) {
+      return `$${(Number(microusd || 0) / 1e6).toFixed(4)}`;
+    }
+
+    function achievementCount(item) {
+      const current = Math.max(0, Number(item.current || 0));
+      const target = Math.max(1, Number(item.target || 1));
+      if (item.unit === "seconds") return `${Math.floor(current / 60)}m / ${Math.floor(target / 60)}m`;
+      if (item.unit === "days") return `${current} / ${target} 天`;
+      return `${current} / ${target} 个`;
+    }
+
+    function achievementDate(timestamp) {
+      return new Date(Number(timestamp) * 1000).toLocaleDateString("zh-CN", {
+        year: "numeric", month: "short", day: "numeric",
+      });
+    }
+
+    function renderAchievements(active) {
+      const achievements = Array.isArray(active.achievements) ? active.achievements : [];
+      const unlocked = achievements.filter(item => item.unlockedAt);
+      const pending = achievements.filter(item => !item.unlockedAt);
+      $("achievementSummary").textContent = `${unlocked.length} / ${achievements.length || 5} 已解锁`;
+      $("badges").innerHTML = unlocked.length
+        ? unlocked.slice(-3).reverse().map(item => `<span class="badge unlocked">${esc(badgeNames[item.id] || item.name)}</span>`).join("")
+        : `<span class="badge">还没有解锁徽章</span>`;
+      $("earnedAchievementGroup").hidden = unlocked.length === 0;
+      $("earnedAchievementCount").textContent = `${unlocked.length} 个`;
+      $("earnedAchievements").innerHTML = unlocked.map(item => {
+        const name = badgeNames[item.id] || item.name;
+        const description = badgeDescriptions[item.id] || item.description || "";
+        return `<article class="earned-achievement">
+          <div class="earned-achievement-title">${esc(name)}</div>
+          <div class="earned-achievement-description">${esc(description)}</div>
+          <div class="earned-achievement-date">获得于 ${esc(achievementDate(item.unlockedAt))}</div>
+        </article>`;
+      }).join("");
+      $("pendingAchievementGroup").hidden = pending.length === 0;
+      $("pendingAchievementCount").textContent = `${pending.length} 个`;
+      $("achievementList").innerHTML = pending.map(item => {
+        const target = Math.max(1, Number(item.target || 1));
+        const percent = Math.max(0, Math.min(100, Number(item.current || 0) / target * 100));
+        return `<div class="achievement-row">
+          <div><div class="achievement-name">${esc(badgeNames[item.id] || item.name)}</div><div class="achievement-description">${esc(badgeDescriptions[item.id] || item.description || "")}</div></div>
+          <div class="achievement-progress" aria-label="${esc(achievementCount(item))}"><div style="width:${percent}%"></div></div>
+          <div class="achievement-count">${esc(achievementCount(item))}</div>
+          <div class="achievement-date">尚未解锁</div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderCurrentPet(pet, active) {
+      const displayName = pet.displayName || active.nickname || pet.catalogName || active.pet || "Codex Pet";
+      $("progressPet").textContent = displayName;
+      $("currentPetMeta").textContent = `Petdex · ${pet.catalogName || active.pet || "未知宠物"} · ${pet.submittedBy || "未知作者"}`;
+      $("progressMood").textContent = moodNames[active.mood] || "等待同步";
+      $("currentPetStatus").textContent = pet.installed
+        ? (pet.boardConnected ? "正在 VibeBoard 上陪伴" : "已部署 · 等待板子连接")
+        : "本地成长档案";
+      if ($("nicknameForm").hidden) $("nicknameInput").value = pet.nickname || "";
+
+      const sprite = $("currentPetSprite");
+      const preview = $("currentPetPreview");
+      const source = pet.previewUrl ? companionURL(pet.previewUrl) : "";
+      const moodRows = { focused: 7, attentive: 6, concerned: 5, celebrating: 4, proud: 4, calm: 0, content: 0 };
+      sprite.dataset.row = String(moodRows[active.mood] ?? 0);
+      sprite.dataset.fallback = String(displayName).slice(0, 1).toUpperCase();
+      if (sprite.dataset.src !== source) {
+        sprite.dataset.src = source;
+        sprite.dataset.rows = "9";
+        sprite.dataset.frames = "";
+        sprite.dataset.frameIndex = "0";
+        sprite.classList.remove("failed");
+        sprite.textContent = "";
+        sprite.style.backgroundImage = "";
+        preview.dataset.spriteLoaded = "";
+        if (source) loadSprite(preview);
+        else {
+          sprite.classList.add("failed");
+          sprite.textContent = sprite.dataset.fallback;
+        }
+      } else {
+        renderSpriteFrame(sprite);
+      }
+    }
+
+    function renderProgress() {
+      const progress = state.progress || {};
+      const active = progress.active || {};
+      const currentPet = progress.currentPet || { slug: active.pet, catalogName: active.pet, displayName: active.nickname || active.pet, nickname: active.nickname || "" };
+      const usage = progress.usage || {};
+      const preferences = progress.preferences?.sound || {};
+      const level = Math.max(1, Number(active.level || 1));
+      const xp = Number(active.xp || 0);
+      const nextXp = Math.max(100, Number(active.nextXp || 100));
+      const previousXp = Math.max(0, nextXp - (100 + 25 * (level - 1)));
+      const levelPercent = Math.max(0, Math.min(100, ((xp - previousXp) / Math.max(1, nextXp - previousXp)) * 100));
+      renderCurrentPet(currentPet, active);
+      $("progressLevel").textContent = `Lv ${level}`;
+      $("progressLevelFill").style.width = `${levelPercent}%`;
+      $("progressXp").textContent = `${xp} / ${nextXp} XP`;
+      $("progressTasks").textContent = String(active.todayTasks || 0);
+      $("progressMinutes").textContent = `${Math.floor(Number(active.todayActiveSeconds || 0) / 60)}m`;
+      $("progressStreak").textContent = `${active.streak || 0}d`;
+
+      $("usageTotal").textContent = `${formatMetric(usage.todayTokens)} tokens`;
+      $("usageCost").textContent = usage.costComplete ? `${formatCost(usage.todayCostMicrousd)} estimated` : "价格不可用";
+      $("usageCost").className = `usage-cost${usage.costComplete ? "" : " unavailable"}`;
+      $("usageUnit").textContent = usage.trendUnit === "cost" ? "完整成本估算" : "Token";
+      const days = Array.isArray(usage.days) ? usage.days : [];
+      const values = days.map(day => usage.trendUnit === "cost" ? Number(day.costMicrousd || 0) : Number(day.tokens || 0));
+      const maximum = Math.max(1, ...values);
+      $("weekChart").innerHTML = days.map((day, index) => {
+        const height = Math.max(3, Math.round((values[index] / maximum) * 68));
+        const label = index === days.length - 1 ? "今天" : String(day.date || "").slice(5);
+        return `<div class="week-column" title="${esc(label)} · ${esc(values[index])}"><div class="week-bar" style="height:${height}px"></div><div class="week-label">${esc(label)}</div></div>`;
+      }).join("");
+      renderAchievements(active);
+
+      if (document.activeElement?.closest(".sound-form")) return;
+      $("soundEnabled").checked = preferences.enabled !== false;
+      $("soundVolume").value = String(preferences.volume ?? 8);
+      $("soundVolumeLabel").textContent = `${preferences.volume ?? 8} / 15`;
+      $("quietEnabled").checked = preferences.quietHours?.enabled !== false;
+      $("quietStart").value = preferences.quietHours?.start || "22:00";
+      $("quietEnd").value = preferences.quietHours?.end || "08:00";
+    }
+
+    function soundPreferencesFromForm() {
+      return {
+        sound: {
+          enabled: $("soundEnabled").checked,
+          volume: Number($("soundVolume").value),
+          quietHours: {
+            enabled: $("quietEnabled").checked,
+            start: $("quietStart").value,
+            end: $("quietEnd").value,
+          },
+        },
+      };
+    }
+
+    async function saveSoundPreferences() {
+      try {
+        const preferences = await api("/v1/preferences", { method: "POST", body: JSON.stringify(soundPreferencesFromForm()) });
+        if (state.progress) state.progress.preferences = preferences;
+        renderProgress();
+      } catch (error) {
+        showToast(error.message);
+      }
+    }
+
+    function setNicknameEditor(open) {
+      $("nicknameForm").hidden = !open;
+      $("nicknameEdit").hidden = open;
+      if (open) {
+        $("nicknameInput").value = state.progress?.currentPet?.nickname || "";
+        $("nicknameInput").focus();
+        $("nicknameInput").select();
+      }
+    }
+
+    async function saveNickname(event) {
+      event.preventDefault();
+      try {
+        const value = await api("/v1/current-pet", {
+          method: "POST",
+          body: JSON.stringify({ nickname: $("nicknameInput").value }),
+        });
+        state.progress = { ...(state.progress || {}), currentPet: value.currentPet, active: value.active };
+        setNicknameEditor(false);
+        renderProgress();
+        showToast(value.currentPet.nickname ? `以后就叫 ${value.currentPet.nickname}` : "已恢复 Petdex 原名");
+      } catch (error) {
+        showToast(error.message);
+      }
+    }
+
     function setDot(id, ok, bad = false) {
       $(id).className = `dot${ok ? " ok" : bad ? " bad" : ""}`;
     }
@@ -506,6 +892,7 @@
       const codexReadyAfterBoard = board && codex;
       const deployReady = companion && codexReadyAfterBoard;
       const completed = [companion, board, codexReadyAfterBoard, deployReady].filter(Boolean).length;
+      $("onboarding").hidden = completed === 4;
 
       setOnboardingStep("onboardingCompanion", companion ? "complete" : "active",
         companion ? "本机 Companion 已就绪" : "安装后点击启动，授权蓝牙访问");
@@ -608,6 +995,12 @@
     async function refreshStatus() {
       try {
         [state.status, state.health] = await Promise.all([api("/v1/status"), api("/v1/health")]);
+        try {
+          state.progress = await api("/v1/progress");
+          renderProgress();
+        } catch (_error) {
+          state.progress = null;
+        }
         if (state.firmwareCheck && Boolean(state.firmwareCheck.boardConnected) !== Boolean(state.status?.board?.connected)) {
           state.firmwareCheck = null;
         }
@@ -616,6 +1009,7 @@
       } catch (error) {
         state.status = null;
         state.health = null;
+        state.progress = null;
         $("companionWarning").hidden = false;
         renderCompanionUnavailable();
         setDot("companionDot", false, true);
@@ -981,6 +1375,10 @@
         && /^[a-z0-9][a-z0-9-]{0,23}$/.test(installSlug || "")
         && (!digest || /^[0-9a-f]{64}$/.test(digest));
       if (!valid) return;
+      if (!isPetsPage) {
+        location.replace(`/pets?${params.toString()}`);
+        return;
+      }
 
       const navigation = performance.getEntriesByType("navigation")[0];
       const isReload = navigation?.type === "reload";
@@ -1070,7 +1468,7 @@
         renderCompanionUnavailable();
         return;
       }
-      await Promise.all([refreshStatus(), loadPets()]);
+      await Promise.all([refreshStatus(), isPetsPage ? loadPets() : Promise.resolve()]);
       maybeRunDeepLink();
       if (!animationFrameId) animationFrameId = window.requestAnimationFrame(animateSprites);
       window.setInterval(refreshStatus, 5000);
@@ -1080,7 +1478,7 @@
     $("boardAction").addEventListener("click", pairBoard);
     $("onboardingBoard").addEventListener("click", pairBoard);
     $("onboardingCodex").addEventListener("click", advanceCodexOnboarding);
-    $("onboardingGallery").addEventListener("click", () => $("gallery").scrollIntoView({ behavior: "smooth", block: "start" }));
+    $("onboardingGallery").addEventListener("click", () => { location.href = "/pets"; });
     $("firmwareCheck").addEventListener("click", checkFirmware);
     $("firmwareBaseline").addEventListener("click", installBaselineFirmware);
     $("firmwareUpdate").addEventListener("click", () => updateFirmware(false));
@@ -1089,6 +1487,25 @@
     $("loadMore").addEventListener("click", () => loadPets({ append: true }));
     $("jobClose").addEventListener("click", () => { $("jobPanel").hidden = true; });
     $("copyHooksCommand").addEventListener("click", copyHooksCommand);
+    $("soundEnabled").addEventListener("change", saveSoundPreferences);
+    $("soundVolume").addEventListener("input", event => {
+      $("soundVolumeLabel").textContent = `${event.target.value} / 15`;
+    });
+    $("soundVolume").addEventListener("change", saveSoundPreferences);
+    $("quietEnabled").addEventListener("change", saveSoundPreferences);
+    $("quietStart").addEventListener("change", saveSoundPreferences);
+    $("quietEnd").addEventListener("change", saveSoundPreferences);
+    $("soundTest").addEventListener("click", async () => {
+      try {
+        await api("/v1/audio/test", { method: "POST", body: "{}" });
+        showToast("测试提示音已发送");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+    $("nicknameEdit").addEventListener("click", () => setNicknameEditor(true));
+    $("nicknameCancel").addEventListener("click", () => setNicknameEditor(false));
+    $("nicknameForm").addEventListener("submit", saveNickname);
     $("search").addEventListener("input", event => {
       state.query = event.target.value.trim();
       window.clearTimeout(state.searchTimer);

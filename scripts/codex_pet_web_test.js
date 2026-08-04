@@ -49,6 +49,35 @@ requireSource(/state\.jobActive \|\| !\(board && codex && serviceReady\)/,
   "deploy must be disabled until binding and board connection are ready");
 requireSource(/\/v1\/health/,
   "the gallery must consume the Companion health endpoint");
+requireSource(/\/v1\/progress/,
+  "the Companion must consume the local pet progress endpoint");
+requireSource(/\/v1\/preferences/,
+  "sound settings must use the authenticated preferences endpoint");
+requireSource(/\/v1\/audio\/test/,
+  "the sound test control must use the explicit audio test endpoint");
+requireHtml(/id="progressLevel"/, "the Companion progress level is missing");
+requireHtml(/id="weekChart"/, "the seven-day usage chart is missing");
+requireHtml(/id="badges"/, "the achievement view is missing");
+requireHtml(/id="achievementList"/, "the complete achievement record is missing");
+requireHtml(/id="earnedAchievements"/, "earned achievements need their own collection");
+requireSource(/const pending = achievements[.]filter\(item => !item[.]unlockedAt\)/,
+  "only pending achievements should retain a live progress counter");
+requireSource(/获得于/, "earned achievements should show their unlock date instead of live totals");
+requireHtml(/id="currentPetSprite"/, "the home page must show the deployed pet animation");
+requireHtml(/id="nicknameInput"[^>]*maxlength="24"/, "pet nickname customization needs a bounded input");
+requireHtml(/data-nav="home"[^>]*href="\/"/, "the current-pet home route is missing");
+requireHtml(/data-nav="pets"[^>]*href="\/pets"/, "the standalone pet gallery route is missing");
+if (html.indexOf('class="maintenance home-page"') >= html.indexOf('class="current-pet home-page"')) {
+  throw new Error("device maintenance should appear before the current pet content");
+}
+requireSource(/isPetsPage \? loadPets\(\) : Promise[.]resolve\(\)/,
+  "the home page must not load the full Petdex gallery");
+requireSource(/\/v1\/current-pet/, "pet nickname customization must use the authenticated current-pet API");
+requireSource(/renderAchievements\(active\)/, "the home page must render achievement progress records");
+requireHtml(/id="soundVolume"[^>]*min="0"[^>]*max="15"/,
+  "sound volume must preserve the board's 0-15 boundary");
+requireHtml(/id="quietStart"[^>]*value="22:00"/, "default quiet-hour start is missing");
+requireHtml(/id="quietEnd"[^>]*value="08:00"/, "default quiet-hour end is missing");
 requireSource(/serviceReady/,
   "deploy must be gated by Companion service readiness");
 requireSource(/任务因 Companion 重启而中断/,
@@ -124,8 +153,8 @@ requireSource(/function advanceCodexOnboarding\(/,
   "the unboxing guide must offer /hooks review after a partial Codex binding");
 requireSource(/!board \? "等待连接" : \(codex \? "已绑定"/,
   "a locked Codex step must not be visually reported as completed");
-requireSource(/\$\("onboardingGallery"\)\.addEventListener\("click"[\s\S]*scrollIntoView/,
-  "the final onboarding action must lead to the pet gallery");
+requireSource(/\$\("onboardingGallery"\)\.addEventListener\("click"[\s\S]*location[.]href = "\/pets"/,
+  "the final onboarding action must navigate to the standalone pet gallery");
 requireHtml(/connect-src[^>]*http:\/\/127[.]0[.]0[.]1:8790/,
   "the CSP must allow only the fixed loopback Companion endpoint");
 requireSource(/getImageData\(/,

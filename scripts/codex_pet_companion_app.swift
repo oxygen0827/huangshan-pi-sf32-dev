@@ -9,6 +9,30 @@ private struct CompanionUpdateManifest: Decodable {
     let sha256: String
 }
 
+private struct CompanionPreferences: Codable {
+    struct QuietHours: Codable {
+        var enabled: Bool
+        var start: String
+        var end: String
+    }
+
+    struct Sound: Codable {
+        var enabled: Bool
+        var volume: Int
+        var quietHours: QuietHours
+    }
+
+    var sound: Sound
+
+    static let defaults = CompanionPreferences(
+        sound: Sound(
+            enabled: true,
+            volume: 8,
+            quietHours: QuietHours(enabled: true, start: "22:00", end: "08:00")
+        )
+    )
+}
+
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private let dashboardBase = URL(string: "http://127.0.0.1:8790/")!
     private let defaults = UserDefaults.standard
@@ -21,9 +45,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var codexStatusItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var updateItem: NSMenuItem!
+    private var soundItem: NSMenuItem!
     private var statusTimer: Timer?
     private var restartWorkItem: DispatchWorkItem?
     private var isTerminating = false
+    private var sessionToken: String?
+    private var companionPreferences = CompanionPreferences.defaults
 
     private var resourcesURL: URL {
         Bundle.main.resourceURL!
@@ -139,6 +166,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "连接或更换板子", action: #selector(openSetup), keyEquivalent: ""))
         menu.addItem(.separator())
 
+        soundItem = NSMenuItem(title: "提示音", action: #selector(toggleSound), keyEquivalent: "")
+        soundItem.state = .on
+        menu.addItem(soundItem)
         loginItem = NSMenuItem(title: "登录时自动启动", action: #selector(toggleLoginItem), keyEquivalent: "")
         menu.addItem(loginItem)
         updateItem = NSMenuItem(title: "检查更新", action: #selector(checkForUpdatesFromMenu), keyEquivalent: "")
@@ -323,8 +353,90 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
                     systemSymbolName: boardConnected ? "pawprint.fill" : "pawprint",
                     accessibilityDescription: "VibeBoard Companion"
                 )
+                self.refreshPreferences()
             }
         }.resume()
+    }
+
+    private func issueSession(_ completion: @escaping (String?) -> Void) {
+        var request = URLRequest(url: dashboardBase.appendingPathComponent("v1/session"))
+        request.httpMethod = "POST"
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 1.5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let token = value["token"] as? String else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            DispatchQueue.main.async {
+                self.sessionToken = token
+                completion(token)
+            }
+        }.resume()
+    }
+
+    private func preferencesRequest(
+        method: String = "GET",
+        value: CompanionPreferences? = nil,
+        retry: Bool = true,
+        completion: @escaping (CompanionPreferences?) -> Void
+    ) {
+        guard let token = sessionToken else {
+            issueSession { [weak self] token in
+                guard let self, token != nil else { completion(nil); return }
+                self.preferencesRequest(method: method, value: value, retry: false, completion: completion)
+            }
+            return
+        }
+        var request = URLRequest(url: dashboardBase.appendingPathComponent("v1/preferences"))
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 1.5
+        if let value {
+            request.httpBody = try? JSONEncoder().encode(value)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 401, retry, let self {
+                DispatchQueue.main.async {
+                    self.sessionToken = nil
+                    self.preferencesRequest(method: method, value: value, retry: false, completion: completion)
+                }
+                return
+            }
+            guard status == 200, let data,
+                  let preferences = try? JSONDecoder().decode(CompanionPreferences.self, from: data) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            DispatchQueue.main.async { completion(preferences) }
+        }.resume()
+    }
+
+    private func refreshPreferences() {
+        preferencesRequest { [weak self] preferences in
+            guard let self, let preferences else { return }
+            self.companionPreferences = preferences
+            self.soundItem.state = preferences.sound.enabled ? .on : .off
+        }
+    }
+
+    @objc private func toggleSound() {
+        var preferences = companionPreferences
+        preferences.sound.enabled.toggle()
+        preferencesRequest(method: "POST", value: preferences) { [weak self] saved in
+            guard let self else { return }
+            guard let saved else {
+                self.presentError("无法更新提示音设置。")
+                return
+            }
+            self.companionPreferences = saved
+            self.soundItem.state = saved.sound.enabled ? .on : .off
+        }
     }
 
     private func markServiceUnavailable() {

@@ -28,7 +28,21 @@ from codex_pet_protocol import (
 )
 from codex_pet_console import CodexPetConsole
 from codex_pet_status import CodexPetQuotaService, CodexPetStatusService, QUOTA_CHANNEL
-from codex_pet_usage import CodexPetUsageService, USAGE_CHANNEL, USAGE_SNAPSHOT_MAX_BYTES
+from codex_pet_usage import (
+    CodexPetUsageService,
+    USAGE_CHANNEL,
+    USAGE_SNAPSHOT_MAX_BYTES,
+    USAGE_SUMMARY_CHANNEL,
+)
+from codex_pet_progress import (
+    ACHIEVEMENT_CHANNEL,
+    CUE_CHANNEL,
+    PROGRESS_CHANNEL,
+    PROGRESS_SNAPSHOT_MAX_BYTES,
+    CodexPetProgressService,
+    PetProfileStore,
+    active_pet_slug,
+)
 from codex_pet_voice import CodexPetVoiceService, GLMASRTranscriber, open_codex_thread
 from runtime_transport import (
     BLE_RUNTIME_STATUS_API,
@@ -498,6 +512,8 @@ class DeviceSession:
         self._approval_snapshot: tuple[str, int] | None = None
         self._quota_snapshot: tuple[str, int] | None = None
         self._usage_snapshot: tuple[str, int] | None = None
+        self._usage_summary_snapshot: tuple[str, int] | None = None
+        self._progress_snapshot: tuple[str, int] | None = None
         self._pet_selection: str | None = None
         self._replay_pending = False
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -609,6 +625,44 @@ class DeviceSession:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", USAGE_CHANNEL, sequence, payload)
+
+    async def publish_usage_summary(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > USAGE_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("usage summary exceeds board transport limit")
+        previous = self._usage_summary_snapshot
+        self._usage_summary_snapshot = (payload, self.clock_ms())
+        if previous is not None and previous[0] == payload:
+            return
+        if not self.connected or self._installing:
+            return
+        await self.commands.call(
+            "flow_send", USAGE_SUMMARY_CHANNEL, self.sequencer.next(), payload
+        )
+
+    async def publish_progress(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > PROGRESS_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("progress snapshot exceeds board transport limit")
+        previous = self._progress_snapshot
+        self._progress_snapshot = (payload, self.clock_ms())
+        if previous is not None and previous[0] == payload:
+            return
+        if not self.connected or self._installing:
+            return
+        await self.commands.call("flow_send", PROGRESS_CHANNEL, self.sequencer.next(), payload)
+
+    async def publish_achievement(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > PROGRESS_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("achievement event exceeds board transport limit")
+        if not self.connected or self._installing:
+            return
+        await self.commands.call("flow_send", ACHIEVEMENT_CHANNEL, self.sequencer.next(), payload)
+
+    async def publish_cue(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > PROGRESS_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("cue event exceeds board transport limit")
+        if not self.connected or self._installing:
+            return
+        await self.commands.call("flow_send", CUE_CHANNEL, self.sequencer.next(), payload)
 
     async def publish_approval(self, payload: str) -> None:
         self._approval_snapshot = (payload, self.clock_ms())
@@ -907,10 +961,18 @@ class DeviceSession:
         if self._usage_snapshot is not None:
             payload, _cached_at = self._usage_snapshot
             await self.commands.call("flow_send", USAGE_CHANNEL, self.sequencer.next(), payload)
+        if self._usage_summary_snapshot is not None:
+            payload, _cached_at = self._usage_summary_snapshot
+            await self.commands.call(
+                "flow_send", USAGE_SUMMARY_CHANNEL, self.sequencer.next(), payload
+            )
         if self._pet_selection is not None:
             await self.commands.call(
                 "flow_send", PET_SELECTION_CHANNEL, self.sequencer.next(), self._pet_selection
             )
+        if self._progress_snapshot is not None:
+            payload, _cached_at = self._progress_snapshot
+            await self.commands.call("flow_send", PROGRESS_CHANNEL, self.sequencer.next(), payload)
 
     async def _send(self, channel: str, envelope: PetEnvelope) -> None:
         if not self.connected:
@@ -1433,6 +1495,7 @@ class CodexPetService:
         status: CodexPetStatusService | None = None,
         quota: CodexPetQuotaService | None = None,
         usage: CodexPetUsageService | None = None,
+        progress: CodexPetProgressService | None = None,
     ) -> None:
         self.bridge = bridge
         self.ipc = ipc
@@ -1442,6 +1505,7 @@ class CodexPetService:
         self.status = status
         self.quota = quota
         self.usage = usage
+        self.progress = progress
         self._started = False
         self._device_action_task: asyncio.Task[None] | None = None
 
@@ -1462,6 +1526,8 @@ class CodexPetService:
                 await self.quota.start()
             if self.usage is not None:
                 await self.usage.start()
+            if self.progress is not None:
+                await self.progress.start()
             if self.voice is not None:
                 if self.voice.current_thread_id:
                     await self.device.publish_resume_available()
@@ -1481,6 +1547,9 @@ class CodexPetService:
             if self.usage is not None:
                 with contextlib.suppress(Exception):
                     await self.usage.stop()
+            if self.progress is not None:
+                with contextlib.suppress(Exception):
+                    await self.progress.stop()
             if self.voice is not None:
                 with contextlib.suppress(Exception):
                     await self.voice.close()
@@ -1508,6 +1577,9 @@ class CodexPetService:
             if self.usage is not None:
                 with contextlib.suppress(Exception):
                     await self.usage.stop()
+            if self.progress is not None:
+                with contextlib.suppress(Exception):
+                    await self.progress.stop()
             if self.voice is not None:
                 with contextlib.suppress(Exception):
                     await self.voice.close()
@@ -2367,6 +2439,18 @@ async def self_test_async() -> None:
         await reconnect_device.publish_tasks(reconnect_tasks)
         assert sum(frame[0] == TASKS_CHANNEL for frame in reconnect_transport.frames) == task_frame_count
         await reconnect_device.publish_approval('{"v":1,"a":1,"r":"a:0123456789abcdefabcd"}')
+        await reconnect_device.publish_usage_summary(
+            '{"v":1,"s":"l","t":42,"c":1,"u":"c","w":[0,0,0,0,0,0,1000],"d":9}'
+        )
+        await reconnect_device.publish_progress(
+            '{"v":1,"p":"boba","l":2,"x":120,"n":225,"m":"content","d":6,"a":600,"s":3}'
+        )
+        await reconnect_device.publish_achievement(
+            '{"v":1,"id":"first-task","p":"boba","n":"First task"}'
+        )
+        await reconnect_device.publish_cue(
+            '{"v":1,"id":"0123456789abcdef","c":"done","n":8}'
+        )
         await reconnect_device.publish_pet_selection("boba")
         reconnect_transport.frames.clear()
         reconnect_transport.connected = False
@@ -2380,7 +2464,9 @@ async def self_test_async() -> None:
                     STATE_CHANNEL,
                     TASKS_CHANNEL,
                     APPROVAL_CHANNEL,
+                    USAGE_SUMMARY_CHANNEL,
                     PET_SELECTION_CHANNEL,
+                    PROGRESS_CHANNEL,
                 )
             )
             if reconnect_transport.connect_count >= 2 and reconnect_device.connected and replayed:
@@ -2388,13 +2474,17 @@ async def self_test_async() -> None:
             await asyncio.sleep(0.01)
         assert reconnect_transport.connect_count >= 2 and reconnect_device.connected
         replayed_channels = [frame[0] for frame in reconnect_transport.frames]
-        assert replayed_channels[:5] == [
+        assert replayed_channels[:7] == [
             HEARTBEAT_CHANNEL,
             STATE_CHANNEL,
             TASKS_CHANNEL,
             APPROVAL_CHANNEL,
+            USAGE_SUMMARY_CHANNEL,
             PET_SELECTION_CHANNEL,
+            PROGRESS_CHANNEL,
         ]
+        assert ACHIEVEMENT_CHANNEL not in replayed_channels
+        assert CUE_CHANNEL not in replayed_channels
         await reconnect_device.close()
 
         class InitiallyOfflineTransport(FakeDeviceTransport):
@@ -2495,12 +2585,23 @@ async def run_service(args: argparse.Namespace) -> None:
             state_path=args.desktop_state,
             managed_task=journal.is_managed_thread,
         )
+        progress_service = CodexPetProgressService(
+            store=PetProfileStore(args.companion_state_dir / "pet-profile.json"),
+            active_pet=lambda: active_pet_slug(args.companion_state_dir),
+            task_statuses=lambda: (task.status for task in monitor.registry.tasks.values()),
+            has_pending_approval=lambda: bool(monitor.pending),
+            publish_progress=device.publish_progress,
+            publish_achievement=device.publish_achievement,
+            publish_cue=device.publish_cue,
+        )
+        monitor.hook_observer = progress_service.observe_hook
         quota_service = CodexPetQuotaService(
             client=CodexAppServerClient(codex_bin=args.codex_bin),
             publish_quota=device.publish_quota,
         )
         usage_service = CodexPetUsageService(
             publish_usage=device.publish_usage,
+            publish_summary=device.publish_usage_summary,
             selected_session=lambda: (
                 task.session_id if (task := monitor.registry.current()) is not None else None
             ),
@@ -2521,6 +2622,7 @@ async def run_service(args: argparse.Namespace) -> None:
             status=monitor,
             quota=quota_service,
             usage=usage_service,
+            progress=progress_service,
         )
         companion_server = None
         if not args.no_companion:
@@ -2533,6 +2635,8 @@ async def run_service(args: argparse.Namespace) -> None:
                 hooks_path=args.hooks_path,
                 ble_cache=args.ble_cache,
                 workspace=args.workspace,
+                progress=progress_service,
+                usage=usage_service,
             )
             companion_server = CompanionServer(
                 companion_state,
@@ -2605,6 +2709,7 @@ async def run_service(args: argparse.Namespace) -> None:
         status=status,
         usage=CodexPetUsageService(
             publish_usage=device.publish_usage,
+            publish_summary=device.publish_usage_summary,
             selected_session=journal.latest_thread_id,
         ),
     )
