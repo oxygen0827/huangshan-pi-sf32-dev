@@ -32,8 +32,8 @@ export VIBEBOARD_FIRMWARE_PUBLIC_KEY_PATH="/secure/release/firmware-public.pem"
 export VIBEBOARD_SFTOOL_PATH="$HOME/.sifli/tools/sftool/0.1.16/sftool"
 ```
 
-App 只把 `VIBEBOARD_PUBLIC_SITE_URL` 的精确 Origin 加入本地 API 白名单。公网网页访问固定的
-`http://127.0.0.1:8790`；服务仍只监听 loopback，并响应浏览器的 Private Network Access
+App 只把 `VIBEBOARD_PUBLIC_SITE_URL` 的精确 Origin 加入本地 API 白名单。公网网页会探测默认的
+`http://127.0.0.1:8790` 及其自动回退端口；服务仍只监听 loopback，并响应浏览器的 Private Network Access
 预检。写操作还需要 15 分钟 capability token。公开网页可用
 `vibeboard://companion/open` 启动 Companion，用
 `vibeboard://pet/install?source=petdex&slug=<slug>&digest=<sha256>` 交接部署。

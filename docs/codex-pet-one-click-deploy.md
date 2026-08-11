@@ -2,7 +2,8 @@
 
 本实现采用“Codex Pet 网页 + macOS VibeBoard Companion + 单一 BLE Runtime”的结构。
 网页不直接持有 Bluetooth，也不读取 Codex 凭证。`codex_pet_bridge.py --mode monitor`
-是唯一 BLE owner，同时启动只监听 `127.0.0.1:8790` 的 Companion API。
+是唯一 BLE owner，同时启动只监听 loopback 的 Companion API，默认端口为 `8790`；端口被占用时会自动
+从 `8791-8899` 中选择可用端口。
 
 ## 用户流程
 
@@ -24,7 +25,7 @@
 
 ```sh
 ./scripts/codex_pet_monitor.command
-# http://127.0.0.1:8790/
+# 默认地址为 http://127.0.0.1:8790/；端口冲突时以服务输出的实际地址为准
 ```
 
 离线预览不连接板子：

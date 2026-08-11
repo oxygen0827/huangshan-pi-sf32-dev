@@ -42,6 +42,17 @@ The stable public locations are:
 - Firmware update manifest: `https://ldcx.tech/static/codex-pet/firmware/releases.json`.
 - Firmware artifacts: `https://ldcx.tech/static/codex-pet/firmware/`.
 
+实际存储位置已于 2026-08-10 在生产服务器只读核实：
+
+- `/home/lincaigui/nginx/static/codex-pet/` 是 `fuse.ossfs` 挂载点，后端为 OSS，不是云服务器本地磁盘。
+- Companion 发布物上传到 `/home/lincaigui/nginx/static/codex-pet/companion/`：版本化 DMG、`.dmg.sha256`、`update-manifest.json` 及发布备份。
+- 固件发布物上传到 `/home/lincaigui/nginx/static/codex-pet/firmware/`：`releases.json` 和签名固件 ZIP；该目录位于同一个 OSS 挂载根下。
+- 公共网页上传到 `/home/lincaigui/nginx/static/pet/index.html`，该文件位于服务器本地 `/dev/vda3` 的 ext4 磁盘，不在 OSS。
+- `.local/dist/` 是本机构建输出目录，不是发布存储；`.hpet` 宠物包由 Companion 在本机生成后通过 BLE 安装到板子，不上传到上述 OSS。
+- Petdex 的清单和原始宠物素材来自 `petdex.dev` / `assets.petdex.dev` 第三方服务，不属于本项目 OSS。
+
+发布映射：Companion DMG、校验和、更新清单 -> OSS `companion/`；固件 ZIP、固件清单 -> OSS `firmware/`；正式网页 HTML -> 云服务器本地 `pet/index.html`。不得把源代码、凭据、私钥或本地状态目录上传到发布目录。
+
 Local sources of truth and build inputs:
 
 - `scripts/build_codex_pet_companion_app.command` consumes

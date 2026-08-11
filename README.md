@@ -286,7 +286,8 @@ CODEX_PET_BOARD=<CoreBluetooth peripheral identifier> \
 
 Codex Pet 图库、签名 `.hpet`、macOS Companion 深链、本地 API、一键部署和恢复流程详见
 [`docs/codex-pet-one-click-deploy.md`](docs/codex-pet-one-click-deploy.md)。启动唯一 Monitor 后
-可直接打开 `http://127.0.0.1:8790/` 浏览和部署宠物；网页不会直接持有 BLE 或 Codex 凭证。
+默认可直接打开 `http://127.0.0.1:8790/` 浏览和部署宠物；如果该端口被占用，Companion 会自动切换到
+`8791-8899` 中的可用端口，公网网页会自动发现实际端口。网页不会直接持有 BLE 或 Codex 凭证。
 面向普通 Mac 用户的自包含 DMG、菜单栏、登录启动、域名、Developer ID 和公证流程见
 [`docs/macos-companion-release.md`](docs/macos-companion-release.md)。
 

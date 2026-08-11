@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover - serial transport is optional for BLE-only users
     serial = None
 
-from runtime_package import build_install_commands
+from runtime_package import SAFE_APP_ID, SAFE_PATH, build_install_commands
 
 SERVICE_UUID = "454d5452-0100-0000-5453-4e4954524256"
 COMMAND_UUID = "454d5452-0200-0000-5453-4e4954524256"
@@ -26,6 +26,7 @@ STATUS_UUID = "454d5452-0300-0000-5453-4e4954524256"
 VOICE_STREAM_UUID = "454d5452-0400-0000-5453-4e4954524256"
 DEFAULT_DEVICE_NAME = "VibeBoard"
 DEFAULT_BLE_CACHE_PATH = Path.home() / ".vibeboard" / "huangshan_ble.json"
+MAX_INSTALL_BLOB_BYTES = 8 * 1024 * 1024
 
 CAPABILITIES_API = "vibeboard-huangshan-capabilities/v1"
 SENSORS_API = "vibeboard-huangshan-sensors/v1"
@@ -1486,7 +1487,14 @@ class SerialTransport:
         progress: Callable[[str, int, int], None] | None = None,
         commit: bool = True,
     ) -> str:
+        if not SAFE_APP_ID.fullmatch(package_id):
+            transport_fail(f"invalid package_id for serial install: {package_id}")
         file_items = sorted(files.items())
+        for path, data in file_items:
+            if not SAFE_PATH.fullmatch(path):
+                transport_fail(f"invalid install path for serial install: {path}")
+            if len(data) < 0 or len(data) > MAX_INSTALL_BLOB_BYTES:
+                transport_fail(f"invalid install blob size for {path}: {len(data)}")
         total = len(file_items) + 1 + (1 if commit else 0)
         output = ""
         install_started = False

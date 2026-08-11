@@ -1,10 +1,14 @@
 import AppKit
+import Darwin
 import Foundation
 import ServiceManagement
 
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
-    private let dashboardBase = URL(string: "http://127.0.0.1:8790/")!
+    private let defaultCompanionPort = 8790
+    private let maximumCompanionPort = 8899
+    private let companionPortDefaultsKey = "companionPort"
     private let defaults = UserDefaults.standard
+    private var companionPort = 8790
     private var companionProcess: Process?
     private var logHandle: FileHandle?
     private var pendingDashboardURL: URL?
@@ -17,6 +21,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var statusTimer: Timer?
     private var restartWorkItem: DispatchWorkItem?
     private var isTerminating = false
+
+    private var dashboardBase: URL {
+        dashboardURL(for: companionPort)
+    }
 
     private var resourcesURL: URL {
         Bundle.main.resourceURL!
@@ -59,6 +67,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        companionPort = rememberedCompanionPort()
         configureMenuBar()
         updateLoginItem()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -175,7 +184,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     private func ensureCompanion() {
         guard companionProcess?.isRunning != true else { return }
-        if companionResponding() { return }
+        guard let selectedPort = selectCompanionPort() else {
+            presentError("本地 Companion 没有可用端口（已尝试 8790-8899）。请关闭占用这些端口的程序后重试。")
+            return
+        }
+        companionPort = selectedPort
+        defaults.set(selectedPort, forKey: companionPortDefaultsKey)
+        if companionResponding(at: selectedPort) { return }
         guard FileManager.default.isExecutableFile(atPath: agentURL.path),
               FileManager.default.isExecutableFile(atPath: helperURL.path),
               FileManager.default.fileExists(atPath: agentRootURL.path) else {
@@ -192,6 +207,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
             "--workspace", FileManager.default.homeDirectoryForCurrentUser.path,
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
             "--approval-helper", helperURL.path,
+            "--companion-port", String(companionPort),
             "--companion-no-open",
         ]
         var environment = ProcessInfo.processInfo.environment
@@ -231,17 +247,69 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func companionResponding() -> Bool {
-        var request = URLRequest(url: dashboardBase.appendingPathComponent("v1/status"))
+    private func companionResponding(at port: Int = 0) -> Bool {
+        let targetPort = port == 0 ? companionPort : port
+        var request = URLRequest(url: dashboardURL(for: targetPort).appendingPathComponent("v1/status"))
         request.timeoutInterval = 0.6
         let semaphore = DispatchSemaphore(value: 0)
         var available = false
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            available = (response as? HTTPURLResponse)?.statusCode == 200
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            available = self.isCompanionStatus(data: data, response: response)
             semaphore.signal()
         }.resume()
         _ = semaphore.wait(timeout: .now() + 0.7)
         return available
+    }
+
+    private func isCompanionStatus(data: Data?, response: URLResponse?) -> Bool {
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let companion = root["companion"] as? [String: Any],
+              companion["connected"] as? Bool == true,
+              companion["version"] != nil else {
+            return false
+        }
+        return true
+    }
+
+    private func rememberedCompanionPort() -> Int {
+        let value = defaults.integer(forKey: companionPortDefaultsKey)
+        return (defaultCompanionPort...maximumCompanionPort).contains(value) ? value : defaultCompanionPort
+    }
+
+    private func dashboardURL(for port: Int) -> URL {
+        URL(string: "http://127.0.0.1:\(port)/")!
+    }
+
+    private func selectCompanionPort() -> Int? {
+        let preferred: [Int] = [companionPort, defaults.integer(forKey: companionPortDefaultsKey), defaultCompanionPort]
+        var seen = Set<Int>()
+        for port in preferred where (defaultCompanionPort...maximumCompanionPort).contains(port) && seen.insert(port).inserted {
+            if companionResponding(at: port) {
+                return port
+            }
+        }
+        for port in defaultCompanionPort...maximumCompanionPort where isPortAvailable(port) {
+            return port
+        }
+        return nil
+    }
+
+    private func isPortAvailable(_ port: Int) -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
     }
 
     private func scheduleRestart() {
@@ -264,10 +332,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private func probeCompanion() {
         var request = URLRequest(url: dashboardBase.appendingPathComponent("v1/status"))
         request.timeoutInterval = 0.8
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                if self.isCompanionStatus(data: data, response: response) {
                     let target = self.pendingDashboardURL ?? self.dashboardBase
                     self.pendingDashboardURL = nil
                     NSWorkspace.shared.open(target)
@@ -292,7 +360,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         request.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
             guard let self else { return }
-            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
+            guard let data,
+                  self.isCompanionStatus(data: data, response: response),
                   let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.async {
                     self.markServiceUnavailable()

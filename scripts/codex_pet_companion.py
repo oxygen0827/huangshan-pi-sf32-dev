@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -63,6 +64,8 @@ MAX_SPRITESHEET_BYTES = 16 * 1024 * 1024
 SAFE_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 SAFE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 SAFE_SUPPORT_BUNDLE = re.compile(r"^vibeboard-support-[0-9]{8}-[0-9]{6}-[a-z0-9-]{1,32}[.]zip$")
+COMPANION_PORT_START = 8790
+COMPANION_PORT_END = 8899
 HOOK_EVENTS = ("SessionStart", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 _PETDEX_STATE_CONTRACT = json.loads(PETDEX_STATE_CONTRACT_PATH.read_text(encoding="utf-8"))
 PETDEX_STATE_ROWS = {
@@ -1317,8 +1320,37 @@ class CompanionHandler(BaseHTTPRequestHandler):
             f"http://localhost:{port}",
             f"http://[::1]:{port}",
         }
-        configured = {item.strip() for item in os.environ.get("VIBEBOARD_COMPANION_ORIGINS", "").split(",") if item.strip()}
-        return origin in local_origins or origin in configured
+        if origin in local_origins:
+            return True
+        for item in os.environ.get("VIBEBOARD_COMPANION_ORIGINS", "").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not self._is_valid_https_origin(item):
+                continue
+            if origin == item:
+                return True
+        return False
+
+    @staticmethod
+    def _is_valid_https_origin(origin: str) -> bool:
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+        except ValueError:
+            return False
+        if parsed.scheme != "https":
+            return False
+        if not parsed.hostname:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        if parsed.path and parsed.path != "/":
+            return False
+        if parsed.query or parsed.fragment:
+            return False
+        if parsed.port is not None and not (1 <= parsed.port <= 65535):
+            return False
+        return True
 
     def _host_allowed(self) -> bool:
         host = self.headers.get("host", "")
@@ -1338,6 +1370,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(body)))
         self.send_header("cache-control", "no-store")
         if download:
+            safe = re.fullmatch(r"[A-Za-z0-9._-]+", download)
+            if not safe:
+                raise CompanionError("invalid download filename")
             self.send_header("content-disposition", f'attachment; filename="{download}"')
         origin = self.headers.get("origin")
         if origin and self._origin_allowed():
@@ -1399,6 +1434,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 return
             asset_match = re.fullmatch(r"/api/pets/([a-z0-9][a-z0-9-]{0,23})/spritesheet", path)
             if asset_match:
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
                 data, content_type = self.state.pet_asset(asset_match.group(1))
                 self._send(200, data, content_type)
                 return
@@ -1408,6 +1446,9 @@ class CompanionHandler(BaseHTTPRequestHandler):
                 return
             match = re.fullmatch(r"/api/packages/([0-9a-f]{64})[.]hpet", path)
             if match:
+                if not self._authorized():
+                    self._error(401, "valid Companion session required")
+                    return
                 blob = self.state.package_blob(match.group(1))
                 self._send(200, blob, "application/vnd.vibeboard.hpet+zip", download=f"{match.group(1)}.hpet")
                 return
@@ -1537,7 +1578,25 @@ class CompanionServer:
         self.thread: threading.Thread | None = None
 
     def start(self) -> str:
-        self.httpd = ThreadingHTTPServer((self.host, self.port), CompanionHandler)
+        candidates = [self.port]
+        if COMPANION_PORT_START <= self.port <= COMPANION_PORT_END:
+            candidates.extend(range(max(self.port + 1, COMPANION_PORT_START), COMPANION_PORT_END + 1))
+        last_error: OSError | None = None
+        for port in candidates:
+            try:
+                self.httpd = ThreadingHTTPServer((self.host, port), CompanionHandler)
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                last_error = exc
+        if self.httpd is None:
+            if last_error is not None:
+                raise CompanionError(
+                    f"Companion ports {COMPANION_PORT_START}-{COMPANION_PORT_END} are unavailable"
+                ) from last_error
+            raise CompanionError("Companion HTTP server could not bind a port")
+        self.port = self.httpd.server_port
         self.httpd.companion_state = self.state  # type: ignore[attr-defined]
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="codex-pet-companion-http", daemon=True)
         self.thread.start()
