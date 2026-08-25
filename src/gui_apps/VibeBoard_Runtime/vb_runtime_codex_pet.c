@@ -1,6 +1,7 @@
 #include "vb_runtime_codex_pet.h"
 #include "vb_runtime_storage.h"
 #include "app_mem.h"
+#include "lv_ext_resource_manager.h"
 
 #include <fcntl.h>
 #include <stdlib.h>
@@ -78,7 +79,39 @@
 #define VB_PET_SWIPE_ZONE_BOTTOM 324
 #define VB_PET_SWIPE_MIN_DX 28
 #define VB_PET_SWIPE_MAX_DY 96
+#define VB_PET_SWIPE_MIN_DY 64
+#define VB_PET_SWIPE_MAX_DX 72
+#define VB_PET_TOP_EDGE_MAX_Y 72
 #define VB_PET_EDGE_BACK_X 72
+#define VB_PET_IDLE_MIN_MS 45000
+#define VB_PET_IDLE_RANGE_MS 75001
+#define VB_PET_NOTICE_MS 8000
+#define VB_PET_USAGE_CLOCK_REFRESH_MS 60000
+#define VB_PET_USAGE_LEFT 48
+#define VB_PET_USAGE_WIDTH 294
+#define VB_PET_USAGE_TITLE_WIDTH 205
+#define VB_PET_USAGE_STATUS_X 269
+#define VB_PET_USAGE_STATUS_Y 44
+#define VB_PET_USAGE_STATUS_WIDTH 72
+#define VB_PET_USAGE_TITLE_Y 40
+#define VB_PET_USAGE_HERO_Y 78
+#define VB_PET_USAGE_UNIT_Y 116
+#define VB_PET_USAGE_META_Y 140
+#define VB_PET_USAGE_CONTEXT_Y 180
+#define VB_PET_USAGE_CONTEXT_BAR_Y 208
+#define VB_PET_USAGE_CONTEXT_BAR_HEIGHT 14
+#define VB_PET_USAGE_METRIC_LABEL_Y 248
+#define VB_PET_USAGE_METRIC_VALUE_Y 272
+#define VB_PET_USAGE_METRIC_COLUMN_WIDTH 86
+#define VB_PET_USAGE_METRIC_NEW_X 48
+#define VB_PET_USAGE_METRIC_CACHED_X 152
+#define VB_PET_USAGE_METRIC_OUTPUT_X 255
+#define VB_PET_USAGE_FOOTER_Y 382
+#define VB_PET_SUMMARY_BAR_Y 190
+#define VB_PET_SUMMARY_BAR_HEIGHT 76
+#define VB_PET_SUMMARY_BAR_WIDTH 20
+#define VB_PET_SUMMARY_BAR_GAP 22
+#define VB_PET_SUMMARY_DAY_Y 272
 
 static const char *const g_vb_pet_rocky_paths[5][2] = {
     {VB_PET_ROCKY_DIR "/idle0.rle", VB_PET_ROCKY_DIR "/idle1.rle"},
@@ -113,9 +146,17 @@ typedef enum
     VB_PET_ASSET_REVIEW
 } vb_pet_asset_state_t;
 
+typedef enum
+{
+    VB_PET_PAGE_HOME = 0,
+    VB_PET_PAGE_USAGE_CURRENT,
+    VB_PET_PAGE_USAGE_SUMMARY
+} vb_pet_page_t;
+
 typedef struct
 {
     int active;
+    vb_pet_page_t page;
     int continue_mode;
     int have_thread;
     int key2_last;
@@ -133,8 +174,55 @@ typedef struct
     uint32_t sync_label_updated_at;
     uint32_t host_sequence;
     uint32_t quota_sequence;
+    uint32_t usage_sequence;
+    uint32_t usage_summary_sequence;
+    uint32_t progress_sequence;
+    uint32_t achievement_sequence;
+    uint32_t cue_sequence;
     uint32_t rgb_phase;
     int quota_live;
+    int quota_auth_required;
+    int quota_primary_used;
+    int quota_secondary_used;
+    int quota_primary_window_minutes;
+    int quota_secondary_window_minutes;
+    int quota_primary_reset_seconds;
+    int quota_secondary_reset_seconds;
+    uint32_t quota_received_at;
+    uint32_t quota_rendered_at;
+    int usage_live;
+    int usage_cost_valid;
+    uint64_t usage_total_tokens;
+    uint64_t usage_context_tokens;
+    uint64_t usage_context_window;
+    uint64_t usage_uncached_input_tokens;
+    uint64_t usage_cached_input_tokens;
+    uint64_t usage_output_tokens;
+    uint64_t usage_turn_tokens;
+    uint64_t usage_cost_microusd;
+    uint64_t usage_turn_cost_microusd;
+    char usage_model[25];
+    int usage_summary_live;
+    int usage_summary_cost_complete;
+    int usage_summary_cost_trend;
+    uint64_t usage_summary_today_tokens;
+    uint64_t usage_summary_today_cost;
+    uint64_t usage_summary_trend[7];
+    int progress_live;
+    int progress_level;
+    uint64_t progress_xp;
+    uint64_t progress_next_xp;
+    int progress_today_tasks;
+    int progress_today_active_seconds;
+    int progress_streak;
+    char progress_mood[16];
+    char progress_notice[65];
+    uint32_t progress_notice_until;
+    uint32_t ready_idle_at;
+    char last_cue_id[17];
+    uint32_t idle_next_at;
+    int idle_last_asset;
+    int idle_transient;
     int approval_pending;
     uint32_t approval_sequence;
     uint32_t task_sequence;
@@ -209,6 +297,7 @@ typedef struct
     char pet_slugs[VB_PET_MAX_ASSETS][VB_PET_ASSET_SLUG_MAX];
     char pet_names[VB_PET_MAX_ASSETS][VB_PET_ASSET_NAME_MAX];
     lv_obj_t *root;
+    lv_obj_t *title_label;
     lv_obj_t *connection_label;
     lv_obj_t *pet_face;
     lv_obj_t *pet_body;
@@ -225,6 +314,23 @@ typedef struct
     lv_obj_t *transcript_label;
     lv_obj_t *task_label;
     lv_obj_t *quota_label;
+    lv_obj_t *quota_title_label;
+    lv_obj_t *quota_status_label;
+    lv_obj_t *quota_primary_label;
+    lv_obj_t *quota_primary_value_label;
+    lv_obj_t *quota_primary_bar;
+    lv_obj_t *quota_primary_fill;
+    lv_obj_t *quota_primary_reset_label;
+    lv_obj_t *quota_secondary_label;
+    lv_obj_t *quota_footer_label;
+    lv_obj_t *usage_new_label;
+    lv_obj_t *usage_new_value;
+    lv_obj_t *usage_cached_label;
+    lv_obj_t *usage_cached_value;
+    lv_obj_t *usage_output_label;
+    lv_obj_t *usage_output_value;
+    lv_obj_t *summary_bars[7];
+    lv_obj_t *summary_day_labels[7];
     lv_obj_t *new_button;
     lv_obj_t *new_label;
     lv_obj_t *continue_button;
@@ -584,7 +690,7 @@ static int vb_pet_asset_state_index(void)
     case VB_PET_TRANSCRIBING:
     case VB_PET_RUNNING: return VB_PET_ASSET_RUNNING;
     case VB_PET_NEEDS_INPUT: return VB_PET_ASSET_WAITING;
-    case VB_PET_READY: return VB_PET_ASSET_WAVING;
+    case VB_PET_READY: return VB_PET_ASSET_IDLE;
     case VB_PET_ERROR: return VB_PET_ASSET_FAILED;
     default: return VB_PET_ASSET_IDLE;
     }
@@ -956,7 +1062,10 @@ static void vb_pet_update_custom_frame(void)
     lv_img_set_src(g_pet.pet_image, image);
     /* Native Petdex frames define the action. Keep the image geometry stable. */
     lv_obj_set_pos(g_pet.pet_image, VB_PET_IMAGE_X, VB_PET_IMAGE_Y);
-    lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);
+    if (g_pet.page != VB_PET_PAGE_HOME)
+        lv_obj_add_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(g_pet.pet_image, LV_OBJ_FLAG_HIDDEN);
     g_pet.custom_displayed_frame = g_pet.custom_frame_index;
 }
 
@@ -1056,6 +1165,25 @@ static void vb_pet_begin_transient(int state)
     g_pet.dirty = 1;
 }
 
+static void vb_pet_cancel_idle_motion(void)
+{
+    g_pet.idle_next_at = 0;
+    if (g_pet.idle_transient)
+    {
+        g_pet.idle_transient = 0;
+        g_pet.transient_asset_state = -1;
+        g_pet.transient_started = 0;
+        g_pet.dirty = 1;
+    }
+}
+
+static int vb_pet_idle_action_allowed(void)
+{
+    return g_pet.custom_available && g_pet.page == VB_PET_PAGE_HOME &&
+           !g_pet.approval_pending && g_pet.active_task_count == 0 &&
+           (g_pet.state == VB_PET_IDLE || g_pet.state == VB_PET_READY);
+}
+
 static int vb_pet_asset_state_from_name(const char *name)
 {
     int state;
@@ -1116,11 +1244,18 @@ static int vb_pet_select_slug(const char *slug, int persist)
     return 0;
 }
 
+static void vb_pet_set_label_font(lv_obj_t *label, uint16_t size, uint32_t color)
+{
+    if (!label) return;
+    lv_ext_set_local_font(label, size, lv_color_hex(color));
+    lv_obj_set_style_text_letter_space(label, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
 static lv_obj_t *vb_pet_label(lv_obj_t *parent, const char *text, uint32_t color)
 {
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text ? text : "");
-    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
+    vb_pet_set_label_font(label, FONT_NORMAL, color);
     return label;
 }
 
@@ -1140,6 +1275,18 @@ static lv_obj_t *vb_pet_button(lv_obj_t *parent, const char *text,
         lv_obj_center(label);
     }
     return button;
+}
+
+static lv_obj_t *vb_pet_quota_bar(lv_obj_t *parent, int y, uint32_t color, int width)
+{
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_set_size(bar, width, VB_PET_USAGE_CONTEXT_BAR_HEIGHT);
+    lv_obj_set_pos(bar, VB_PET_USAGE_LEFT, y);
+    lv_obj_set_style_radius(bar, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(color), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(bar, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    return bar;
 }
 
 static int vb_pet_detail_is_approval(const char *detail)
@@ -1298,6 +1445,20 @@ static int vb_pet_json_int(const char *payload, const char *key, int fallback)
     return value ? atoi(value + 1) : fallback;
 }
 
+static uint64_t vb_pet_json_u64(const char *payload, const char *key, uint64_t fallback)
+{
+    const char *value;
+    char *end = RT_NULL;
+    unsigned long long parsed;
+    if (!payload || !key) return fallback;
+    value = strstr(payload, key);
+    if (!value) return fallback;
+    value = strchr(value, ':');
+    if (!value) return fallback;
+    parsed = strtoull(value + 1, &end, 10);
+    return end == value + 1 ? fallback : (uint64_t)parsed;
+}
+
 static int vb_pet_json_string(const char *payload, const char *key,
                               char *dst, rt_size_t cap)
 {
@@ -1331,6 +1492,33 @@ static int vb_pet_json_string(const char *payload, const char *key,
     return used > 0;
 }
 
+static int vb_pet_json_u64_array7(const char *payload, const char *key,
+                                  uint64_t values[7])
+{
+    char marker[32];
+    const char *cursor;
+    int index;
+    if (!payload || !key || !values) return 0;
+    rt_snprintf(marker, sizeof(marker), "\"%s\":[", key);
+    cursor = strstr(payload, marker);
+    if (!cursor) return 0;
+    cursor += strlen(marker);
+    for (index = 0; index < 7; index++)
+    {
+        char *end = RT_NULL;
+        unsigned long long value = strtoull(cursor, &end, 10);
+        if (*cursor < '0' || *cursor > '9' || end == cursor || value > 1000u) return 0;
+        values[index] = (uint64_t)value;
+        cursor = end;
+        if (index < 6)
+        {
+            if (*cursor != ',') return 0;
+            cursor++;
+        }
+    }
+    return *cursor == ']';
+}
+
 static uint32_t vb_pet_ticks_to_ms(uint32_t ticks)
 {
     uint32_t seconds = ticks / RT_TICK_PER_SECOND;
@@ -1352,20 +1540,595 @@ static void vb_pet_receive_quota(uint32_t sequence, const char *payload)
     if (!payload || !vb_pet_sequence_newer(sequence, g_pet.quota_sequence)) return;
     g_pet.quota_sequence = sequence;
     g_pet.quota_live = strstr(payload, "\"status\":\"live\"") != RT_NULL;
+    g_pet.quota_auth_required = strstr(payload, "\"error\":\"auth\"") != RT_NULL;
     primary = vb_pet_json_int(payload, "\"pU\"", -1);
     secondary = vb_pet_json_int(payload, "\"sU\"", -1);
-    if (g_pet.quota_live && primary >= 0)
+    g_pet.quota_primary_used = primary;
+    g_pet.quota_secondary_used = secondary;
+    g_pet.quota_primary_window_minutes = vb_pet_json_int(payload, "\"pW\"", -1);
+    g_pet.quota_secondary_window_minutes = vb_pet_json_int(payload, "\"sW\"", -1);
+    g_pet.quota_primary_reset_seconds = vb_pet_json_int(payload, "\"pD\"", -1);
+    g_pet.quota_secondary_reset_seconds = vb_pet_json_int(payload, "\"sD\"", -1);
+    g_pet.quota_received_at = rt_tick_get();
+    if (primary >= 0)
+        rt_snprintf(g_pet.quota, sizeof(g_pet.quota), "Quota primary %d%%", primary);
+    else
+        vb_pet_copy(g_pet.quota, sizeof(g_pet.quota), "Quota unavailable / stale");
+    if (g_pet.page == VB_PET_PAGE_USAGE_CURRENT) g_pet.dirty = 1;
+}
+
+static void vb_pet_receive_usage(uint32_t sequence, const char *payload)
+{
+    if (!payload || !vb_pet_sequence_newer(sequence, g_pet.usage_sequence)) return;
+    if (vb_pet_json_int(payload, "\"v\"", 0) != 1) return;
+    g_pet.usage_sequence = sequence;
+    g_pet.usage_live = strstr(payload, "\"s\":\"l\"") != RT_NULL;
+    g_pet.usage_cost_valid = strstr(payload, "\"d\":") != RT_NULL;
+    g_pet.usage_total_tokens = vb_pet_json_u64(payload, "\"a\"", 0);
+    g_pet.usage_context_tokens = vb_pet_json_u64(payload, "\"x\"", 0);
+    g_pet.usage_context_window = vb_pet_json_u64(payload, "\"w\"", 0);
+    g_pet.usage_uncached_input_tokens = vb_pet_json_u64(payload, "\"i\"", 0);
+    g_pet.usage_cached_input_tokens = vb_pet_json_u64(payload, "\"c\"", 0);
+    g_pet.usage_output_tokens = vb_pet_json_u64(payload, "\"o\"", 0);
+    g_pet.usage_turn_tokens = vb_pet_json_u64(payload, "\"t\"", 0);
+    g_pet.usage_cost_microusd = vb_pet_json_u64(payload, "\"d\"", 0);
+    g_pet.usage_turn_cost_microusd = vb_pet_json_u64(payload, "\"e\"", 0);
+    if (!vb_pet_json_string(payload, "m", g_pet.usage_model, sizeof(g_pet.usage_model)))
+        g_pet.usage_model[0] = '\0';
+    if (g_pet.page == VB_PET_PAGE_USAGE_CURRENT) g_pet.dirty = 1;
+}
+
+static void vb_pet_receive_usage_summary(uint32_t sequence, const char *payload)
+{
+    char unit[4];
+    uint64_t trend[7];
+    int cost_complete;
+    if (!payload || !vb_pet_sequence_newer(sequence, g_pet.usage_summary_sequence)) return;
+    cost_complete = vb_pet_json_int(payload, "\"c\"", -1);
+    if (vb_pet_json_int(payload, "\"v\"", 0) != 1 ||
+        !strstr(payload, "\"s\":\"l\"") ||
+        !strstr(payload, "\"t\":") || cost_complete < 0 || cost_complete > 1 ||
+        !vb_pet_json_string(payload, "u", unit, sizeof(unit)) ||
+        (rt_strcmp(unit, "c") != 0 && rt_strcmp(unit, "t") != 0) ||
+        (rt_strcmp(unit, "c") == 0 && cost_complete != 1) ||
+        (cost_complete == 1 && !strstr(payload, "\"d\":")) ||
+        !vb_pet_json_u64_array7(payload, "w", trend)) return;
+    g_pet.usage_summary_sequence = sequence;
+    g_pet.usage_summary_live = 1;
+    g_pet.usage_summary_cost_complete = cost_complete;
+    g_pet.usage_summary_cost_trend = rt_strcmp(unit, "c") == 0;
+    g_pet.usage_summary_today_tokens = vb_pet_json_u64(payload, "\"t\"", 0);
+    g_pet.usage_summary_today_cost = vb_pet_json_u64(payload, "\"d\"", 0);
+    rt_memcpy(g_pet.usage_summary_trend, trend, sizeof(trend));
+    if (g_pet.page == VB_PET_PAGE_USAGE_SUMMARY) g_pet.dirty = 1;
+}
+
+static int vb_pet_valid_mood(const char *mood)
+{
+    return mood &&
+        (rt_strcmp(mood, "focused") == 0 || rt_strcmp(mood, "attentive") == 0 ||
+         rt_strcmp(mood, "concerned") == 0 || rt_strcmp(mood, "celebrating") == 0 ||
+         rt_strcmp(mood, "proud") == 0 || rt_strcmp(mood, "calm") == 0 ||
+         rt_strcmp(mood, "content") == 0);
+}
+
+static void vb_pet_receive_progress(uint32_t sequence, const char *payload)
+{
+    char mood[16];
+    int level;
+    int today_tasks;
+    int active_seconds;
+    int streak;
+    uint64_t xp;
+    uint64_t next_xp;
+    if (!payload || !vb_pet_sequence_newer(sequence, g_pet.progress_sequence)) return;
+    level = vb_pet_json_int(payload, "\"l\"", 0);
+    today_tasks = vb_pet_json_int(payload, "\"d\"", -1);
+    active_seconds = vb_pet_json_int(payload, "\"a\"", -1);
+    streak = vb_pet_json_int(payload, "\"s\"", -1);
+    xp = vb_pet_json_u64(payload, "\"x\"", 0);
+    next_xp = vb_pet_json_u64(payload, "\"n\"", 0);
+    if (vb_pet_json_int(payload, "\"v\"", 0) != 1 || level < 1 ||
+        today_tasks < 0 || active_seconds < 0 || streak < 0 || next_xp <= xp ||
+        !vb_pet_json_string(payload, "m", mood, sizeof(mood)) || !vb_pet_valid_mood(mood)) return;
+    g_pet.progress_sequence = sequence;
+    g_pet.progress_live = 1;
+    g_pet.progress_level = level;
+    g_pet.progress_xp = xp;
+    g_pet.progress_next_xp = next_xp;
+    g_pet.progress_today_tasks = today_tasks;
+    g_pet.progress_today_active_seconds = active_seconds;
+    g_pet.progress_streak = streak;
+    vb_pet_copy(g_pet.progress_mood, sizeof(g_pet.progress_mood), mood);
+    g_pet.dirty = 1;
+}
+
+static int vb_pet_valid_badge(const char *badge)
+{
+    return badge &&
+        (rt_strcmp(badge, "first-task") == 0 || rt_strcmp(badge, "five-task-day") == 0 ||
+         rt_strcmp(badge, "hour-together") == 0 || rt_strcmp(badge, "three-day-streak") == 0 ||
+         rt_strcmp(badge, "seven-day-streak") == 0);
+}
+
+static const char *vb_pet_badge_name(const char *badge)
+{
+    if (rt_strcmp(badge, "first-task") == 0) return "First task";
+    if (rt_strcmp(badge, "five-task-day") == 0) return "Five together";
+    if (rt_strcmp(badge, "hour-together") == 0) return "Hour together";
+    if (rt_strcmp(badge, "three-day-streak") == 0) return "Three days";
+    if (rt_strcmp(badge, "seven-day-streak") == 0) return "Seven days";
+    return "Achievement";
+}
+
+static void vb_pet_receive_achievement(uint32_t sequence, const char *payload)
+{
+    char badge[24];
+    if (!payload || !vb_pet_sequence_newer(sequence, g_pet.achievement_sequence)) return;
+    if (vb_pet_json_int(payload, "\"v\"", 0) != 1 ||
+        !vb_pet_json_string(payload, "id", badge, sizeof(badge)) ||
+        !vb_pet_valid_badge(badge)) return;
+    g_pet.achievement_sequence = sequence;
+    rt_snprintf(g_pet.progress_notice, sizeof(g_pet.progress_notice),
+                "Badge unlocked: %s", vb_pet_badge_name(badge));
+    g_pet.progress_notice_until = rt_tick_get() + rt_tick_from_millisecond(VB_PET_NOTICE_MS);
+    vb_pet_begin_transient(VB_PET_ASSET_JUMPING);
+    g_pet.dirty = 1;
+}
+
+static void vb_pet_receive_cue(uint32_t sequence, const char *payload)
+{
+    char event_id[17];
+    char cue[16];
+    int volume;
+    if (!payload || !vb_pet_sequence_newer(sequence, g_pet.cue_sequence)) return;
+    volume = vb_pet_json_int(payload, "\"n\"", -1);
+    if (vb_pet_json_int(payload, "\"v\"", 0) != 1 || volume < 0 || volume > 15 ||
+        !vb_pet_json_string(payload, "id", event_id, sizeof(event_id)) ||
+        !vb_pet_json_string(payload, "c", cue, sizeof(cue)) ||
+        strlen(event_id) != 16 ||
+        (rt_strcmp(cue, "done") != 0 && rt_strcmp(cue, "needs_input") != 0 &&
+         rt_strcmp(cue, "error") != 0)) return;
+    g_pet.cue_sequence = sequence;
+    if (rt_strcmp(event_id, g_pet.last_cue_id) == 0) return;
+    vb_pet_copy(g_pet.last_cue_id, sizeof(g_pet.last_cue_id), event_id);
+    vb_pet_play_cue(cue);
+}
+
+static void vb_pet_set_hidden(lv_obj_t *object, int hidden)
+{
+    int currently_hidden;
+    if (!object) return;
+    currently_hidden = lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN);
+    if (!!hidden == currently_hidden) return;
+    if (hidden)
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_clear_flag(object, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void vb_pet_set_label_text(lv_obj_t *label, const char *text)
+{
+    const char *current;
+    if (!label) return;
+    if (!text) text = "";
+    current = lv_label_get_text(label);
+    if (current && rt_strcmp(current, text) == 0) return;
+    lv_label_set_text(label, text);
+}
+
+static void vb_pet_set_home_visible(int visible)
+{
+    int show_fallback;
+    show_fallback = visible && !g_pet.custom_available && !g_pet.rocky_available;
+    vb_pet_set_hidden(g_pet.title_label, !visible);
+    vb_pet_set_hidden(g_pet.connection_label, !visible);
+    vb_pet_set_hidden(g_pet.pet_image, !visible);
+    vb_pet_set_hidden(g_pet.pet_body, !show_fallback);
+    vb_pet_set_hidden(g_pet.pet_tail, !show_fallback);
+    vb_pet_set_hidden(g_pet.left_ear, !show_fallback);
+    vb_pet_set_hidden(g_pet.right_ear, !show_fallback);
+    vb_pet_set_hidden(g_pet.pet_face, !show_fallback);
+    vb_pet_set_hidden(g_pet.status_label, !visible);
+    vb_pet_set_hidden(g_pet.transcript_label, !visible);
+    vb_pet_set_hidden(g_pet.task_label, !visible);
+    if (!visible)
     {
-        if (secondary >= 0)
-            rt_snprintf(g_pet.quota, sizeof(g_pet.quota), "Quota 5h %d%% / week %d%%", primary, secondary);
-        else
-            rt_snprintf(g_pet.quota, sizeof(g_pet.quota), "Quota 5h %d%%", primary);
+        vb_pet_set_hidden(g_pet.new_button, 1);
+        vb_pet_set_hidden(g_pet.continue_button, 1);
+    }
+}
+
+static void vb_pet_set_usage_metrics_visible(int visible)
+{
+    vb_pet_set_hidden(g_pet.usage_new_label, !visible);
+    vb_pet_set_hidden(g_pet.usage_new_value, !visible);
+    vb_pet_set_hidden(g_pet.usage_cached_label, !visible);
+    vb_pet_set_hidden(g_pet.usage_cached_value, !visible);
+    vb_pet_set_hidden(g_pet.usage_output_label, !visible);
+    vb_pet_set_hidden(g_pet.usage_output_value, !visible);
+}
+
+static void vb_pet_set_summary_chart_visible(int visible)
+{
+    int index;
+    for (index = 0; index < 7; index++)
+    {
+        vb_pet_set_hidden(g_pet.summary_bars[index], !visible);
+        vb_pet_set_hidden(g_pet.summary_day_labels[index], !visible);
+    }
+}
+
+static void vb_pet_set_quota_visible(int visible)
+{
+    vb_pet_set_hidden(g_pet.quota_title_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_status_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_primary_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_primary_value_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_primary_bar, !visible);
+    vb_pet_set_hidden(g_pet.quota_primary_fill, !visible);
+    vb_pet_set_hidden(g_pet.quota_primary_reset_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_secondary_label, !visible);
+    vb_pet_set_hidden(g_pet.quota_footer_label, !visible);
+    if (!visible)
+    {
+        vb_pet_set_usage_metrics_visible(0);
+        vb_pet_set_summary_chart_visible(0);
+    }
+}
+
+static int vb_pet_quota_remaining(int seconds, uint32_t received_at, uint32_t now)
+{
+    uint32_t elapsed;
+    if (seconds < 0) return -1;
+    elapsed = vb_pet_ticks_to_ms(now - received_at) / 1000u;
+    if (elapsed >= (uint32_t)seconds) return 0;
+    return seconds - (int)elapsed;
+}
+
+static void vb_pet_quota_reset_text(char *dst, rt_size_t cap, int seconds)
+{
+    int days;
+    int hours;
+    int minutes;
+    if (seconds < 0)
+    {
+        vb_pet_copy(dst, cap, "Reset time unavailable");
+        return;
+    }
+    if (seconds == 0)
+    {
+        vb_pet_copy(dst, cap, "Resetting now");
+        return;
+    }
+    days = seconds / (24 * 60 * 60);
+    hours = (seconds % (24 * 60 * 60)) / (60 * 60);
+    minutes = (seconds % (60 * 60)) / 60;
+    if (days > 0)
+        rt_snprintf(dst, cap, "Reset in %dd %dh", days, hours);
+    else if (hours > 0)
+        rt_snprintf(dst, cap, "Reset in %dh %dm", hours, minutes);
+    else
+        rt_snprintf(dst, cap, "Reset in %dm", minutes > 0 ? minutes : 1);
+}
+
+static void vb_pet_format_metric(char *dst, rt_size_t cap, uint64_t value)
+{
+    uint64_t whole;
+    uint64_t decimal;
+    if (!dst || cap == 0) return;
+    if (value >= 1000000000u)
+    {
+        whole = value / 1000000000u;
+        decimal = (value % 1000000000u) / 100000000u;
+        rt_snprintf(dst, cap, "%lu.%luB", (unsigned long)whole, (unsigned long)decimal);
+    }
+    else if (value >= 1000000u)
+    {
+        whole = value / 1000000u;
+        decimal = (value % 1000000u) / 100000u;
+        rt_snprintf(dst, cap, "%lu.%luM", (unsigned long)whole, (unsigned long)decimal);
+    }
+    else if (value >= 1000u)
+    {
+        whole = value / 1000u;
+        decimal = (value % 1000u) / 100u;
+        rt_snprintf(dst, cap, "%lu.%luK", (unsigned long)whole, (unsigned long)decimal);
     }
     else
     {
-        vb_pet_copy(g_pet.quota, sizeof(g_pet.quota), "Quota unavailable / stale");
+        rt_snprintf(dst, cap, "%lu", (unsigned long)value);
     }
-    g_pet.dirty = 1;
+}
+
+static void vb_pet_format_cost(char *dst, rt_size_t cap, uint64_t microusd)
+{
+    uint64_t dollars;
+    uint64_t fraction;
+    if (!dst || cap == 0) return;
+    dollars = microusd / 1000000u;
+    if (dollars >= 100u)
+        rt_snprintf(dst, cap, "~$%lu", (unsigned long)dollars);
+    else if (microusd >= 10000u)
+    {
+        fraction = (microusd % 1000000u) / 10000u;
+        rt_snprintf(dst, cap, "~$%lu.%02lu", (unsigned long)dollars,
+                    (unsigned long)fraction);
+    }
+    else
+    {
+        fraction = microusd / 100u;
+        rt_snprintf(dst, cap, "~$0.%04lu", (unsigned long)fraction);
+    }
+}
+
+static void vb_pet_usage_limit_line(char *dst, rt_size_t cap, int minutes, int used,
+                                    int reset_seconds, uint32_t now)
+{
+    char window[12];
+    char reset[32];
+    int remaining;
+    if (used < 0)
+    {
+        dst[0] = '\0';
+        return;
+    }
+    if (minutes > 0 && minutes % (24 * 60) == 0)
+        rt_snprintf(window, sizeof(window), "%dd", minutes / (24 * 60));
+    else if (minutes > 0 && minutes % 60 == 0)
+        rt_snprintf(window, sizeof(window), "%dh", minutes / 60);
+    else if (minutes > 0)
+        rt_snprintf(window, sizeof(window), "%dm", minutes);
+    else
+        vb_pet_copy(window, sizeof(window), "Plan");
+    remaining = vb_pet_quota_remaining(reset_seconds, g_pet.quota_received_at, now);
+    if (remaining < 0)
+        rt_snprintf(dst, cap, "%s %d%% used", window, used);
+    else
+    {
+        vb_pet_quota_reset_text(reset, sizeof(reset), remaining);
+        rt_snprintf(dst, cap, "%s %d%% used | %s", window, used, reset);
+    }
+}
+
+static void vb_pet_prepare_usage_page(const char *title, int live)
+{
+    int offline = g_pet.state == VB_PET_DISCONNECTED;
+    const char *status = offline ? "Offline" : (live ? "Live" : "Waiting");
+    uint32_t status_color = offline || !live ? 0xfbbf24 : 0x34d399;
+    vb_pet_set_home_visible(0);
+    vb_pet_set_quota_visible(1);
+    vb_pet_set_label_text(g_pet.quota_title_label, title);
+    lv_obj_set_pos(g_pet.quota_title_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_TITLE_Y);
+    lv_obj_set_size(g_pet.quota_title_label, VB_PET_USAGE_TITLE_WIDTH, 30);
+    vb_pet_set_label_font(g_pet.quota_title_label, FONT_SUBTITLE, 0xf9fafb);
+    lv_label_set_long_mode(g_pet.quota_title_label, LV_LABEL_LONG_CLIP);
+    vb_pet_set_label_text(g_pet.quota_status_label, status);
+    lv_obj_set_pos(g_pet.quota_status_label, VB_PET_USAGE_STATUS_X,
+                   VB_PET_USAGE_STATUS_Y);
+    lv_obj_set_size(g_pet.quota_status_label, VB_PET_USAGE_STATUS_WIDTH, 22);
+    vb_pet_set_label_font(g_pet.quota_status_label, FONT_SMALL, status_color);
+    lv_obj_set_style_text_align(g_pet.quota_status_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(g_pet.quota_status_label, LV_LABEL_LONG_CLIP);
+}
+
+static void vb_pet_render_token_usage(uint32_t now)
+{
+    char total[20];
+    char context[20];
+    char window[20];
+    char uncached[20];
+    char cached[20];
+    char output[20];
+    char cost[20];
+    char text[128];
+    char quota[64];
+    uint64_t percent = 0;
+    int fill_width = 0;
+    int show_context;
+    int show_quota;
+    vb_pet_prepare_usage_page("This session", g_pet.usage_live);
+    vb_pet_set_summary_chart_visible(0);
+
+    if (!g_pet.usage_live)
+    {
+        vb_pet_set_usage_metrics_visible(0);
+        vb_pet_set_label_text(g_pet.quota_primary_value_label, "No session");
+        lv_obj_set_pos(g_pet.quota_primary_value_label, VB_PET_USAGE_LEFT, 94);
+        lv_obj_set_size(g_pet.quota_primary_value_label, VB_PET_USAGE_WIDTH, 36);
+        vb_pet_set_label_font(g_pet.quota_primary_value_label, FONT_SUBTITLE, 0xf9fafb);
+        vb_pet_set_label_text(g_pet.quota_primary_label,
+                              g_pet.state == VB_PET_DISCONNECTED ?
+                              "Reconnect Bridge to load usage" :
+                              "Start a Codex task to see usage");
+        lv_obj_set_pos(g_pet.quota_primary_label, VB_PET_USAGE_LEFT, 138);
+        lv_obj_set_size(g_pet.quota_primary_label, VB_PET_USAGE_WIDTH, 48);
+        vb_pet_set_label_font(g_pet.quota_primary_label, FONT_NORMAL, 0x94a3b8);
+        lv_label_set_long_mode(g_pet.quota_primary_label, LV_LABEL_LONG_WRAP);
+        vb_pet_set_hidden(g_pet.quota_primary_reset_label, 1);
+        vb_pet_set_hidden(g_pet.quota_secondary_label, 1);
+        vb_pet_set_hidden(g_pet.quota_primary_bar, 1);
+        vb_pet_set_hidden(g_pet.quota_primary_fill, 1);
+        vb_pet_set_hidden(g_pet.quota_footer_label, 1);
+        g_pet.quota_rendered_at = now;
+        return;
+    }
+
+    vb_pet_format_metric(total, sizeof(total), g_pet.usage_total_tokens);
+    vb_pet_set_label_text(g_pet.quota_primary_value_label, total);
+    lv_obj_set_pos(g_pet.quota_primary_value_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_HERO_Y);
+    lv_obj_set_size(g_pet.quota_primary_value_label, VB_PET_USAGE_WIDTH, 36);
+    vb_pet_set_label_font(g_pet.quota_primary_value_label, FONT_TITLE, 0xf9fafb);
+    lv_label_set_long_mode(g_pet.quota_primary_value_label, LV_LABEL_LONG_CLIP);
+    vb_pet_set_label_text(g_pet.quota_primary_label, "tokens");
+    lv_obj_set_pos(g_pet.quota_primary_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_UNIT_Y);
+    lv_obj_set_size(g_pet.quota_primary_label, VB_PET_USAGE_WIDTH, 20);
+    vb_pet_set_label_font(g_pet.quota_primary_label, FONT_SMALL, 0xaebbd0);
+    lv_label_set_long_mode(g_pet.quota_primary_label, LV_LABEL_LONG_CLIP);
+
+    if (g_pet.usage_cost_valid)
+    {
+        vb_pet_format_cost(cost, sizeof(cost), g_pet.usage_cost_microusd);
+        rt_snprintf(text, sizeof(text), "%s%s%s", g_pet.usage_model,
+                    g_pet.usage_model[0] ? "  |  " : "", cost);
+    }
+    else
+        vb_pet_copy(text, sizeof(text), g_pet.usage_model);
+    vb_pet_set_label_text(g_pet.quota_primary_reset_label, text);
+    lv_obj_set_pos(g_pet.quota_primary_reset_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_META_Y);
+    lv_obj_set_size(g_pet.quota_primary_reset_label, VB_PET_USAGE_WIDTH, 22);
+    vb_pet_set_label_font(g_pet.quota_primary_reset_label, FONT_SMALL, 0xcbd5e1);
+    lv_label_set_long_mode(g_pet.quota_primary_reset_label, LV_LABEL_LONG_CLIP);
+    vb_pet_set_hidden(g_pet.quota_primary_reset_label, text[0] == '\0');
+
+    vb_pet_format_metric(context, sizeof(context), g_pet.usage_context_tokens);
+    vb_pet_format_metric(window, sizeof(window), g_pet.usage_context_window);
+    show_context = g_pet.usage_context_window > 0;
+    if (show_context)
+    {
+        percent = (g_pet.usage_context_tokens * 100u) / g_pet.usage_context_window;
+        if (percent > 100u) percent = 100u;
+        fill_width = (int)((VB_PET_USAGE_WIDTH * percent) / 100u);
+    }
+    rt_snprintf(text, sizeof(text), "Context  %s / %s  %lu%%", context, window,
+                (unsigned long)percent);
+    vb_pet_set_label_text(g_pet.quota_secondary_label, text);
+    lv_obj_set_pos(g_pet.quota_secondary_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_CONTEXT_Y);
+    lv_obj_set_size(g_pet.quota_secondary_label, VB_PET_USAGE_WIDTH, 22);
+    vb_pet_set_label_font(g_pet.quota_secondary_label, FONT_NORMAL, 0xcbd5e1);
+    lv_label_set_long_mode(g_pet.quota_secondary_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_pos(g_pet.quota_primary_bar, VB_PET_USAGE_LEFT, VB_PET_USAGE_CONTEXT_BAR_Y);
+    lv_obj_set_size(g_pet.quota_primary_bar, VB_PET_USAGE_WIDTH,
+                    VB_PET_USAGE_CONTEXT_BAR_HEIGHT);
+    lv_obj_set_pos(g_pet.quota_primary_fill, VB_PET_USAGE_LEFT, VB_PET_USAGE_CONTEXT_BAR_Y);
+    lv_obj_set_height(g_pet.quota_primary_fill, VB_PET_USAGE_CONTEXT_BAR_HEIGHT);
+    lv_obj_set_width(g_pet.quota_primary_fill, fill_width);
+    vb_pet_set_hidden(g_pet.quota_secondary_label, !show_context);
+    vb_pet_set_hidden(g_pet.quota_primary_bar, !show_context);
+    vb_pet_set_hidden(g_pet.quota_primary_fill, !show_context);
+
+    vb_pet_set_usage_metrics_visible(1);
+    vb_pet_format_metric(uncached, sizeof(uncached), g_pet.usage_uncached_input_tokens);
+    vb_pet_format_metric(cached, sizeof(cached), g_pet.usage_cached_input_tokens);
+    vb_pet_format_metric(output, sizeof(output), g_pet.usage_output_tokens);
+    vb_pet_set_label_text(g_pet.usage_new_value, uncached);
+    vb_pet_set_label_text(g_pet.usage_cached_value, cached);
+    vb_pet_set_label_text(g_pet.usage_output_value, output);
+
+    show_quota = g_pet.quota_live && g_pet.quota_primary_used >= 0 &&
+                 !g_pet.quota_auth_required && g_pet.state != VB_PET_DISCONNECTED;
+    vb_pet_usage_limit_line(quota, sizeof(quota), g_pet.quota_primary_window_minutes,
+                            g_pet.quota_primary_used, g_pet.quota_primary_reset_seconds, now);
+    vb_pet_set_label_text(g_pet.quota_footer_label, quota);
+    lv_obj_set_size(g_pet.quota_footer_label, VB_PET_USAGE_WIDTH, 22);
+    lv_obj_set_pos(g_pet.quota_footer_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_FOOTER_Y);
+    vb_pet_set_label_font(g_pet.quota_footer_label, FONT_SMALL, 0x64748b);
+    lv_obj_set_style_text_align(g_pet.quota_footer_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(g_pet.quota_footer_label, LV_LABEL_LONG_CLIP);
+    vb_pet_set_hidden(g_pet.quota_footer_label, !show_quota);
+    g_pet.quota_rendered_at = now;
+}
+
+static void vb_pet_render_usage_summary(uint32_t now)
+{
+    static const char *const day_labels[7] = {"-6", "-5", "-4", "-3", "-2", "-1", "Td"};
+    char total[20];
+    char value[32];
+    uint64_t maximum = 0;
+    int index;
+    vb_pet_prepare_usage_page("Last 7 days", g_pet.usage_summary_live);
+    vb_pet_set_usage_metrics_visible(0);
+    vb_pet_set_hidden(g_pet.quota_primary_bar, 1);
+    vb_pet_set_hidden(g_pet.quota_primary_fill, 1);
+    vb_pet_set_hidden(g_pet.quota_secondary_label, 1);
+    for (index = 0; index < 7; index++)
+        if (g_pet.usage_summary_trend[index] > maximum)
+            maximum = g_pet.usage_summary_trend[index];
+    if (!g_pet.usage_summary_live || maximum == 0)
+    {
+        vb_pet_set_summary_chart_visible(0);
+        vb_pet_set_label_text(g_pet.quota_primary_value_label,
+                              g_pet.usage_summary_live ? "No usage yet" : "No history");
+        lv_obj_set_pos(g_pet.quota_primary_value_label, VB_PET_USAGE_LEFT, 94);
+        lv_obj_set_size(g_pet.quota_primary_value_label, VB_PET_USAGE_WIDTH, 36);
+        vb_pet_set_label_font(g_pet.quota_primary_value_label, FONT_SUBTITLE, 0xf9fafb);
+        vb_pet_set_label_text(g_pet.quota_primary_label,
+                              g_pet.state == VB_PET_DISCONNECTED ?
+                              "Reconnect Bridge to load history" :
+                              (g_pet.usage_summary_live ?
+                               "Usage will appear after your first task" :
+                               "Waiting for seven-day usage"));
+        lv_obj_set_pos(g_pet.quota_primary_label, VB_PET_USAGE_LEFT, 138);
+        lv_obj_set_size(g_pet.quota_primary_label, VB_PET_USAGE_WIDTH, 48);
+        vb_pet_set_label_font(g_pet.quota_primary_label, FONT_NORMAL, 0x94a3b8);
+        lv_label_set_long_mode(g_pet.quota_primary_label, LV_LABEL_LONG_WRAP);
+        vb_pet_set_hidden(g_pet.quota_primary_reset_label, 1);
+        vb_pet_set_hidden(g_pet.quota_footer_label, 1);
+        g_pet.quota_rendered_at = now;
+        return;
+    }
+
+    vb_pet_set_summary_chart_visible(1);
+    vb_pet_format_metric(total, sizeof(total), g_pet.usage_summary_today_tokens);
+    vb_pet_set_label_text(g_pet.quota_primary_value_label, total);
+    lv_obj_set_pos(g_pet.quota_primary_value_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_HERO_Y);
+    lv_obj_set_size(g_pet.quota_primary_value_label, VB_PET_USAGE_WIDTH, 36);
+    vb_pet_set_label_font(g_pet.quota_primary_value_label, FONT_TITLE, 0xf9fafb);
+    vb_pet_set_label_text(g_pet.quota_primary_label, "today");
+    lv_obj_set_pos(g_pet.quota_primary_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_UNIT_Y);
+    lv_obj_set_size(g_pet.quota_primary_label, VB_PET_USAGE_WIDTH, 20);
+    vb_pet_set_label_font(g_pet.quota_primary_label, FONT_SMALL, 0xaebbd0);
+    lv_label_set_long_mode(g_pet.quota_primary_label, LV_LABEL_LONG_CLIP);
+    if (g_pet.usage_summary_cost_complete)
+    {
+        vb_pet_format_cost(value, sizeof(value), g_pet.usage_summary_today_cost);
+        rt_snprintf(total, sizeof(total), "%s today", value);
+        vb_pet_set_label_text(g_pet.quota_primary_reset_label, total);
+    }
+    lv_obj_set_pos(g_pet.quota_primary_reset_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_META_Y);
+    lv_obj_set_size(g_pet.quota_primary_reset_label, VB_PET_USAGE_WIDTH, 22);
+    vb_pet_set_label_font(g_pet.quota_primary_reset_label, FONT_NORMAL, 0x34d399);
+    lv_label_set_long_mode(g_pet.quota_primary_reset_label, LV_LABEL_LONG_CLIP);
+    vb_pet_set_hidden(g_pet.quota_primary_reset_label,
+                      !g_pet.usage_summary_cost_complete);
+
+    for (index = 0; index < 7; index++)
+    {
+        uint64_t divisor = maximum / (VB_PET_SUMMARY_BAR_HEIGHT - 4u) +
+            (maximum % (VB_PET_SUMMARY_BAR_HEIGHT - 4u) ? 1u : 0u);
+        int scaled = maximum ? (int)(g_pet.usage_summary_trend[index] / divisor) : 0;
+        int height;
+        int x = VB_PET_USAGE_LEFT + index * (VB_PET_SUMMARY_BAR_WIDTH + VB_PET_SUMMARY_BAR_GAP);
+        if (scaled > VB_PET_SUMMARY_BAR_HEIGHT - 4) scaled = VB_PET_SUMMARY_BAR_HEIGHT - 4;
+        height = 4 + scaled;
+        lv_obj_set_pos(g_pet.summary_bars[index], x,
+                       VB_PET_SUMMARY_BAR_Y + VB_PET_SUMMARY_BAR_HEIGHT - height);
+        lv_obj_set_size(g_pet.summary_bars[index], VB_PET_SUMMARY_BAR_WIDTH, height);
+        lv_obj_set_style_bg_color(g_pet.summary_bars[index],
+                                  lv_color_hex(index == 6 ? 0x34d399 : 0x3b82f6),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        vb_pet_set_label_text(g_pet.summary_day_labels[index], day_labels[index]);
+    }
+    vb_pet_set_label_text(g_pet.quota_footer_label,
+                          g_pet.usage_summary_cost_trend ? "Est. cost per day" :
+                                                           "Tokens per day");
+    lv_obj_set_pos(g_pet.quota_footer_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_FOOTER_Y);
+    lv_obj_set_size(g_pet.quota_footer_label, VB_PET_USAGE_WIDTH, 24);
+    vb_pet_set_label_font(g_pet.quota_footer_label, FONT_SMALL, 0x94a3b8);
+    lv_obj_set_style_text_align(g_pet.quota_footer_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(g_pet.quota_footer_label, LV_LABEL_LONG_CLIP);
+    g_pet.quota_rendered_at = now;
+}
+
+static void vb_pet_render_quota(uint32_t now)
+{
+    if (g_pet.page == VB_PET_PAGE_USAGE_SUMMARY)
+        vb_pet_render_usage_summary(now);
+    else
+        vb_pet_render_token_usage(now);
 }
 
 static void vb_pet_apply_mode_style(void)
@@ -1415,12 +2178,49 @@ static int vb_pet_handle_horizontal_swipe(int dx, int dy)
         abs(dx) < VB_PET_SWIPE_MIN_DX || abs(dx) < abs(dy) + 12 ||
         abs(dy) > VB_PET_SWIPE_MAX_DY) return 0;
     g_pet.touch_swipe_consumed = 1;
+    vb_pet_cancel_idle_motion();
+    if (g_pet.page != VB_PET_PAGE_HOME)
+    {
+        g_pet.page = g_pet.page == VB_PET_PAGE_USAGE_SUMMARY ?
+                     VB_PET_PAGE_USAGE_CURRENT : VB_PET_PAGE_USAGE_SUMMARY;
+        g_pet.dirty = 1;
+        rt_kprintf("[vb_runtime][codex_pet] usage view %s\n",
+                   g_pet.page == VB_PET_PAGE_USAGE_SUMMARY ? "summary" : "current");
+        return 1;
+    }
     /* A left swipe advances; a right swipe returns to the previous task. */
     vb_pet_begin_transient(dx < 0 ? VB_PET_ASSET_RUN_LEFT : VB_PET_ASSET_RUN_RIGHT);
     vb_pet_navigate_task(dx < 0 ? 1 : -1);
     rt_kprintf("[vb_runtime][codex_pet] task swipe %s dx=%d dy=%d\n",
                dx < 0 ? "next" : "prev", dx, dy);
     return 1;
+}
+
+static int vb_pet_handle_vertical_swipe(int dx, int dy)
+{
+    if (g_pet.touch_swipe_consumed || g_pet.approval_pending ||
+        abs(dy) < VB_PET_SWIPE_MIN_DY || abs(dy) < abs(dx) + 12 ||
+        abs(dx) > VB_PET_SWIPE_MAX_DX) return 0;
+    if (g_pet.page == VB_PET_PAGE_HOME && dy > 0 &&
+        g_pet.touch_press_x >= 30 && g_pet.touch_press_x <= 359 &&
+        g_pet.touch_press_y <= VB_PET_TOP_EDGE_MAX_Y)
+    {
+        g_pet.page = VB_PET_PAGE_USAGE_CURRENT;
+        vb_pet_cancel_idle_motion();
+        g_pet.touch_swipe_consumed = 1;
+        g_pet.dirty = 1;
+        rt_kprintf("[vb_runtime][codex_pet] usage current open dy=%d\n", dy);
+        return 1;
+    }
+    if (g_pet.page != VB_PET_PAGE_HOME && dy < 0)
+    {
+        g_pet.page = VB_PET_PAGE_HOME;
+        g_pet.touch_swipe_consumed = 1;
+        g_pet.dirty = 1;
+        rt_kprintf("[vb_runtime][codex_pet] usage page close dy=%d\n", dy);
+        return 1;
+    }
+    return 0;
 }
 
 static void vb_pet_touch_event(lv_event_t *event)
@@ -1440,6 +2240,7 @@ static void vb_pet_touch_event(lv_event_t *event)
     if (indev) lv_indev_get_point(indev, &point);
     if (code == LV_EVENT_PRESSED)
     {
+        vb_pet_cancel_idle_motion();
         g_pet.touch_press_x = point.x;
         g_pet.touch_press_y = point.y;
         g_pet.touch_swipe_consumed = 0;
@@ -1452,13 +2253,26 @@ static void vb_pet_touch_event(lv_event_t *event)
         lv_dir_t dir = indev ? lv_indev_get_gesture_dir(indev) : LV_DIR_NONE;
         if (dir == LV_DIR_LEFT) dx = -VB_PET_SWIPE_MIN_DX;
         else if (dir == LV_DIR_RIGHT) dx = VB_PET_SWIPE_MIN_DX;
+        else if (dir == LV_DIR_BOTTOM)
+        {
+            dx = 0;
+            dy = VB_PET_SWIPE_MIN_DY;
+        }
+        else if (dir == LV_DIR_TOP)
+        {
+            dx = 0;
+            dy = -VB_PET_SWIPE_MIN_DY;
+        }
         else return;
-        dy = 0;
+        if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) dy = 0;
     }
     if (code == LV_EVENT_PRESSING || code == LV_EVENT_RELEASED ||
         code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CLICKED ||
         code == LV_EVENT_GESTURE)
-        (void)vb_pet_handle_horizontal_swipe(dx, dy);
+    {
+        if (!vb_pet_handle_vertical_swipe(dx, dy))
+            (void)vb_pet_handle_horizontal_swipe(dx, dy);
+    }
 }
 
 static void vb_pet_render(void)
@@ -1469,10 +2283,22 @@ static void vb_pet_render(void)
     int recent_count;
     int show_task_detail = 1;
     const char *task_text;
+    const char *status_text;
     if (!g_pet.active || !g_pet.root) return;
     now = rt_tick_get();
+    if (g_pet.page != VB_PET_PAGE_HOME)
+    {
+        vb_pet_render_quota(now);
+        g_pet.dirty = 0;
+        return;
+    }
+    vb_pet_set_quota_visible(0);
+    vb_pet_set_home_visible(1);
     sync_age_ms = g_pet.host_seen_at ? vb_pet_ticks_to_ms(now - g_pet.host_seen_at) : 0;
     color = vb_pet_state_color();
+    lv_label_set_text_fmt(g_pet.title_label, "%s · Lv %d",
+                          g_pet.pet_name[0] ? g_pet.pet_name : "Codex Pet",
+                          g_pet.progress_level > 0 ? g_pet.progress_level : 1);
     if (g_pet.state == VB_PET_DISCONNECTED)
         lv_label_set_text(g_pet.connection_label, "Bridge offline");
     else if (sync_age_ms >= VB_PET_RECONNECT_AFTER_MS)
@@ -1512,7 +2338,15 @@ static void vb_pet_render(void)
         lv_obj_set_style_bg_color(g_pet.pet_tail, lv_color_hex(color),
                                   LV_PART_MAIN | LV_STATE_DEFAULT);
     }
-    lv_label_set_text(g_pet.status_label, vb_pet_status_text());
+    status_text = vb_pet_status_text();
+    if (g_pet.active_task_count == 0 && !g_pet.approval_pending && g_pet.progress_live)
+    {
+        if (rt_strcmp(g_pet.progress_mood, "proud") == 0) status_text = "Proud";
+        else if (rt_strcmp(g_pet.progress_mood, "celebrating") == 0) status_text = "Celebrating";
+        else if (rt_strcmp(g_pet.progress_mood, "content") == 0) status_text = "Content";
+        else if (rt_strcmp(g_pet.progress_mood, "calm") == 0) status_text = "Calm";
+    }
+    lv_label_set_text(g_pet.status_label, status_text);
     lv_obj_set_style_text_color(g_pet.status_label, lv_color_hex(color),
                                 LV_PART_MAIN | LV_STATE_DEFAULT);
     if (g_pet.error[0]) task_text = g_pet.error;
@@ -1528,13 +2362,16 @@ static void vb_pet_render(void)
         task_text = "";
         show_task_detail = 0;
     }
+    else if (g_pet.active_task_count == 0 && g_pet.progress_notice[0] &&
+             (int32_t)(g_pet.progress_notice_until - now) > 0)
+        task_text = g_pet.progress_notice;
     else task_text = g_pet.task_detail[0] ? g_pet.task_detail : "No active Codex tasks";
     lv_label_set_text(g_pet.transcript_label, task_text);
     if (show_task_detail)
         lv_obj_clear_flag(g_pet.transcript_label, LV_OBJ_FLAG_HIDDEN);
     else
         lv_obj_add_flag(g_pet.transcript_label, LV_OBJ_FLAG_HIDDEN);
-    if (g_pet.task_count > 0)
+    if (g_pet.active_task_count > 0)
     {
         recent_count = g_pet.task_count - g_pet.active_task_count;
         if (recent_count < 0) recent_count = 0;
@@ -1543,6 +2380,14 @@ static void vb_pet_render(void)
                               g_pet.task_index, g_pet.task_count);
         lv_obj_set_pos(g_pet.task_label, 30,
                        show_task_detail ? VB_PET_TASK_LABEL_FULL_Y : VB_PET_TASK_LABEL_COMPACT_Y);
+        lv_obj_clear_flag(g_pet.task_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    else if (g_pet.progress_live)
+    {
+        lv_label_set_text_fmt(g_pet.task_label, "Today %d tasks  |  %dm",
+                              g_pet.progress_today_tasks,
+                              g_pet.progress_today_active_seconds / 60);
+        lv_obj_set_pos(g_pet.task_label, 30, VB_PET_TASK_LABEL_FULL_Y);
         lv_obj_clear_flag(g_pet.task_label, LV_OBJ_FLAG_HIDDEN);
     }
     else
@@ -1828,9 +2673,14 @@ static void vb_pet_receive_state(uint32_t sequence, const char *payload)
         g_pet.state = g_pet.task_count > 0 ? g_pet.task_state : VB_PET_IDLE;
     if (g_pet.state != previous)
     {
-        if (g_pet.state == VB_PET_NEEDS_INPUT) vb_pet_play_cue("needs_input");
-        else if (g_pet.state == VB_PET_READY) vb_pet_play_cue("done");
-        else if (g_pet.state == VB_PET_ERROR) vb_pet_play_cue("error");
+        vb_pet_cancel_idle_motion();
+        if (g_pet.state == VB_PET_READY && previous != VB_PET_DISCONNECTED)
+        {
+            g_pet.ready_idle_at = now + rt_tick_from_millisecond(2000);
+            vb_pet_begin_transient(VB_PET_ASSET_WAVING);
+        }
+        else
+            g_pet.ready_idle_at = 0;
     }
     g_pet.dirty = 1;
 }
@@ -1840,6 +2690,7 @@ static void vb_pet_receive_approval(uint32_t sequence, const char *payload)
     char request_id[VB_PET_APPROVAL_ID_MAX];
     char status[16];
     if (!payload || !vb_pet_sequence_newer(sequence, g_pet.approval_sequence)) return;
+    vb_pet_cancel_idle_motion();
     g_pet.approval_sequence = sequence;
     if (!vb_pet_json_string(payload, "id", request_id, sizeof(request_id))) return;
     if (vb_pet_json_string(payload, "status", status, sizeof(status)))
@@ -1876,6 +2727,7 @@ static void vb_pet_receive_tasks(uint32_t sequence, const char *payload)
     if (!payload || !vb_pet_sequence_newer(sequence, g_pet.task_sequence)) return;
     if (vb_pet_json_int(payload, "\"v\"", 0) != 1) return;
     g_pet.task_sequence = sequence;
+    vb_pet_cancel_idle_motion();
     g_pet.host_seen_at = rt_tick_get();
     g_pet.host_deadline = g_pet.host_seen_at + rt_tick_from_millisecond(VB_PET_HEARTBEAT_TTL_MS);
     previous = g_pet.state;
@@ -1912,9 +2764,13 @@ static void vb_pet_receive_tasks(uint32_t sequence, const char *payload)
     g_pet.error[0] = '\0';
     if (g_pet.state != previous)
     {
-        if (g_pet.state == VB_PET_NEEDS_INPUT) vb_pet_play_cue("needs_input");
-        else if (g_pet.state == VB_PET_READY) vb_pet_play_cue("done");
-        else if (g_pet.state == VB_PET_ERROR) vb_pet_play_cue("error");
+        if (g_pet.state == VB_PET_READY && previous != VB_PET_DISCONNECTED)
+        {
+            g_pet.ready_idle_at = rt_tick_get() + rt_tick_from_millisecond(2000);
+            vb_pet_begin_transient(VB_PET_ASSET_WAVING);
+        }
+        else
+            g_pet.ready_idle_at = 0;
     }
     g_pet.dirty = 1;
 }
@@ -1959,14 +2815,24 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
                        const char *project)
 {
     lv_obj_t *label;
+    int index;
     if (!root || !ops || !ops->send_action) return -RT_EINVAL;
     if (vb_codex_pet_stop() != RT_EOK) return -RT_EBUSY;
     rt_memset(&g_pet, 0, sizeof(g_pet));
     g_pet.root = root;
     g_pet.ops = *ops;
     g_pet.active = 1;
+    g_pet.page = VB_PET_PAGE_HOME;
+    g_pet.progress_level = 1;
+    g_pet.idle_last_asset = -1;
     g_pet.state = VB_PET_DISCONNECTED;
     g_pet.task_state = VB_PET_IDLE;
+    g_pet.quota_primary_used = -1;
+    g_pet.quota_secondary_used = -1;
+    g_pet.quota_primary_window_minutes = -1;
+    g_pet.quota_secondary_window_minutes = -1;
+    g_pet.quota_primary_reset_seconds = -1;
+    g_pet.quota_secondary_reset_seconds = -1;
     g_pet.rocky_frame_key = -1;
     g_pet.custom_state = -1;
     g_pet.custom_displayed_frame = -1;
@@ -1982,6 +2848,7 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     lv_obj_set_style_text_color(root, lv_color_hex(0xf9fafb), LV_PART_MAIN | LV_STATE_DEFAULT);
 
     label = vb_pet_label(root, "Codex Companion", 0xf9fafb);
+    g_pet.title_label = label;
     lv_obj_set_pos(label, 30, 36);
     g_pet.connection_label = vb_pet_label(root, "Bridge offline", 0x94a3b8);
     lv_obj_set_width(g_pet.connection_label, 150);
@@ -2083,6 +2950,107 @@ int vb_codex_pet_start(lv_obj_t *root, const vb_codex_pet_ops_t *ops,
     lv_obj_set_style_text_align(g_pet.task_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(g_pet.task_label, 30, VB_PET_TASK_LABEL_FULL_Y);
 
+    g_pet.quota_title_label = vb_pet_label(root, "This session", 0xf9fafb);
+    lv_obj_set_pos(g_pet.quota_title_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_TITLE_Y);
+    g_pet.quota_status_label = vb_pet_label(root, "Waiting", 0x94a3b8);
+    lv_obj_set_width(g_pet.quota_status_label, VB_PET_USAGE_STATUS_WIDTH);
+    lv_obj_set_style_text_align(g_pet.quota_status_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(g_pet.quota_status_label, VB_PET_USAGE_STATUS_X,
+                   VB_PET_USAGE_STATUS_Y);
+
+    g_pet.quota_primary_label = vb_pet_label(root, "tokens", 0x94a3b8);
+    lv_obj_set_width(g_pet.quota_primary_label, VB_PET_USAGE_WIDTH);
+    lv_obj_set_pos(g_pet.quota_primary_label, VB_PET_USAGE_LEFT, VB_PET_USAGE_UNIT_Y);
+    g_pet.quota_primary_value_label = vb_pet_label(root, "No session", 0xf9fafb);
+    lv_obj_set_width(g_pet.quota_primary_value_label, VB_PET_USAGE_WIDTH);
+    lv_obj_set_pos(g_pet.quota_primary_value_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_HERO_Y);
+    g_pet.quota_primary_bar = vb_pet_quota_bar(root, VB_PET_USAGE_CONTEXT_BAR_Y,
+                                                0x243244, VB_PET_USAGE_WIDTH);
+    g_pet.quota_primary_fill = vb_pet_quota_bar(root, VB_PET_USAGE_CONTEXT_BAR_Y,
+                                                 0x3b82f6, 0);
+    g_pet.quota_primary_reset_label = vb_pet_label(root, "", 0x94a3b8);
+    lv_obj_set_width(g_pet.quota_primary_reset_label, VB_PET_USAGE_WIDTH);
+    lv_obj_set_pos(g_pet.quota_primary_reset_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_META_Y);
+
+    g_pet.quota_secondary_label = vb_pet_label(root, "Context", 0x94a3b8);
+    lv_obj_set_width(g_pet.quota_secondary_label, VB_PET_USAGE_WIDTH);
+    lv_obj_set_pos(g_pet.quota_secondary_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_CONTEXT_Y);
+    g_pet.quota_footer_label = vb_pet_label(root, "", 0x94a3b8);
+    lv_obj_set_size(g_pet.quota_footer_label, VB_PET_USAGE_WIDTH, 24);
+    lv_obj_set_style_text_align(g_pet.quota_footer_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(g_pet.quota_footer_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_pos(g_pet.quota_footer_label, VB_PET_USAGE_LEFT,
+                   VB_PET_USAGE_FOOTER_Y);
+
+    g_pet.usage_new_label = vb_pet_label(root, "Input", 0x94a3b8);
+    g_pet.usage_new_value = vb_pet_label(root, "0", 0xf9fafb);
+    g_pet.usage_cached_label = vb_pet_label(root, "Cached", 0x94a3b8);
+    g_pet.usage_cached_value = vb_pet_label(root, "0", 0xf9fafb);
+    g_pet.usage_output_label = vb_pet_label(root, "Output", 0x94a3b8);
+    g_pet.usage_output_value = vb_pet_label(root, "0", 0xf9fafb);
+    lv_obj_set_pos(g_pet.usage_new_label, VB_PET_USAGE_METRIC_NEW_X,
+                   VB_PET_USAGE_METRIC_LABEL_Y);
+    lv_obj_set_pos(g_pet.usage_new_value, VB_PET_USAGE_METRIC_NEW_X,
+                   VB_PET_USAGE_METRIC_VALUE_Y);
+    lv_obj_set_pos(g_pet.usage_cached_label, VB_PET_USAGE_METRIC_CACHED_X,
+                   VB_PET_USAGE_METRIC_LABEL_Y);
+    lv_obj_set_pos(g_pet.usage_cached_value, VB_PET_USAGE_METRIC_CACHED_X,
+                   VB_PET_USAGE_METRIC_VALUE_Y);
+    lv_obj_set_pos(g_pet.usage_output_label, VB_PET_USAGE_METRIC_OUTPUT_X,
+                   VB_PET_USAGE_METRIC_LABEL_Y);
+    lv_obj_set_pos(g_pet.usage_output_value, VB_PET_USAGE_METRIC_OUTPUT_X,
+                   VB_PET_USAGE_METRIC_VALUE_Y);
+    lv_obj_set_size(g_pet.usage_new_label, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 22);
+    lv_obj_set_size(g_pet.usage_cached_label, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 22);
+    lv_obj_set_size(g_pet.usage_output_label, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 22);
+    lv_obj_set_size(g_pet.usage_new_value, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 30);
+    lv_obj_set_size(g_pet.usage_cached_value, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 30);
+    lv_obj_set_size(g_pet.usage_output_value, VB_PET_USAGE_METRIC_COLUMN_WIDTH, 30);
+    vb_pet_set_label_font(g_pet.usage_new_label, FONT_SMALL, 0x94a3b8);
+    vb_pet_set_label_font(g_pet.usage_cached_label, FONT_SMALL, 0x94a3b8);
+    vb_pet_set_label_font(g_pet.usage_output_label, FONT_SMALL, 0x94a3b8);
+    vb_pet_set_label_font(g_pet.usage_new_value, FONT_SUBTITLE, 0xf9fafb);
+    vb_pet_set_label_font(g_pet.usage_cached_value, FONT_SUBTITLE, 0xf9fafb);
+    vb_pet_set_label_font(g_pet.usage_output_value, FONT_SUBTITLE, 0xf9fafb);
+    lv_obj_set_style_text_align(g_pet.usage_new_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(g_pet.usage_cached_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(g_pet.usage_output_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(g_pet.usage_new_value, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(g_pet.usage_cached_value, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(g_pet.usage_output_value, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(g_pet.usage_new_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(g_pet.usage_cached_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(g_pet.usage_output_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(g_pet.usage_new_value, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(g_pet.usage_cached_value, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(g_pet.usage_output_value, LV_LABEL_LONG_CLIP);
+    for (index = 0; index < 7; index++)
+    {
+        int x = VB_PET_USAGE_LEFT + index *
+            (VB_PET_SUMMARY_BAR_WIDTH + VB_PET_SUMMARY_BAR_GAP);
+        g_pet.summary_bars[index] = lv_obj_create(root);
+        lv_obj_set_pos(g_pet.summary_bars[index], x,
+                       VB_PET_SUMMARY_BAR_Y + VB_PET_SUMMARY_BAR_HEIGHT - 4);
+        lv_obj_set_size(g_pet.summary_bars[index], VB_PET_SUMMARY_BAR_WIDTH, 4);
+        lv_obj_set_style_radius(g_pet.summary_bars[index], 3,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(g_pet.summary_bars[index], 0,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(g_pet.summary_bars[index], lv_color_hex(0x3b82f6),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_clear_flag(g_pet.summary_bars[index], LV_OBJ_FLAG_SCROLLABLE);
+        g_pet.summary_day_labels[index] = vb_pet_label(root, index == 6 ? "Td" : "-", 0x94a3b8);
+        lv_obj_set_pos(g_pet.summary_day_labels[index], x - 10, VB_PET_SUMMARY_DAY_Y);
+        lv_obj_set_size(g_pet.summary_day_labels[index], 40, 22);
+        lv_obj_set_style_text_align(g_pet.summary_day_labels[index], LV_TEXT_ALIGN_CENTER, 0);
+        vb_pet_set_label_font(g_pet.summary_day_labels[index], FONT_SMALL, 0x94a3b8);
+        lv_label_set_long_mode(g_pet.summary_day_labels[index], LV_LABEL_LONG_CLIP);
+    }
+    vb_pet_set_quota_visible(0);
+
     lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_PRESSED, RT_NULL);
     lv_obj_add_event_cb(root, vb_pet_touch_event, LV_EVENT_PRESSING, RT_NULL);
@@ -2174,6 +3142,26 @@ static void vb_pet_apply_flow(const char *channel, uint32_t sequence,
         vb_pet_play_cue("submitted");
         g_pet.dirty = 1;
     }
+    else if (rt_strcmp(channel, "pet.usage") == 0)
+    {
+        vb_pet_receive_usage(sequence, payload);
+    }
+    else if (rt_strcmp(channel, "pet.usage.summary") == 0)
+    {
+        vb_pet_receive_usage_summary(sequence, payload);
+    }
+    else if (rt_strcmp(channel, "pet.progress") == 0)
+    {
+        vb_pet_receive_progress(sequence, payload);
+    }
+    else if (rt_strcmp(channel, "pet.achievement") == 0)
+    {
+        vb_pet_receive_achievement(sequence, payload);
+    }
+    else if (rt_strcmp(channel, "pet.cue") == 0)
+    {
+        vb_pet_receive_cue(sequence, payload);
+    }
     else if (rt_strcmp(channel, "pet.quota") == 0)
     {
         vb_pet_receive_quota(sequence, payload);
@@ -2188,6 +3176,7 @@ static void vb_pet_apply_flow(const char *channel, uint32_t sequence,
     }
     else if (rt_strcmp(channel, "pet.select") == 0)
     {
+        vb_pet_cancel_idle_motion();
         vb_pet_copy(g_pet.pending_pet_slug, sizeof(g_pet.pending_pet_slug), payload);
         g_pet.pending_pet_attempts = 0;
         g_pet.pending_pet_retry_at = 0;
@@ -2266,6 +3255,38 @@ void vb_codex_pet_tick(uint32_t now)
     g_pet.ui_tick_count++;
     vb_pet_drain_flows();
     vb_pet_apply_preload_completion();
+    if (g_pet.progress_notice[0] &&
+        (int32_t)(now - g_pet.progress_notice_until) >= 0)
+    {
+        g_pet.progress_notice[0] = '\0';
+        g_pet.progress_notice_until = 0;
+        g_pet.dirty = 1;
+    }
+    if (g_pet.ready_idle_at && (int32_t)(now - g_pet.ready_idle_at) >= 0)
+    {
+        g_pet.ready_idle_at = 0;
+        if (g_pet.state == VB_PET_READY) g_pet.state = VB_PET_IDLE;
+        if (g_pet.task_state == VB_PET_READY) g_pet.task_state = VB_PET_IDLE;
+        g_pet.dirty = 1;
+    }
+    if (vb_pet_idle_action_allowed())
+    {
+        if (g_pet.transient_asset_state < 0 && !g_pet.idle_next_at)
+            g_pet.idle_next_at = now + rt_tick_from_millisecond(
+                VB_PET_IDLE_MIN_MS + (uint32_t)(rand() % VB_PET_IDLE_RANGE_MS));
+        else if (g_pet.transient_asset_state < 0 && g_pet.idle_next_at &&
+                 (int32_t)(now - g_pet.idle_next_at) >= 0)
+        {
+            int action = g_pet.idle_last_asset == VB_PET_ASSET_WAVING ?
+                         VB_PET_ASSET_JUMPING : VB_PET_ASSET_WAVING;
+            g_pet.idle_next_at = 0;
+            g_pet.idle_last_asset = action;
+            g_pet.idle_transient = 1;
+            vb_pet_begin_transient(action);
+        }
+    }
+    else
+        vb_pet_cancel_idle_motion();
     if (g_pet.startup_transient_at &&
         (int32_t)(now - g_pet.startup_transient_at) >= 0)
     {
@@ -2347,15 +3368,22 @@ void vb_codex_pet_tick(uint32_t now)
         g_pet.host_deadline = 0;
         g_pet.host_sequence = 0;
         vb_pet_clear_approval();
+        vb_pet_cancel_idle_motion();
         g_pet.state = VB_PET_DISCONNECTED;
         g_pet.dirty = 1;
     }
-    if (!g_pet.sync_label_updated_at ||
-        (int32_t)(now - g_pet.sync_label_updated_at) >= (int32_t)RT_TICK_PER_SECOND)
+    if (g_pet.page == VB_PET_PAGE_HOME &&
+        (!g_pet.sync_label_updated_at ||
+         (int32_t)(now - g_pet.sync_label_updated_at) >= (int32_t)RT_TICK_PER_SECOND))
     {
         g_pet.sync_label_updated_at = now;
         g_pet.dirty = 1;
     }
+    if (g_pet.page == VB_PET_PAGE_USAGE_CURRENT && g_pet.quota_live &&
+        (!g_pet.quota_rendered_at ||
+         vb_pet_ticks_to_ms(now - g_pet.quota_rendered_at) >=
+             VB_PET_USAGE_CLOCK_REFRESH_MS))
+        g_pet.dirty = 1;
     if (g_pet.custom_available && g_pet.custom_frame_count > 0)
     {
         if ((int32_t)(now - g_pet.custom_next_frame_at) >= 0)
@@ -2369,6 +3397,7 @@ void vb_codex_pet_tick(uint32_t now)
                 {
                     g_pet.transient_asset_state = -1;
                     g_pet.transient_started = 0;
+                    g_pet.idle_transient = 0;
                     g_pet.dirty = 1;
                 }
             }

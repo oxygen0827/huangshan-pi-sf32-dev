@@ -1112,6 +1112,7 @@ static void vb_render_app_manager_ui(const char *reason);
 #endif
 static void vb_runtime_stop_current_app(void);
 static void vb_runtime_watchdog_start(void);
+static void vb_runtime_reload_fail(int status, const char *message, int timed_out);
 static int vb_runtime_app_status_command(void);
 static int vb_runtime_apps_status_command(void);
 static void vb_read_active_app(char *dst, rt_size_t cap);
@@ -1194,15 +1195,14 @@ __attribute__((weak)) int vibeboard_lua_start_script(const char *script_path, co
     return vb_builtin_script_start(script_path, manifest_path);
 }
 
-__attribute__((weak)) void vibeboard_lua_stop_app(void)
+__attribute__((weak)) int vibeboard_lua_stop_app(void)
 {
-    (void)vb_builtin_script_stop();
+    return vb_builtin_script_stop();
 }
 
 __attribute__((weak)) int vibeboard_lua_begin_stop_async(void)
 {
-    vibeboard_lua_stop_app();
-    return RT_EOK;
+    return vibeboard_lua_stop_app();
 }
 
 __attribute__((weak)) int vibeboard_lua_stop_async_state(void)
@@ -1212,8 +1212,7 @@ __attribute__((weak)) int vibeboard_lua_stop_async_state(void)
 
 __attribute__((weak)) int vibeboard_lua_finish_stop_async(void)
 {
-    vibeboard_lua_stop_app();
-    return RT_EOK;
+    return vibeboard_lua_stop_app();
 }
 
 static void vb_safe_copy(char *dst, rt_size_t cap, const char *src)
@@ -5014,9 +5013,23 @@ static void vb_runtime_watchdog_entry(void *parameter)
     {
         uint32_t now;
         rt_thread_mdelay(1000);
-        if (!g_vb_runtime.running || !g_vb_runtime.timer) continue;
+        if (!g_vb_runtime.running) continue;
         if (g_vb_runtime.install_fd >= 0 || g_vb_runtime.install_app[0]) continue;
         now = rt_tick_get();
+        if (!g_vb_runtime.timer)
+        {
+            /* Startup phase before the GUI timer exists: the heartbeat seeded
+             * by on_start() is the only progress signal, so a wedged load must
+             * still be recovered by the watchdog. */
+            if (g_vb_runtime.watchdog_heartbeat &&
+                now - g_vb_runtime.watchdog_heartbeat >=
+                    rt_tick_from_millisecond(VB_RUNTIME_WATCHDOG_TIMEOUT_MS))
+            {
+                vb_runtime_controlled_reset(VB_RUNTIME_RESET_REASON_GUI_STALL,
+                                            "startup heartbeat stalled");
+            }
+            continue;
+        }
         if (g_vb_runtime.watchdog_heartbeat &&
             now - g_vb_runtime.watchdog_heartbeat >=
                 rt_tick_from_millisecond(VB_RUNTIME_WATCHDOG_TIMEOUT_MS))
@@ -5047,7 +5060,10 @@ static void vb_runtime_return_home(void)
     g_vb_runtime.pending_stop = 0;
     g_vb_runtime.pending_reload = 0;
     g_vb_runtime.pending_manager_refresh = 0;
-    vibeboard_lua_stop_app();
+    if (vibeboard_lua_stop_app() != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime] return home Lua close did not complete; continuing\n");
+    }
     vb_runtime_clear_overlay_controls();
     vb_weather_release_image();
     g_vb_runtime.app_running = 0;
@@ -12840,7 +12856,18 @@ static int vb_load_active_package(void)
     int main_lua_present = 0;
     int start_result = RT_EOK;
 
-    vibeboard_lua_stop_app();
+    {
+        int stop_rc = vibeboard_lua_stop_app();
+        if (stop_rc != RT_EOK)
+        {
+            g_vb_runtime.app_failed = 1;
+            vb_runtime_set_app_result(stop_rc, "Lua close timed out; recovery required");
+            rt_kprintf("[vb_runtime] Lua close did not complete (%d); scheduling recovery\n",
+                       stop_rc);
+            vb_runtime_reload_fail(stop_rc, "Lua close timed out during startup", 1);
+            return stop_rc;
+        }
+    }
     rt_memset(&g_vb_runtime.game2048, 0, sizeof(g_vb_runtime.game2048));
     rt_memset(g_vb_runtime.components, 0, sizeof(g_vb_runtime.components));
     g_vb_runtime.component_count = 0;
@@ -12930,7 +12957,10 @@ static int vb_load_active_package(void)
 static void vb_runtime_stop_current_app(void)
 {
     vb_runtime_clear_overlay_controls();
-    vibeboard_lua_stop_app();
+    if (vibeboard_lua_stop_app() != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime] stop Lua close did not complete; continuing to home\n");
+    }
     if (g_vb_runtime.root)
     {
         lv_obj_del(g_vb_runtime.root);
@@ -14556,6 +14586,18 @@ static void vb_timer_cb(lv_timer_t *timer)
             if (result == -RT_EBUSY)
             {
                 g_vb_runtime.pending_reload = 1;
+                if (g_vb_runtime.recovery_attempts < VB_RUNTIME_RECOVERY_RETRY_LIMIT)
+                {
+                    g_vb_runtime.recovery_attempts++;
+                    g_vb_runtime.recovery_stage = g_vb_runtime.recovery_attempts;
+                    rt_kprintf("[vb_runtime][recovery] reload busy retry=%d\n",
+                               g_vb_runtime.recovery_attempts);
+                }
+                else
+                {
+                    vb_runtime_reload_fail(-RT_ETIMEOUT,
+                                           "Lua close stayed busy; recovery reset", 1);
+                }
                 g_vb_runtime.recovery_next_tick = now +
                     rt_tick_from_millisecond(250);
             }
@@ -14697,6 +14739,11 @@ static void on_start(void)
     g_vb_runtime_state_initialized = 1;
     g_vb_runtime.running = 1;
     g_vb_runtime.reload_in_progress = 1;
+    /* Start the recovery watchdog before any potentially blocking startup work:
+     * a wedged Lua close (or any other startup stall) must be bounded even
+     * before the GUI timer exists. */
+    g_vb_runtime.watchdog_heartbeat = rt_tick_get();
+    vb_runtime_watchdog_start();
     vb_prepare_filesystem();
     (void)vb_runtime_display_load_state();
     (void)vb_runtime_rgb_load_state();
@@ -14704,8 +14751,6 @@ static void on_start(void)
     vb_load_active_package();
     g_vb_runtime.reload_in_progress = 0;
     g_vb_runtime.timer = lv_timer_create(vb_timer_cb, VB_TIMER_PERIOD_MS, RT_NULL);
-    g_vb_runtime.watchdog_heartbeat = rt_tick_get();
-    vb_runtime_watchdog_start();
     rt_kprintf("[vb_runtime] start api=%s root=%s\n", VIBEBOARD_RUNTIME_API_VERSION, VIBEBOARD_APP_ROOT);
 }
 
@@ -14718,7 +14763,10 @@ static void on_stop(void)
         lv_timer_del(g_vb_runtime.timer);
         g_vb_runtime.timer = RT_NULL;
     }
-    vibeboard_lua_stop_app();
+    if (vibeboard_lua_stop_app() != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime] stop Lua close did not complete; continuing teardown\n");
+    }
     vb_runtime_clear_overlay_controls();
     if (g_vb_runtime.root)
     {

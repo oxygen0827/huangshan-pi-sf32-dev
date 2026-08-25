@@ -27,7 +27,13 @@ from codex_pet_protocol import (
     now_ms,
 )
 from codex_pet_console import CodexPetConsole
-from codex_pet_status import CodexPetStatusService, QUOTA_CHANNEL
+from codex_pet_status import CodexPetQuotaService, CodexPetStatusService, QUOTA_CHANNEL
+from codex_pet_usage import (
+    CodexPetUsageService,
+    USAGE_CHANNEL,
+    USAGE_SNAPSHOT_MAX_BYTES,
+    USAGE_SUMMARY_CHANNEL,
+)
 from codex_pet_voice import CodexPetVoiceService, GLMASRTranscriber, open_codex_thread
 from runtime_transport import (
     BLE_RUNTIME_STATUS_API,
@@ -495,6 +501,9 @@ class DeviceSession:
         self._state_snapshot: tuple[str, str | None, str | None, str | None, int] | None = None
         self._tasks_snapshot: tuple[str, int] | None = None
         self._approval_snapshot: tuple[str, int] | None = None
+        self._quota_snapshot: tuple[str, int] | None = None
+        self._usage_snapshot: tuple[str, int] | None = None
+        self._usage_summary_snapshot: tuple[str, int] | None = None
         self._pet_selection: str | None = None
         self._replay_pending = False
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -589,10 +598,35 @@ class DeviceSession:
         await self.commands.call("flow_send", "pet.resume", sequence, "ready")
 
     async def publish_quota(self, payload: str) -> None:
+        self._quota_snapshot = (payload, self.clock_ms())
         if not self.connected or self._installing:
             return
         sequence = self.sequencer.next()
         await self.commands.call("flow_send", QUOTA_CHANNEL, sequence, payload)
+
+    async def publish_usage(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > USAGE_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("usage snapshot exceeds board transport limit")
+        previous = self._usage_snapshot
+        self._usage_snapshot = (payload, self.clock_ms())
+        if previous is not None and previous[0] == payload:
+            return
+        if not self.connected or self._installing:
+            return
+        await self.commands.call("flow_send", USAGE_CHANNEL, self.sequencer.next(), payload)
+
+    async def publish_usage_summary(self, payload: str) -> None:
+        if len(payload.encode("utf-8")) > USAGE_SNAPSHOT_MAX_BYTES:
+            raise BridgeError("usage summary exceeds board transport limit")
+        previous = self._usage_summary_snapshot
+        self._usage_summary_snapshot = (payload, self.clock_ms())
+        if previous is not None and previous[0] == payload:
+            return
+        if not self.connected or self._installing:
+            return
+        await self.commands.call(
+            "flow_send", USAGE_SUMMARY_CHANNEL, self.sequencer.next(), payload
+        )
 
     async def publish_approval(self, payload: str) -> None:
         self._approval_snapshot = (payload, self.clock_ms())
@@ -884,6 +918,18 @@ class DeviceSession:
             payload, cached_at = self._approval_snapshot
             if current - cached_at < DEFAULT_TTL_MS:
                 await self.commands.call("flow_send", APPROVAL_CHANNEL, self.sequencer.next(), payload)
+        if self._quota_snapshot is not None:
+            payload, cached_at = self._quota_snapshot
+            if current - cached_at < 5 * 60 * 1000:
+                await self.commands.call("flow_send", QUOTA_CHANNEL, self.sequencer.next(), payload)
+        if self._usage_snapshot is not None:
+            payload, _cached_at = self._usage_snapshot
+            await self.commands.call("flow_send", USAGE_CHANNEL, self.sequencer.next(), payload)
+        if self._usage_summary_snapshot is not None:
+            payload, _cached_at = self._usage_summary_snapshot
+            await self.commands.call(
+                "flow_send", USAGE_SUMMARY_CHANNEL, self.sequencer.next(), payload
+            )
         if self._pet_selection is not None:
             await self.commands.call(
                 "flow_send", PET_SELECTION_CHANNEL, self.sequencer.next(), self._pet_selection
@@ -1408,6 +1454,8 @@ class CodexPetService:
         device: DeviceSession,
         voice: CodexPetVoiceService | None = None,
         status: CodexPetStatusService | None = None,
+        quota: CodexPetQuotaService | None = None,
+        usage: CodexPetUsageService | None = None,
     ) -> None:
         self.bridge = bridge
         self.ipc = ipc
@@ -1415,6 +1463,8 @@ class CodexPetService:
         self.device = device
         self.voice = voice
         self.status = status
+        self.quota = quota
+        self.usage = usage
         self._started = False
         self._device_action_task: asyncio.Task[None] | None = None
 
@@ -1431,6 +1481,10 @@ class CodexPetService:
                 self._device_action_task = asyncio.create_task(
                     self._device_action_loop(), name="codex-pet-device-actions"
                 )
+            if self.quota is not None:
+                await self.quota.start()
+            if self.usage is not None:
+                await self.usage.start()
             if self.voice is not None:
                 if self.voice.current_thread_id:
                     await self.device.publish_resume_available()
@@ -1444,6 +1498,12 @@ class CodexPetService:
             if self.status is not None:
                 with contextlib.suppress(Exception):
                     await self.status.stop()
+            if self.quota is not None:
+                with contextlib.suppress(Exception):
+                    await self.quota.stop()
+            if self.usage is not None:
+                with contextlib.suppress(Exception):
+                    await self.usage.stop()
             if self.voice is not None:
                 with contextlib.suppress(Exception):
                     await self.voice.close()
@@ -1465,6 +1525,12 @@ class CodexPetService:
             if self.status is not None:
                 with contextlib.suppress(Exception):
                     await self.status.stop()
+            if self.quota is not None:
+                with contextlib.suppress(Exception):
+                    await self.quota.stop()
+            if self.usage is not None:
+                with contextlib.suppress(Exception):
+                    await self.usage.stop()
             if self.voice is not None:
                 with contextlib.suppress(Exception):
                     await self.voice.close()
@@ -2324,6 +2390,13 @@ async def self_test_async() -> None:
         await reconnect_device.publish_tasks(reconnect_tasks)
         assert sum(frame[0] == TASKS_CHANNEL for frame in reconnect_transport.frames) == task_frame_count
         await reconnect_device.publish_approval('{"v":1,"a":1,"r":"a:0123456789abcdefabcd"}')
+        await reconnect_device.publish_quota('{"v":1,"status":"live","pU":17}')
+        await reconnect_device.publish_usage(
+            '{"v":1,"s":"l","a":42,"x":20,"w":100,"i":20,"c":20,"o":2,"t":42}'
+        )
+        await reconnect_device.publish_usage_summary(
+            '{"v":1,"s":"l","t":42,"c":1,"u":"t","w":[0,0,0,0,0,0,42],"d":9}'
+        )
         await reconnect_device.publish_pet_selection("boba")
         reconnect_transport.frames.clear()
         reconnect_transport.connected = False
@@ -2337,6 +2410,9 @@ async def self_test_async() -> None:
                     STATE_CHANNEL,
                     TASKS_CHANNEL,
                     APPROVAL_CHANNEL,
+                    QUOTA_CHANNEL,
+                    USAGE_CHANNEL,
+                    USAGE_SUMMARY_CHANNEL,
                     PET_SELECTION_CHANNEL,
                 )
             )
@@ -2345,11 +2421,14 @@ async def self_test_async() -> None:
             await asyncio.sleep(0.01)
         assert reconnect_transport.connect_count >= 2 and reconnect_device.connected
         replayed_channels = [frame[0] for frame in reconnect_transport.frames]
-        assert replayed_channels[:5] == [
+        assert replayed_channels[:8] == [
             HEARTBEAT_CHANNEL,
             STATE_CHANNEL,
             TASKS_CHANNEL,
             APPROVAL_CHANNEL,
+            QUOTA_CHANNEL,
+            USAGE_CHANNEL,
+            USAGE_SUMMARY_CHANNEL,
             PET_SELECTION_CHANNEL,
         ]
         await reconnect_device.close()
@@ -2452,6 +2531,17 @@ async def run_service(args: argparse.Namespace) -> None:
             state_path=args.desktop_state,
             managed_task=journal.is_managed_thread,
         )
+        quota_service = CodexPetQuotaService(
+            client=CodexAppServerClient(codex_bin=args.codex_bin),
+            publish_quota=device.publish_quota,
+        )
+        usage_service = CodexPetUsageService(
+            publish_usage=device.publish_usage,
+            publish_summary=device.publish_usage_summary,
+            selected_session=lambda: (
+                task.session_id if (task := monitor.registry.current()) is not None else None
+            ),
+        )
 
         async def monitor_handler(request: PetEnvelope, **kwargs: object) -> PetEnvelope:
             payload = dict(request.payload or {})
@@ -2466,6 +2556,8 @@ async def run_service(args: argparse.Namespace) -> None:
             codex=codex,
             device=device,
             status=monitor,
+            quota=quota_service,
+            usage=usage_service,
         )
         companion_server = None
         if not args.no_companion:
@@ -2548,6 +2640,11 @@ async def run_service(args: argparse.Namespace) -> None:
         device=device,
         voice=voice,
         status=status,
+        usage=CodexPetUsageService(
+            publish_usage=device.publish_usage,
+            publish_summary=device.publish_usage_summary,
+            selected_session=journal.latest_thread_id,
+        ),
     )
     await service.start()
     print(f"Codex Pet Bridge ready: {args.socket}")

@@ -19,6 +19,10 @@ int vibeboard_lua_host_stop(void);
 int vibeboard_lua_begin_stop_async(void);
 int vibeboard_lua_stop_async_state(void);
 int vibeboard_lua_finish_stop_async(void);
-void vibeboard_lua_stop_app(void);
+/* Stop the Lua VM without ever calling lua_close() on the calling thread.
+ * Returns RT_EOK when the VM and host are fully stopped, or an error when the
+ * asynchronous close does not finish within the bounded deadline.  Callers must
+ * treat a timeout as a recovery condition and must not re-enter lua_close. */
+int vibeboard_lua_stop_app(void);
 
 #endif

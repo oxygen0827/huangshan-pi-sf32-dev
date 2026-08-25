@@ -2183,6 +2183,47 @@ BLE install begin interrupted: Did not receive expected BLE status response
 4. 新的 BLE 安装修复必须至少跑一次真实大于 1 MiB 的九状态宠物，覆盖 staging 清理、长分包传输、
    提交确认和回滚 UI，不得只用小型模拟包判断成功。
 
+### 问题四十三：Codex Pet 持续显示 blocked，但当前任务已经恢复 running
+
+#### 现象
+
+板子屏幕一直显示 `blocked`。电脑端的持久化任务快照中同时存在两个任务：历史任务 `ml` 的状态为
+`blocked`，详情是 `No progress - check computer`；当前选中的
+`huangshan-pi-sf32-dev` 任务已经是 `running`。重新查看时，BLE 心跳仍能到达板端，但没有在串口采样中
+看到对应的最新 `pet.tasks` 快照。
+
+排障时打开 USB-UART 还会触发板子复位，因此复位后读取到的 `active=0` 只能说明读取发生在 Runtime
+重新启动阶段，不能作为原始 blocked 状态的根因。
+
+#### 真正原因
+
+- Monitor 会在运行任务超过 8 分钟没有新事件时，将该任务自动改成 `blocked`，并写入
+  `No progress - check computer`。这次 `ml` 任务确实触发了这条 stalled-task 规则。
+- 当前任务后来已经恢复为 `running`，但板端当时仍显示旧的 `pet.tasks` 结果，属于 Bridge/Monitor 状态
+  回放或任务选择没有及时落到板端的旧快照问题，不是 BLE 心跳断开，也不是固件把 `running` 错判成
+  `blocked`。
+- Monitor 的任务快照只发送当前选中的任务；历史 `blocked` 任务不会因为存在于任务列表中就应该覆盖当前
+  选中的 `running` 任务。排障时不能只看任务列表里是否出现过 `blocked`，还要核对 `selectedSession` 和
+  板端最后收到的 `pet.tasks`。
+
+#### 解决方案
+
+- 重启唯一的 `codex_pet_monitor.command`/Bridge，让它重新加载桌面任务快照并通过 BLE 回放当前选中任务。
+- 等待一次心跳和任务快照回放；必要时在板端左右滑动切换到当前项目，确认选中的是
+  `huangshan-pi-sf32-dev`，而不是已经 stalled 的历史任务。
+- 不要同时启动多个 Monitor/Bridge；多个进程会争用同一条 BLE 连接，使旧快照和新快照的到达顺序难以判断。
+- 本次恢复不需要重新烧录固件或修改 App。确认板端日志中既有 `pet.heartbeat`，又有最新的 `pet.tasks`，
+  并以板端 `vb_runtime_codex_pet_status` 和电脑端 `selectedSession` 交叉验证。
+
+#### 后续规则
+
+1. 遇到板端 `blocked`，先对比电脑端任务快照中的 `selectedSession`、选中任务状态和任务详情，再判断是否
+   是真实阻塞；`No progress - check computer` 表示触发了 8 分钟 stalled-task 保护。
+2. BLE 心跳正常只能证明连接活着，不能证明任务状态已同步；必须同时验证 `pet.tasks` 的序号、项目名和
+   `st` 字段已经到达板端。
+3. 串口打开可能复位板子。读取状态后要区分“复位后的启动日志”和“复位前的故障现场”，不要用复位瞬间
+   的 `active=0` 覆盖对原始问题的判断。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：

@@ -553,6 +553,8 @@ def audit_codex_pet_voice_app() -> None:
         ("scripts/codex_pet_status.py", "class CodexPetStatusService:"),
         ("scripts/codex_pet_status.py", "async def observe_external("),
         ("scripts/codex_pet_status.py", 'QUOTA_CHANNEL = "pet.quota"'),
+        ("scripts/codex_pet_usage.py", 'USAGE_CHANNEL = "pet.usage"'),
+        ("scripts/codex_pet_usage.py", 'USAGE_SUMMARY_CHANNEL = "pet.usage.summary"'),
         ("scripts/codex_pet_hook.py", '"PermissionRequest": ("needs_input", "approval", "Approval required")'),
         ("scripts/codex_pet_hook.py", 'str(Path(tempfile.gettempdir()) / f"huangshan-codex-pet-{os.getuid()}.sock")'),
         ("scripts/codex_pet_hook.py", "def ack_accepted("),
@@ -599,7 +601,12 @@ def audit_codex_pet_voice_app() -> None:
     for token in ('rt_strcmp(channel, "pet.tasks")',
                   'lv_label_set_text(g_pet.new_label, "Allow")',
                   'lv_label_set_text(g_pet.continue_label, "Deny")',
-                  "vb_pet_handle_horizontal_swipe", "LV_OBJ_FLAG_GESTURE_BUBBLE",
+                  "vb_pet_handle_horizontal_swipe", "vb_pet_handle_vertical_swipe",
+                  "VB_PET_PAGE_USAGE_CURRENT", "VB_PET_PAGE_USAGE_SUMMARY",
+                  "g_pet.touch_press_y <= VB_PET_TOP_EDGE_MAX_Y",
+                  'rt_strcmp(channel, "pet.usage")',
+                  'rt_strcmp(channel, "pet.usage.summary")',
+                  "LV_OBJ_FLAG_GESTURE_BUBBLE",
                   "VB_PET_VOICE_UI_ENABLED 0", "g_pet.task_state", "VB_PET_HEARTBEAT_TTL_MS"):
         if token not in helper:
             fail("codex_pet_voice_app", f"monitor-first board UI is missing {token!r}")

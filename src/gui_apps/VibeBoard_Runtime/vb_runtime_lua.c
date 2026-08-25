@@ -19,6 +19,7 @@
 #define VB_LUA_APP_DIR_MAX 160
 #define VB_LUA_OBJECT_METATABLE "vibeboard.lvgl.object"
 #define VB_LUA_STOP_THREAD_STACK 3072
+#define VB_LUA_STOP_TIMEOUT_MS 5000
 
 typedef struct
 {
@@ -551,7 +552,11 @@ int vibeboard_lua_start_script(const char *script_path, const char *manifest_pat
         return -RT_EBUSY;
     }
 
-    vibeboard_lua_stop_app();
+    if (vibeboard_lua_stop_app() != RT_EOK)
+    {
+        rt_kprintf("[vb_runtime][lua] start blocked by incomplete Lua close\n");
+        return -RT_EBUSY;
+    }
     if (vibeboard_lua_host_reset() != RT_EOK) return -RT_ERROR;
     source = vb_lua_read_file(script_path, &length);
     if (!source) return -RT_ERROR;
@@ -581,7 +586,7 @@ int vibeboard_lua_start_script(const char *script_path, const char *manifest_pat
         const char *message = lua_tostring(g_vb_lua.state, -1);
         rt_kprintf("[vb_runtime][lua] start failed status=%d error=%s\n",
                    status, message ? message : "unknown");
-        vibeboard_lua_stop_app();
+        (void)vibeboard_lua_stop_app();
         return status == LUA_ERRMEM ? -RT_ENOMEM : -RT_ERROR;
     }
     vibeboard_lua_host_set_active(1);
@@ -662,23 +667,56 @@ int vibeboard_lua_finish_stop_async(void)
     return RT_EOK;
 }
 
-void vibeboard_lua_stop_app(void)
+static int vb_lua_wait_stop_async(uint32_t timeout_ms)
 {
+    uint32_t deadline = rt_tick_get() + rt_tick_from_millisecond(timeout_ms);
+    while (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
+    {
+        if ((int32_t)(rt_tick_get() - deadline) >= 0)
+            return -RT_ETIMEOUT;
+        rt_thread_mdelay(10);
+    }
+    return g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_COMPLETE ?
+           RT_EOK : -RT_ERROR;
+}
+
+int vibeboard_lua_stop_app(void)
+{
+    int result;
+
+    /* Never close the VM on the calling (GUI/stop) thread: lua_close() can run
+     * arbitrary finalizers and has been observed to block forever.  All closes
+     * go through the worker thread and are bounded by VB_LUA_STOP_TIMEOUT_MS so
+     * a wedged close can never freeze the GUI permanently. */
     if (g_vb_lua.stop_async_state == VIBEBOARD_LUA_STOP_CLOSING)
     {
-        /* Runtime will finish host teardown after the worker acknowledges the
-         * close.  A synchronous caller must not reintroduce a GUI deadlock. */
-        return;
+        result = vb_lua_wait_stop_async(VB_LUA_STOP_TIMEOUT_MS);
+        if (result != RT_EOK)
+        {
+            rt_kprintf("[vb_runtime][lua] close worker wedged; recovery required\n");
+            return result;
+        }
     }
-    if (g_vb_lua.state)
+    else if (g_vb_lua.state)
     {
-        lua_close(g_vb_lua.state);
-        g_vb_lua.state = RT_NULL;
+        result = vibeboard_lua_begin_stop_async();
+        if (result != RT_EOK)
+        {
+            rt_kprintf("[vb_runtime][lua] begin async close failed rc=%d\n", result);
+            return result;
+        }
+        result = vb_lua_wait_stop_async(VB_LUA_STOP_TIMEOUT_MS);
+        if (result != RT_EOK)
+        {
+            rt_kprintf("[vb_runtime][lua] close worker wedged; recovery required\n");
+            return result;
+        }
     }
     if (vibeboard_lua_host_stop() != RT_EOK)
     {
         rt_kprintf("[vb_runtime][lua] host shutdown did not finish\n");
-        return;
+        return -RT_ERROR;
     }
     rt_memset(&g_vb_lua, 0, sizeof(g_vb_lua));
+    return RT_EOK;
 }
