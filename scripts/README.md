@@ -14,5 +14,9 @@
 | 语音桥 | `voice_bridge_common.py`、`voice_bridge_serial.py`、`voice_bridge_ble.py`、`voice_llm_openai.py`、`voice_llm_zhipu.py` |
 | macOS 打包 | `build_codex_pet_companion_app.command`、`verify_codex_pet_companion_app.sh`、`codex_pet_companion_app.swift` |
 
+`runtime_architecture_audit.py` 还负责锁定 Codex Pet 的动画存储边界：五个任务语义状态必须从
+PSRAM 常驻压缩块加载，resident loader 不得调用 SD/FAT 或 storage mutex；交互预览状态才允许
+使用有界流式读取。修改 `vb_runtime_codex_pet.c` 的预载、loader 或状态 JSON 时必须运行该审计。
+
 可提交的源码在本目录和 `scripts/runtime_apps/`。`.local/`、`project/build_*`、Python virtualenv、
 Node 依赖、转换后的宠物素材和设备抓包均为本机生成物，已由根目录 `.gitignore` 排除。

@@ -2224,6 +2224,87 @@ BLE install begin interrupted: Did not receive expected BLE status response
 3. 串口打开可能复位板子。读取状态后要区分“复位后的启动日志”和“复位前的故障现场”，不要用复位瞬间
    的 `active=0` 覆盖对原始问题的判断。
 
+### 问题四十四：blocked/failed 状态切换读取 SD，失败动画未播放且宠物卡帧
+
+#### 日期 / App
+
+2026-08-26，Codex Pet / Petdex 九状态动画 / Huangshan Pi 原生宠物 UI。
+
+#### 现象
+
+用合成任务把 Codex 状态从 `running` 切换为 `blocked` 时，Companion 已接受并发布任务快照，
+但板子没有播放 `failed` 动画，原有宠物动画也停在单帧。串口现场出现 `spi sem timeout`；这与
+“任务快照没有同步”外观相似，但故障层实际位于板端动画资源加载，而不是 Hook 或 BLE 状态归并。
+
+#### 真正原因
+
+- VBPC v2 虽然用两个 `1328640` 字节的 PSRAM 原始帧缓存槽实现异步切换，旧 loader 仍在每次
+  状态 cache miss 时获取 Runtime storage mutex，再从 SD 读取完整压缩状态块。
+- `failed` 是任务状态机的正常目标，不是低频预览；当显示刷新、Runtime 或其他 SD/FAT 操作占用
+  storage 路径时，blocked -> failed 会等待或失败，导致 `requestedAssetState=failed` 而显示缓存
+  没有按时接管。状态文字和动画因此可能看起来不同步，严重时当前帧也停止推进。
+- “稳定播放期间不读 SD”只保护了逐帧 tick，没有保护任务状态切换本身。原架构审计也只检查
+  `vb_pet_show_custom_frame()`，没有约束 loader 的任务语义分支，所以这条回归可以通过旧审计。
+
+#### 修复方式
+
+- 启动解析 VBPC v2 时，把 `idle/waving/failed/waiting/running` 五个任务语义状态的压缩块连续
+  读入 PSRAM，并记录逐状态 resident offset/length。当前 `002` 实测常驻压缩数据为
+  `554118` 字节，硬上限为 `768 KiB`。
+- 任务语义状态由 `vb_pet_load_resident_state()` 直接从 PSRAM 解压到非活动原始帧缓存，不调用
+  `open/read/lseek`，不获取 Runtime storage mutex。worker 用 `loaderPhase=31` 标记这条 RAM-only
+  路径。
+- `runLeft/runRight/jumping/review` 四个交互预览状态保留 SD fallback，但改为 8 KiB 固定输入缓冲
+  配合 zlib streaming inflate，不再为最大压缩状态分配整块临时 PSRAM。预览加载阶段仍使用
+  `loaderPhase=30/32`，就绪后的帧播放继续为零 SD I/O。
+- `codex_pet` 状态 JSON 新增 `residentCompressedBytes`，与 `preloadedBytes` 分别表示任务状态压缩
+  常驻区和双原始帧缓存。`runtime_architecture_audit.py` 新增结构回归：五个任务状态必须进入
+  resident 分支，且 resident loader 禁止出现 SD/FAT/storage 调用。
+- 串口安装器、Bridge 连接/安装 ready gate 和 soak 都要求 `residentCompressedBytes>0`；固件只
+  分配了双原始缓存、却没有准备任务状态常驻区时，不再回放任务快照或把部署判为成功。
+- 本次不修改 LVGL 对象、坐标、缩放或位图尺寸；画布仍为 390x450，Runtime 关键安全区仍为
+  x=30..359、y=36..413，因此没有新的圆角屏布局预算变化。
+
+#### 嵌入式影响与回滚
+
+- PSRAM：双原始帧缓存仍为 `1328640` 字节；另增加五个任务状态的常驻压缩数据。当前实测总计
+  `1882758` 字节，不含分配器元数据。不同宠物压缩率不同，超过 `768 KiB` resident 上限会拒绝
+  预载，不能仅凭当前宠物判断所有包的内存余量。
+- 静态内存：新增 8 KiB 流式输入缓冲。未提供本次修改前后的 map/ELF 对比，因此不声明完整
+  SRAM/Flash 增量或量产内存余量。
+- RTOS/存储：不改变 loader 线程优先级、栈、semaphore 或双缓存交接协议；任务状态路径减少
+  storage mutex 竞争，预览路径仍按原互斥规则访问 SD。
+- 协议兼容：现有状态字段和 VBPC v1/v2 读取兼容保留，只新增只读 JSON 字段；旧 Companion
+  忽略未知字段。回滚时可回退本次提交并重新构建、USB 刷写上一固件，不需要迁移 SD 包格式。
+
+#### 验证证据
+
+- 当前源码执行 `scripts/build.sh` 构建成功，并通过 `scripts/flash.sh` 写入
+  `/dev/cu.usbserial-13230` 的 SF32LB52。
+- 当前构建报告：ROM `1340384 / 8388608 B`、RAM `333816 / 523264 B`、PSRAM 静态区
+  `2596000 / 8388608 B`，主固件二进制 `3169312 B`。这些是修复后单点用量，不是前后增量。
+- 冷启动日志：`preload v2 states=9 cache=1328640 resident=554118 max_frames=8`。
+- 合成 blocked 任务到达后，板端报告 `state=failed`、`frames=8`；连续采样观察到 `frame`
+  `2 -> 5 -> 7`、`uiTicks` `138 -> 197 -> 255 -> 407`、`loaderPhase=0`，且不再出现新的
+  `spi sem timeout`。用户确认真机失败动画已经显示，随后清理合成任务并恢复当前 Codex 任务。
+- 恢复后通过 Companion 既有 BLE 连接读取 `huangshan_pet_status`，桌面快照与板端均为
+  `running`；八次采样中帧号持续循环，约 10 秒刷新一次任务快照，`queuedFlows=0`、
+  `droppedFlows=0`。
+- 未提供正视屏幕照片或视频；由于本次没有布局变化，保留既有圆角屏视觉验收结论，但不把上述
+  状态/日志证据表述为新的布局验收。
+
+#### 后续规则
+
+1. `idle/waving/failed/waiting/running` 属于任务状态同步的实时路径，切换必须完全绕过 SD/FAT；
+   不能只保证逐帧播放阶段零 I/O。
+2. 新宠物部署 gate 除 `preloadVersion=2`、`assetStates=9`、`preloadedBytes>0` 外，还必须要求
+   `residentCompressedBytes>0`，并实测五个任务状态的 `requestedAssetState` 最终追上
+   `assetState`。
+3. 动画故障先用 Companion 的 `huangshan_pet_status` 对比 `state/assetState/requestedAssetState`、
+   `frame/uiTicks/loaderPhase`；不要先打开会复位板子的 CH340 串口破坏现场。
+4. 资源内存评审必须同时记录双原始缓存、任务状态压缩常驻区和流式输入缓冲；没有 map/ELF
+   对比时不得声称内存余量充足。
+
 ## 待继续沉淀的问题
 
 后续遇到下面类型的问题，也应补充到本文档：

@@ -339,7 +339,10 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
         timeout=15.0,
         label="storage stress initial queue drain",
     )
-    if int(initial.get("preloadedBytes", 0) or 0) <= 0:
+    if (
+        int(initial.get("preloadedBytes", 0) or 0) <= 0
+        or int(initial.get("residentCompressedBytes", 0) or 0) <= 0
+    ):
         raise RuntimeError(f"pet assets are not preloaded: {initial}")
     active_pet = str(initial.get("pet") or "")
     if not active_pet:
@@ -395,6 +398,7 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
                 and last.get("pet") == target
                 and int(last.get("frames", 0) or 0) >= 2
                 and int(last.get("preloadedBytes", 0) or 0) > 0
+                and int(last.get("residentCompressedBytes", 0) or 0) > 0
                 and int(last.get("loaderPhase", -1) or 0) == 0
                 and int(last.get("uiTicks", 0) or 0) > before_ticks
                 and len(frames_seen) >= 2
@@ -414,6 +418,7 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
             "uiTicks": last.get("uiTicks"),
             "frames": last.get("frames"),
             "preloadedBytes": last.get("preloadedBytes"),
+            "residentCompressedBytes": last.get("residentCompressedBytes"),
             "maxQueuedFlows": max_queued,
         }, sort_keys=True), flush=True)
 
@@ -430,6 +435,7 @@ async def run_storage_stress(args: argparse.Namespace) -> int:
         "pet": final.get("pet"),
         "uiTicks": final.get("uiTicks"),
         "preloadedBytes": final.get("preloadedBytes"),
+        "residentCompressedBytes": final.get("residentCompressedBytes"),
         "maxQueuedFlows": max_queued,
         "baselineDroppedFlows": baseline_dropped,
         "newDroppedFlows": int(final.get("droppedFlows", 0) or 0) - baseline_dropped,
@@ -586,6 +592,8 @@ async def run_soak(args: argparse.Namespace) -> int:
                     and value.get("custom") == 1
                     and isinstance(value.get("frames"), int)
                     and value.get("frames", 0) >= 2
+                    and int(value.get("preloadedBytes", 0) or 0) > 0
+                    and int(value.get("residentCompressedBytes", 0) or 0) > 0
                 ),
                 timeout=60.0,
                 label="Codex Pet ready gate",

@@ -453,7 +453,8 @@ def audit_codex_pet_bridge() -> None:
     for token in (
         "vb_pet_preload_assets",
         "vb_pet_parse_preload_unlocked",
-        "vb_pet_load_state_unlocked",
+        "vb_pet_load_resident_state",
+        "vb_pet_load_transient_state_unlocked",
         "vb_pet_preload_worker",
         "vb_pet_apply_preload_completion",
         "rt_sem_take(g_pet.loader_sem, RT_WAITING_NO)",
@@ -473,6 +474,7 @@ def audit_codex_pet_bridge() -> None:
         "g_pet.preload_split",
         "lv_img_set_zoom(g_pet.pet_image",
         '\\"preloadedBytes\\"',
+        '\\"residentCompressedBytes\\"',
         '\\"assetStates\\"',
         '\\"preloadVersion\\"',
         "g_pet.custom_displayed_frame = -1;",
@@ -490,8 +492,51 @@ def audit_codex_pet_bridge() -> None:
     for forbidden in ("open(", "read(", "uncompress(", "vb_runtime_storage_take"):
         if forbidden in frame_body:
             fail("codex_pet_bridge", f"animation playback must remain SD-free: {forbidden!r}")
+    resident_tokens = (
+        "VB_PET_TASK_RESIDENT_STATE_COUNT 5",
+        "VB_PET_ASSET_IDLE",
+        "VB_PET_ASSET_WAVING",
+        "VB_PET_ASSET_FAILED",
+        "VB_PET_ASSET_WAITING",
+        "VB_PET_ASSET_RUNNING",
+        "vb_pet_state_is_task_resident",
+        "vb_pet_load_resident_state",
+        "preload_resident_compressed_bytes",
+    )
+    for token in resident_tokens:
+        if token not in helper:
+            fail("codex_pet_bridge", f"SD-free task-state preload is missing {token!r}")
+    resident_start = helper.find("static int vb_pet_load_resident_state(")
+    resident_end = helper.find("\nstatic ", resident_start + 1)
+    resident_body = (
+        helper[resident_start:resident_end]
+        if resident_start >= 0 and resident_end > resident_start
+        else ""
+    )
+    if not resident_body:
+        fail("codex_pet_bridge", "resident task-state loader could not be audited")
+    for forbidden in ("open(", "read(", "lseek(", "vb_runtime_storage_take"):
+        if forbidden in resident_body:
+            fail("codex_pet_bridge", f"resident task-state loading must remain SD-free: {forbidden!r}")
+    worker_start = helper.find("static void vb_pet_preload_worker(")
+    worker_end = helper.find("\nstatic ", worker_start + 1)
+    worker_body = (
+        helper[worker_start:worker_end]
+        if worker_start >= 0 and worker_end > worker_start
+        else ""
+    )
+    resident_branch = worker_body.find("vb_pet_state_is_task_resident(state)")
+    storage_branch = worker_body.find("vb_runtime_storage_take(")
+    if resident_branch < 0 or storage_branch < 0 or resident_branch > storage_branch:
+        fail("codex_pet_bridge", "task-state loader must bypass storage before transient SD fallback")
     if "PET_READY_TIMEOUT_SECONDS = 30.0" not in read("scripts/codex_pet_bridge.py"):
         fail("codex_pet_bridge", "cold-boot ready gate must cover the bounded startup preload")
+    bridge = read("scripts/codex_pet_bridge.py")
+    if bridge.count('status.get("residentCompressedBytes", 0) > 0') < 2:
+        fail("codex_pet_bridge", "connect and install ready gates must require resident task states")
+    installer = read("scripts/runtime_install_serial.py")
+    if 'resident_compressed_bytes = value.get("residentCompressedBytes")' not in installer:
+        fail("codex_pet_bridge", "serial ready gate must require resident task states")
     keychain_launcher = read("scripts/codex_pet_test_backend.command")
     monitor = read("scripts/codex_pet_monitor.py")
     monitor_launcher = read("scripts/codex_pet_monitor.command")

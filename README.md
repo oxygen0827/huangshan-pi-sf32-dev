@@ -92,7 +92,7 @@ GUI 应用。
 | 屏幕 Display JSON / Lua helper / display_stage 示例 | 已可用；首版开放 CO5300 面板尺寸/状态/亮度快照和 0-100 亮度设置，暂不开放熄屏/开屏控制，串口 / BLE / iOS 均已接入同一 API |
 | RGB JSON / Lua helper `vb_runtime_rgb` / `vibe_rgb(...)` | 已可用；串口 / BLE 自动回归已覆盖设色、读回与恢复 |
 | 信息流 `flow_send` / `pc.voice` / flow_stage 示例 | 已跑通；已修复 Lua 清屏后 `flow_label` 悬空导致的回写崩溃，电脑或手机端文本可以稳定回写到板子；App 可用 manifest `flow.*` 或 `vibe_flow_label(...)` 只读展示最新信息流，最近一条会保存到 `/sdcard/apps/.flow` 以便跨复位/跨 BLE 重连恢复，串口 / BLE 独立回归已覆盖 clear/send/status/clear/persist |
-| Codex Companion / Codex Pet | 已跑通；板端显示 Codex Desktop 多任务状态、Rocky 宠物动画和额度信息，任务执行、完成、卡住或等待审批时同步更新屏幕与 RGB；在屏幕中部左右滑动切换任务，真实审批出现时底部临时显示 `Allow / Deny`。板端页面不再提供 Talk 入口，语音底层 API 仅为后续兼容保留 |
+| Codex Companion / Codex Pet | 已跑通；板端显示 Codex Desktop 多任务状态、Petdex 宠物动画和额度信息，任务执行、完成、卡住或等待审批时同步更新屏幕与 RGB；五个任务语义动画的压缩块在启动期常驻 PSRAM，状态切换不再读取 SD。在屏幕中部左右滑动切换任务，真实审批出现时底部临时显示 `Allow / Deny`。板端页面不再提供 Talk 入口，语音底层 API 仅为后续兼容保留 |
 | 语音桥 `voice_start/stop/status/read/clear` | 已跑通；串口 / BLE 都已完成 16 kHz PCM 短录音、按住说话松手保留、WAV 落盘、回复回写与证据校验 |
 | 语音状态 / 受控录音 App API / voice_stage 示例 | 已可用；`vb_runtime_voice` / BLE `voice` / `--voice-only` 提供只读状态，App 可通过 `voice.start` / `voice.clear` action 或 `vibe_voice_start(...)` / `vibe_voice_clear()` 请求 Runtime 限时录音和清空录音，但仍不能直接读取 PCM |
 | Runtime manifest + Lua 5.5 VM | 已可用；支持函数、闭包、表、循环、模块和 UTF-8 等完整 Lua 语言能力；标准库、LVGL binding、384 KiB 内存和 50 万指令预算仍由 Runtime 控制 |
@@ -171,14 +171,21 @@ node scripts/import_petdex_pets.js --build-preload
 转换器优先加载项目依赖中的 `sharp`，也可通过 `CODEX_PET_SHARP=/path/to/sharp` 指定；
 在安装了 ChatGPT.app 的 Mac 上会最后回退到其内置转换器。
 
-Petdex 的单帧是 `192x208`，spritesheet 为 8 列、9 或 11 行。转换器识别透明空帧，将
-`idle / ready / blocked / needs / running` 映射到对应状态行，并输出 `160x173` 的 VPST v2
-原始 RGB565 + alpha 帧包，并额外生成 Deflate 压缩的 `preload.bin`。源帧只用于桌面端构建；
-板端的 active 包包含这五个状态，每个状态 2 帧。以 Shinchan 为例，启动读取约 `145 KB`、
-PSRAM 约 `830 KB`。运行期间切换状态只切换已经驻留在 PSRAM 的原生 Petdex 帧，不访问 SD；
-所有状态使用资源自带的 180 ms 帧节奏，宠物位置和尺寸保持固定，不再运行时放大缩小或上下跳动。
-`.runtimeignore` 会把桌面端源帧和 Rocky 兼容资源排除出安装包，Codex Pet 包从约 `8.1 MB`
-降到约 `173 KB`；板端只保留 active preload、catalog 和提示音。
+Petdex 的单帧是 `192x208`，spritesheet 为 8 列、9 或 11 行。转换器识别透明空帧并输出
+`idle / runRight / runLeft / waving / jumping / failed / waiting / running / review` 九个状态的
+`160x173` RGB565A 帧，再生成 VBPC v2 Deflate 预载包。各状态保留真实的 4--8 帧，统一使用
+120 ms 帧周期；源帧只用于桌面端构建，安装包保存目录和九个压缩状态块。
+
+板端继续用两个最多 8 帧的原始帧缓存槽，共 `1328640` 字节。启动时还把
+`idle / waving / failed / waiting / running` 五个任务语义状态的压缩块读入 PSRAM；以当前
+`002` 宠物为例，`residentCompressedBytes=554118`。Codex 在 idle、ready、blocked、
+needs_input 和 running 之间切换时只从这块常驻数据解压到非活动缓存，不获取 storage mutex，
+也不读取 SD。`runRight / runLeft / jumping / review` 是交互预览状态，允许后台 loader 用
+8 KiB 输入缓冲从 active 包流式解压；状态就绪后的逐帧播放仍不访问 SD。宠物位置、尺寸和
+390x450 页面布局保持不变。
+
+`.runtimeignore` 会把桌面端源帧和 Rocky 兼容资源排除出安装包；板端只保留 active preload、
+catalog 和提示音。
 5 个内置提示音也在 Companion 启动时预载到 PSRAM；运行期切宠物、状态变化和 cue 播放均
 不访问 SD。其他 Runtime App 的通用 WAV 播放仍保持 512 字节单扇区读取。
 
@@ -247,10 +254,10 @@ bash scripts/provision_codex_pet_board.sh /dev/cu.usbserial-XXXX
 
 上面的 binary 模式要求先刷入当前 Runtime（`provision_codex_pet_board.sh` 已自动完成）；旧固件
 兼容时才使用普通文本分片。安装过程使用 staging 目录；任一命令失败都会中止提交，不会用半包覆盖当前可运行版本。
-安装完成后重新启动板子，使用 Petdex 资源时串口日志应包含：
+安装完成后重新启动板子，使用当前 Petdex v2 资源时串口日志应包含：
 
 ```text
-[vb_runtime][codex_pet] preloaded pets=1 states=5 frames=2 bytes=830400 compressed=144794
+[vb_runtime][codex_pet] preload v2 states=9 cache=1328640 resident=<non-zero> max_frames=8
 [vb_runtime][lua] codex.pet rc=0
 ```
 
@@ -302,10 +309,11 @@ Codex Pet 图库、签名 `.hpet`、macOS Companion 深链、本地 API、一键
 若屏幕没有显示下载的宠物，依次确认：
 
 1. `node scripts/import_petdex_pets.js --check` 能验证全部源帧，并确认 active catalog 只有一只宠物。
-2. SD 卡中存在 `/sdcard/apps/codex_pet/assets/pets/catalog.txt` 和 active `preload.bin`；各状态
-   `.bin` 只用于桌面端构建，不是板端运行时依赖。
-3. 冷启动日志出现 `preloaded pets=1 states=5 frames=2 bytes=830400`；若没有，检查
-   `preload.bin` 是否完整，以及 2.1 MB PSRAM 图像池是否成功分配，不要把 SD 容量误判为运行内存。
+2. SD 卡中存在 `/sdcard/apps/codex_pet/assets/pets/catalog.txt` 和 active VBPC v2 资源；Companion
+   部署包通常把目录和九个压缩状态块拆开传输，不能只用单个 `preload.bin` 判断资源是否完整。
+3. 冷启动日志出现 `preload v2 states=9 cache=1328640 resident=<non-zero> max_frames=8`；若没有，
+   检查预载目录/状态块是否完整，以及图像 PSRAM 是否能同时容纳双原始帧缓存和五个任务状态压缩块，
+   不要把 SD 容量误判为运行内存。
 4. `codex.pet rc=0` 表示 App 已成功启动；Bridge 连接问题只影响任务状态同步，不会让已经
    加载的宠物图像消失。
 

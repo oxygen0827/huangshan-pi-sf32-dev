@@ -139,7 +139,7 @@ manifest 配置见 `docs/macos-companion-release.md`。离线包校验：
   重连并用目标宠物严格 ready gate 裁决成功或失败。板端将 SD/PSRAM reload 延迟到 ACK 窗口之后。
 - 已提交但板端严格校验失败时，重新连接并安装 `active.json` 记录的上一只缓存宠物。
 - 连接成功不等于 Codex Pet 已启动。其他 App active 时仍允许部署；只有 `install_end` 后才
-  要求 `slug/frames/frameMs/preloadedBytes/uiTicks/queuedFlows` 全部通过。
+  要求 `slug/frames/frameMs/preloadedBytes/residentCompressedBytes/uiTicks/queuedFlows` 全部通过。
 - 固件升级后，若 macOS 报 `Peer removed pairing information`、错误 13 或读到其他服务签名，
   必须在两端清除旧 bond 后重新系统配对；不要靠无限重试恢复不一致的密钥或 handle 缓存。
 - Companion 的后台心跳和网页配对共享连接事务锁；缓存 CoreBluetooth UUID 必须先从实时广告
@@ -167,5 +167,6 @@ node scripts/build_hpet_petdex.js --self-test
 真机至少覆盖：首次配对、断线重连、每阶段断线、错误 ACK、重启、abort、上一宠物回滚、连续
 50 次安装、九状态图库和板端逐状态预览、3 分钟 exercise soak 和 24 小时连接 soak。单次成功
 必须看到 `pet=<slug>`、`preloadVersion=2`、`assetStates=9`、`frames>=2`、`frameMs=120`、
-`preloadedBytes>0`、`uiTicks` 增长且 `queuedFlows=0`。50 次与 24 小时是发布 gate，不应用单次
-开发验证代替。
+`preloadedBytes>0`、`residentCompressedBytes>0`、`uiTicks` 增长且 `queuedFlows=0`。任务语义
+状态 sweep 还必须确认 `idle/waving/failed/waiting/running` 切换期间不进入 SD loader 阶段，
+且稳定播放时 `loaderPhase=0`。50 次与 24 小时是发布 gate，不应用单次开发验证代替。

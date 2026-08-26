@@ -823,7 +823,12 @@ class DeviceSession:
                 pet_ready = (
                     status.get("active") == 1
                     and isinstance(status.get("frames"), int)
-                    and status.get("frames", 0) > 0
+                    and status.get("frames", 0) >= 2
+                    and status.get("preloadVersion") == 2
+                    and status.get("assetStates") == 9
+                    and status.get("frameMs") == 120
+                    and status.get("preloadedBytes", 0) >= 160 * 173 * 3 * 2 * 2
+                    and status.get("residentCompressedBytes", 0) > 0
                     and isinstance(status.get("uiTicks"), int)
                 )
             except (BridgeError, RuntimeError, ValueError, json.JSONDecodeError):
@@ -875,6 +880,7 @@ class DeviceSession:
                         and status.get("frames", 0) >= 2
                         and status.get("frameMs") == 120
                         and status.get("preloadedBytes", 0) >= 160 * 173 * 3 * 2 * 2
+                        and status.get("residentCompressedBytes", 0) > 0
                     )
                 if valid:
                     if last_ui_ticks is not None:
@@ -1704,6 +1710,7 @@ class FakeDeviceTransport:
                 "frames": 6,
                 "frameMs": 120,
                 "preloadedBytes": 160 * 173 * 3 * 8 * 2,
+                "residentCompressedBytes": 554118,
                 "uiTicks": self.pet_ui_ticks,
                 "queuedFlows": 0,
                 "ok": True,

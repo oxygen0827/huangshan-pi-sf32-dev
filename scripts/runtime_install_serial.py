@@ -54,6 +54,7 @@ def validate_codex_pet_ready(output: str) -> dict[str, object]:
     ui_ticks = value.get("uiTicks")
     frames = value.get("frames")
     preloaded_bytes = value.get("preloadedBytes")
+    resident_compressed_bytes = value.get("residentCompressedBytes")
     if not isinstance(pet, str) or not pet:
         raise RuntimeTransportError("Codex Pet status has no active pet slug")
     if not isinstance(ui_ticks, int) or isinstance(ui_ticks, bool):
@@ -62,6 +63,12 @@ def validate_codex_pet_ready(output: str) -> dict[str, object]:
         raise RuntimeTransportError("Codex Pet frames mismatch: expected at least 2")
     if not isinstance(preloaded_bytes, int) or preloaded_bytes < 160 * 173 * 3 * 2 * 2:
         raise RuntimeTransportError("Codex Pet has no valid resident animation cache")
+    if (
+        not isinstance(resident_compressed_bytes, int)
+        or isinstance(resident_compressed_bytes, bool)
+        or resident_compressed_bytes <= 0
+    ):
+        raise RuntimeTransportError("Codex Pet has no resident task-state compressed cache")
     return value
 
 
@@ -221,10 +228,10 @@ def run_self_test() -> None:
     click_args.codex_pet_click_test = True
     assert has_standard_transport_command(click_args)
     first_pet = validate_codex_pet_ready(
-        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"uiTicks":9}}'
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"residentCompressedBytes":554118,"uiTicks":9}}'
     )
     second_pet = validate_codex_pet_ready(
-        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"uiTicks":10}}'
+        f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"residentCompressedBytes":554118,"uiTicks":10}}'
     )
     assert codex_pet_ticks_advanced(first_pet, second_pet)
     assert codex_pet_preview_states() == (
@@ -236,12 +243,20 @@ def run_self_test() -> None:
     assert not codex_pet_preview_ready(preview, "review", 1)
     try:
         validate_codex_pet_ready(
-            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":1,"frameMs":120,"preloadedBytes":1328640,"uiTicks":10}}'
+            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":1,"frameMs":120,"preloadedBytes":1328640,"residentCompressedBytes":554118,"uiTicks":10}}'
         )
     except RuntimeTransportError as exc:
         assert "frames mismatch" in str(exc)
     else:
         raise AssertionError("incomplete Codex Pet preload must fail readiness")
+    try:
+        validate_codex_pet_ready(
+            f'{{"api":"{CODEX_PET_API}","active":1,"pet":"002","assetStates":9,"preloadVersion":2,"frames":6,"frameMs":120,"preloadedBytes":1328640,"residentCompressedBytes":0,"uiTicks":10}}'
+        )
+    except RuntimeTransportError as exc:
+        assert "resident task-state" in str(exc)
+    else:
+        raise AssertionError("non-resident Codex Pet task states must fail readiness")
     package_args = argparse.Namespace(**vars(base))
     assert not has_standard_transport_command(package_args)
     raw_args = argparse.Namespace(**vars(base))

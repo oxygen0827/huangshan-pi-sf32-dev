@@ -46,12 +46,14 @@
 #define VB_PET_PRELOAD_VERSION 2u
 #define VB_PET_PRELOAD_HEADER_SIZE 16u
 #define VB_PET_PRELOAD_STATE_ENTRY_SIZE 12u
+#define VB_PET_TASK_RESIDENT_STATE_COUNT 5
 #define VB_PET_PRELOAD_LEGACY_STATE_COUNT 5u
 #define VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE 2u
 #define VB_PET_STATUS_API "vibeboard-huangshan-codex-pet/v1"
 #define VB_PET_PRELOAD_STORAGE_WAIT_MS 3000
 #define VB_PET_PRELOAD_MAX_BYTES (1400000u)
 #define VB_PET_PRELOAD_MAX_COMPRESSED_BYTES (1024u * 1024u)
+#define VB_PET_PRELOAD_MAX_RESIDENT_COMPRESSED_BYTES (768u * 1024u)
 #define VB_PET_PRELOAD_CACHE_BANKS 2
 #define VB_PET_PRELOAD_THREAD_STACK 4096
 #define VB_PET_STARTUP_ANIMATION_DELAY_MS 2500
@@ -146,6 +148,14 @@ typedef enum
     VB_PET_ASSET_REVIEW
 } vb_pet_asset_state_t;
 
+static const uint8_t g_vb_pet_task_resident_states[VB_PET_TASK_RESIDENT_STATE_COUNT] = {
+    VB_PET_ASSET_IDLE,
+    VB_PET_ASSET_WAVING,
+    VB_PET_ASSET_FAILED,
+    VB_PET_ASSET_WAITING,
+    VB_PET_ASSET_RUNNING,
+};
+
 typedef enum
 {
     VB_PET_PAGE_HOME = 0,
@@ -239,10 +249,12 @@ typedef struct
     int custom_displayed_frame;
     int custom_frame_ms;
     uint8_t *preloaded_data;
-    uint8_t *preload_compressed;
+    uint8_t *preload_resident_compressed;
     uint32_t preloaded_data_size;
     uint32_t preload_raw_frame_size;
-    uint32_t preload_max_compressed;
+    uint32_t preload_resident_compressed_bytes;
+    uint32_t preload_resident_offsets[VB_PET_ASSET_STATE_COUNT];
+    uint32_t preload_resident_lengths[VB_PET_ASSET_STATE_COUNT];
     uint32_t preload_state_offsets[VB_PET_ASSET_STATE_COUNT];
     uint32_t preload_state_lengths[VB_PET_ASSET_STATE_COUNT];
     uint32_t preload_legacy_offsets[VB_PET_PRELOAD_LEGACY_STATE_COUNT]
@@ -368,6 +380,7 @@ typedef struct
     int preload_version;
     int asset_state_count;
     uint32_t preloaded_data_size;
+    uint32_t preload_resident_compressed_bytes;
     uint32_t ui_tick_count;
     uint32_t queued_flows;
     uint32_t dropped_flows;
@@ -377,6 +390,7 @@ typedef struct
 
 static vb_codex_pet_state_t g_pet;
 static uint8_t g_vb_pet_rle_records[VB_PET_RLE_RECORD_BATCH * 5u];
+static uint8_t g_vb_pet_preload_io[VB_PET_PRELOAD_IO_CHUNK_BYTES];
 static vb_pet_flow_message_t g_vb_pet_flow_queue[VB_PET_FLOW_QUEUE_SIZE];
 static volatile uint32_t g_vb_pet_flow_read;
 static volatile uint32_t g_vb_pet_flow_write;
@@ -720,6 +734,16 @@ static int vb_pet_legacy_state_index(int asset_state)
     }
 }
 
+static int vb_pet_state_is_task_resident(int state)
+{
+    int index;
+    for (index = 0; index < VB_PET_TASK_RESIDENT_STATE_COUNT; index++)
+    {
+        if (state == g_vb_pet_task_resident_states[index]) return 1;
+    }
+    return 0;
+}
+
 static int vb_pet_stop_preload_worker(void)
 {
     if (g_pet.loader_thread)
@@ -755,11 +779,13 @@ static int vb_pet_release_preloaded_assets(void)
             if (image->data) lv_img_cache_invalidate_src(image);
         }
     }
-    if (g_pet.preload_compressed) app_cache_free(g_pet.preload_compressed);
+    if (g_pet.preload_resident_compressed)
+        app_cache_free(g_pet.preload_resident_compressed);
     if (g_pet.preloaded_data) app_cache_free(g_pet.preloaded_data);
-    g_pet.preload_compressed = RT_NULL;
+    g_pet.preload_resident_compressed = RT_NULL;
     g_pet.preloaded_data = RT_NULL;
     g_pet.preloaded_data_size = 0;
+    g_pet.preload_resident_compressed_bytes = 0;
     rt_memset(g_pet.preloaded_frames, 0, sizeof(g_pet.preloaded_frames));
     return RT_EOK;
 }
@@ -778,8 +804,8 @@ static int vb_pet_parse_preload_unlocked(void)
     uint8_t pack[VB_PET_PRELOAD_HEADER_SIZE +
                  VB_PET_ASSET_STATE_COUNT * VB_PET_PRELOAD_STATE_ENTRY_SIZE];
     uint32_t raw_size;
-    uint32_t resident_bytes;
-    uint32_t max_compressed = 0;
+    uint32_t raw_resident_bytes;
+    uint32_t compressed_resident_bytes = 0;
     uint32_t expected_first = 0;
     uint32_t index_bytes;
     uint16_t width;
@@ -787,10 +813,17 @@ static int vb_pet_parse_preload_unlocked(void)
     uint16_t version;
     struct stat st;
     int fd = -1;
+    int resident_fd = -1;
     int state;
     int bank;
     int frame;
     int result = 0;
+
+    for (state = 0; state < VB_PET_ASSET_STATE_COUNT; state++)
+    {
+        g_pet.preload_resident_offsets[state] = 0xffffffffu;
+        g_pet.preload_resident_lengths[state] = 0;
+    }
 
     fd = open(VB_PET_PRELOAD_PATH, O_RDONLY);
     if (fd < 0 || vb_pet_read_full(fd, pack, VB_PET_PRELOAD_HEADER_SIZE) != RT_EOK ||
@@ -840,7 +873,6 @@ static int vb_pet_parse_preload_unlocked(void)
             g_pet.preload_state_offsets[state] = offset;
             g_pet.preload_state_lengths[state] = length;
             if (count > g_pet.preload_max_frames) g_pet.preload_max_frames = (uint8_t)count;
-            if (length > max_compressed) max_compressed = length;
             expected_first += count;
         }
         if (expected_first != total_frames) goto finish;
@@ -870,7 +902,6 @@ static int vb_pet_parse_preload_unlocked(void)
                 goto finish;
             g_pet.preload_legacy_offsets[legacy_state][legacy_frame] = offset;
             g_pet.preload_legacy_lengths[legacy_state][legacy_frame] = length;
-            if (length > max_compressed) max_compressed = length;
         }
         for (state = 0; state < VB_PET_ASSET_STATE_COUNT; state++)
             g_pet.preload_state_frame_counts[state] = VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE;
@@ -878,17 +909,73 @@ static int vb_pet_parse_preload_unlocked(void)
     }
     else goto finish;
 
-    resident_bytes = raw_size * (uint32_t)g_pet.preload_max_frames *
-                     VB_PET_PRELOAD_CACHE_BANKS;
-    if (resident_bytes == 0 || resident_bytes > VB_PET_PRELOAD_MAX_BYTES ||
-        max_compressed == 0) goto finish;
-    g_pet.preloaded_data = (uint8_t *)app_cache_alloc(resident_bytes, IMAGE_CACHE_PSRAM);
-    g_pet.preload_compressed = (uint8_t *)app_cache_alloc(max_compressed, IMAGE_CACHE_PSRAM);
-    if (!g_pet.preloaded_data || !g_pet.preload_compressed) goto finish;
-    g_pet.preloaded_data_size = resident_bytes;
+    for (index_bytes = 0; index_bytes < VB_PET_TASK_RESIDENT_STATE_COUNT; index_bytes++)
+    {
+        uint32_t length = 0;
+        state = g_vb_pet_task_resident_states[index_bytes];
+        if (version == VB_PET_PRELOAD_VERSION)
+            length = g_pet.preload_state_lengths[state];
+        else
+        {
+            int legacy_state = vb_pet_legacy_state_index(state);
+            for (frame = 0; frame < VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; frame++)
+                length += g_pet.preload_legacy_lengths[legacy_state][frame];
+        }
+        if (length == 0 || length > VB_PET_PRELOAD_MAX_RESIDENT_COMPRESSED_BYTES -
+            compressed_resident_bytes) goto finish;
+        g_pet.preload_resident_offsets[state] = compressed_resident_bytes;
+        g_pet.preload_resident_lengths[state] = length;
+        compressed_resident_bytes += length;
+    }
+    raw_resident_bytes = raw_size * (uint32_t)g_pet.preload_max_frames *
+                         VB_PET_PRELOAD_CACHE_BANKS;
+    if (raw_resident_bytes == 0 || raw_resident_bytes > VB_PET_PRELOAD_MAX_BYTES ||
+        compressed_resident_bytes == 0) goto finish;
+    g_pet.preloaded_data = (uint8_t *)app_cache_alloc(raw_resident_bytes, IMAGE_CACHE_PSRAM);
+    g_pet.preload_resident_compressed = (uint8_t *)app_cache_alloc(
+        compressed_resident_bytes, IMAGE_CACHE_PSRAM);
+    if (!g_pet.preloaded_data || !g_pet.preload_resident_compressed) goto finish;
+    g_pet.preloaded_data_size = raw_resident_bytes;
     g_pet.preload_raw_frame_size = raw_size;
-    g_pet.preload_max_compressed = max_compressed;
+    g_pet.preload_resident_compressed_bytes = compressed_resident_bytes;
     g_pet.preload_version = (uint8_t)version;
+
+    for (index_bytes = 0; index_bytes < VB_PET_TASK_RESIDENT_STATE_COUNT; index_bytes++)
+    {
+        uint8_t *cursor;
+        state = g_vb_pet_task_resident_states[index_bytes];
+        cursor = g_pet.preload_resident_compressed +
+                 g_pet.preload_resident_offsets[state];
+        if (version == VB_PET_PRELOAD_VERSION)
+        {
+            uint32_t length = g_pet.preload_state_lengths[state];
+            if (g_pet.preload_split)
+            {
+                char state_path[96];
+                rt_snprintf(state_path, sizeof(state_path),
+                            VB_PET_PRELOAD_STATE_PATH_FORMAT, state);
+                resident_fd = open(state_path, O_RDONLY);
+                if (resident_fd < 0 || vb_pet_read_full(resident_fd, cursor, length) != RT_EOK)
+                    goto finish;
+                close(resident_fd);
+                resident_fd = -1;
+            }
+            else if (lseek(fd, (off_t)g_pet.preload_state_offsets[state], SEEK_SET) < 0 ||
+                     vb_pet_read_full(fd, cursor, length) != RT_EOK) goto finish;
+        }
+        else
+        {
+            int legacy_state = vb_pet_legacy_state_index(state);
+            for (frame = 0; frame < VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; frame++)
+            {
+                uint32_t offset = g_pet.preload_legacy_offsets[legacy_state][frame];
+                uint32_t length = g_pet.preload_legacy_lengths[legacy_state][frame];
+                if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
+                    vb_pet_read_full(fd, cursor, length) != RT_EOK) goto finish;
+                cursor += length;
+            }
+        }
+    }
     for (bank = 0; bank < VB_PET_PRELOAD_CACHE_BANKS; bank++)
     {
         g_pet.cache_state[bank] = -1;
@@ -907,18 +994,94 @@ static int vb_pet_parse_preload_unlocked(void)
     }
     result = 1;
 finish:
+    if (resident_fd >= 0) close(resident_fd);
     if (fd >= 0) close(fd);
     return result;
 }
 
-static int vb_pet_load_state_unlocked(int state, int bank)
+static int vb_pet_load_resident_state(int state, int bank)
+{
+    const uint8_t *source;
+    uint8_t *target;
+    uint32_t frame_count;
+    if (!g_pet.preloaded_data || !g_pet.preload_resident_compressed ||
+        !vb_pet_state_is_task_resident(state) ||
+        state < 0 || state >= VB_PET_ASSET_STATE_COUNT ||
+        bank < 0 || bank >= VB_PET_PRELOAD_CACHE_BANKS) return 0;
+    frame_count = g_pet.preload_state_frame_counts[state];
+    target = g_pet.preloaded_data +
+        (uint32_t)bank * g_pet.preload_max_frames * g_pet.preload_raw_frame_size;
+    source = g_pet.preload_resident_compressed + g_pet.preload_resident_offsets[state];
+    if (g_pet.preload_version == VB_PET_PRELOAD_VERSION)
+    {
+        uLongf decoded_size = g_pet.preload_raw_frame_size * frame_count;
+        if (uncompress(target, &decoded_size, source,
+                       g_pet.preload_resident_lengths[state]) != Z_OK ||
+            decoded_size != g_pet.preload_raw_frame_size * frame_count) return 0;
+    }
+    else
+    {
+        int legacy_state = vb_pet_legacy_state_index(state);
+        int frame;
+        if (legacy_state < 0) return 0;
+        for (frame = 0; frame < VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; frame++)
+        {
+            uint32_t length = g_pet.preload_legacy_lengths[legacy_state][frame];
+            uLongf decoded_size = g_pet.preload_raw_frame_size;
+            if (uncompress(target + (uint32_t)frame * g_pet.preload_raw_frame_size,
+                           &decoded_size, source, length) != Z_OK ||
+                decoded_size != g_pet.preload_raw_frame_size) return 0;
+            source += length;
+        }
+    }
+    return 1;
+}
+
+static int vb_pet_inflate_segment_unlocked(int fd, uint32_t offset, uint32_t length,
+                                            uint8_t *target, uint32_t target_size)
+{
+    z_stream stream;
+    uint32_t remaining = length;
+    int z_result = Z_OK;
+    int result = 0;
+    if (fd < 0 || !target || target_size == 0 ||
+        lseek(fd, (off_t)offset, SEEK_SET) < 0) return 0;
+    rt_memset(&stream, 0, sizeof(stream));
+    if (inflateInit(&stream) != Z_OK) return 0;
+    while (remaining > 0 && z_result != Z_STREAM_END)
+    {
+        uint32_t wanted = remaining > sizeof(g_vb_pet_preload_io) ?
+                          sizeof(g_vb_pet_preload_io) : remaining;
+        int count = read(fd, g_vb_pet_preload_io, wanted);
+        if (count <= 0) goto finish;
+        remaining -= (uint32_t)count;
+        stream.next_in = g_vb_pet_preload_io;
+        stream.avail_in = (uInt)count;
+        while (stream.avail_in > 0 && z_result != Z_STREAM_END)
+        {
+            if (stream.total_out >= target_size) goto finish;
+            stream.next_out = target + stream.total_out;
+            stream.avail_out = (uInt)(target_size - stream.total_out);
+            z_result = inflate(&stream, Z_NO_FLUSH);
+            if (z_result != Z_OK && z_result != Z_STREAM_END) goto finish;
+            if (stream.avail_out == 0 && z_result != Z_STREAM_END) goto finish;
+        }
+    }
+    result = z_result == Z_STREAM_END && remaining == 0 && stream.avail_in == 0 &&
+             stream.total_out == target_size;
+finish:
+    inflateEnd(&stream);
+    return result;
+}
+
+static int vb_pet_load_transient_state_unlocked(int state, int bank)
 {
     char state_path[96];
     uint8_t *target;
     uint32_t frame_count;
     int fd = -1;
     int result = 0;
-    if (!g_pet.preloaded_data || !g_pet.preload_compressed ||
+    if (!g_pet.preloaded_data || vb_pet_state_is_task_resident(state) ||
         state < 0 || state >= VB_PET_ASSET_STATE_COUNT ||
         bank < 0 || bank >= VB_PET_PRELOAD_CACHE_BANKS) return 0;
     frame_count = g_pet.preload_state_frame_counts[state];
@@ -935,31 +1098,29 @@ static int vb_pet_load_state_unlocked(int state, int bank)
     if (g_pet.preload_version == VB_PET_PRELOAD_VERSION)
     {
         uint32_t offset = g_pet.preload_split ? 0u : g_pet.preload_state_offsets[state];
-        uint32_t length = g_pet.preload_state_lengths[state];
-        uLongf decoded_size = g_pet.preload_raw_frame_size * frame_count;
-        if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
-            vb_pet_read_full(fd, g_pet.preload_compressed, length) != RT_EOK ||
-            uncompress(target, &decoded_size, g_pet.preload_compressed, length) != Z_OK ||
-            decoded_size != g_pet.preload_raw_frame_size * frame_count) goto finish;
+        result = vb_pet_inflate_segment_unlocked(
+            fd, offset, g_pet.preload_state_lengths[state], target,
+            g_pet.preload_raw_frame_size * frame_count);
     }
     else
     {
         int legacy_state = vb_pet_legacy_state_index(state);
         int frame;
         if (legacy_state < 0) goto finish;
+        result = 1;
         for (frame = 0; frame < VB_PET_PRELOAD_LEGACY_FRAMES_PER_STATE; frame++)
         {
-            uint32_t offset = g_pet.preload_legacy_offsets[legacy_state][frame];
-            uint32_t length = g_pet.preload_legacy_lengths[legacy_state][frame];
-            uLongf decoded_size = g_pet.preload_raw_frame_size;
-            if (lseek(fd, (off_t)offset, SEEK_SET) < 0 ||
-                vb_pet_read_full(fd, g_pet.preload_compressed, length) != RT_EOK ||
-                uncompress(target + (uint32_t)frame * g_pet.preload_raw_frame_size,
-                           &decoded_size, g_pet.preload_compressed, length) != Z_OK ||
-                decoded_size != g_pet.preload_raw_frame_size) goto finish;
+            if (!vb_pet_inflate_segment_unlocked(
+                    fd, g_pet.preload_legacy_offsets[legacy_state][frame],
+                    g_pet.preload_legacy_lengths[legacy_state][frame],
+                    target + (uint32_t)frame * g_pet.preload_raw_frame_size,
+                    g_pet.preload_raw_frame_size))
+            {
+                result = 0;
+                break;
+            }
         }
     }
-    result = 1;
 finish:
     if (fd >= 0) close(fd);
     return result;
@@ -984,12 +1145,20 @@ static void vb_pet_preload_worker(void *parameter)
         sequence = g_pet.loader_request_sequence;
         state = g_pet.loader_request_state;
         bank = g_pet.loader_request_bank;
-        g_vb_pet_loader_phase = 30;
-        if (vb_runtime_storage_take(VB_PET_PRELOAD_STORAGE_WAIT_MS) == RT_EOK)
+        if (vb_pet_state_is_task_resident(state))
         {
-            g_vb_pet_loader_phase = 32;
-            result = vb_pet_load_state_unlocked(state, bank);
-            vb_runtime_storage_release();
+            g_vb_pet_loader_phase = 31;
+            result = vb_pet_load_resident_state(state, bank);
+        }
+        else
+        {
+            g_vb_pet_loader_phase = 30;
+            if (vb_runtime_storage_take(VB_PET_PRELOAD_STORAGE_WAIT_MS) == RT_EOK)
+            {
+                g_vb_pet_loader_phase = 32;
+                result = vb_pet_load_transient_state_unlocked(state, bank);
+                vb_runtime_storage_release();
+            }
         }
         g_pet.loader_completed_state = state;
         g_pet.loader_completed_bank = bank;
@@ -1029,7 +1198,7 @@ static int vb_pet_preload_assets(void)
     if (vb_pet_parse_preload_unlocked())
     {
         g_vb_pet_loader_phase = 22;
-        result = vb_pet_load_state_unlocked(VB_PET_ASSET_IDLE, 0);
+        result = vb_pet_load_resident_state(VB_PET_ASSET_IDLE, 0);
     }
     vb_runtime_storage_release();
     g_vb_pet_loader_phase = 0;
@@ -1042,11 +1211,13 @@ static int vb_pet_preload_assets(void)
     }
     if (!result) (void)vb_pet_release_preloaded_assets();
     else
-        rt_kprintf("[vb_runtime][codex_pet] preload v%d states=%d cache=%lu max_frames=%d\n",
+        rt_kprintf("[vb_runtime][codex_pet] preload v%d states=%d cache=%lu resident=%lu max_frames=%d\n",
                    g_pet.preload_version,
                    g_pet.preload_version == VB_PET_PRELOAD_VERSION ?
                        VB_PET_ASSET_STATE_COUNT : VB_PET_PRELOAD_LEGACY_STATE_COUNT,
-                   (unsigned long)g_pet.preloaded_data_size, g_pet.preload_max_frames);
+                   (unsigned long)g_pet.preloaded_data_size,
+                   (unsigned long)g_pet.preload_resident_compressed_bytes,
+                   g_pet.preload_max_frames);
     return result;
 }
 
@@ -2799,6 +2970,7 @@ static void vb_pet_publish_status(void)
     snapshot.asset_state_count = g_pet.preload_version == VB_PET_PRELOAD_VERSION ?
                                  VB_PET_ASSET_STATE_COUNT : VB_PET_PRELOAD_LEGACY_STATE_COUNT;
     snapshot.preloaded_data_size = g_pet.preloaded_data_size;
+    snapshot.preload_resident_compressed_bytes = g_pet.preload_resident_compressed_bytes;
     snapshot.ui_tick_count = g_pet.ui_tick_count;
     vb_pet_copy(snapshot.pet_slug, sizeof(snapshot.pet_slug), g_pet.pet_slug);
     vb_pet_copy(snapshot.rgb_color, sizeof(snapshot.rgb_color), g_pet.rgb_color);
@@ -3465,7 +3637,8 @@ int vb_codex_pet_status_json(char *dst, rt_size_t cap)
                 "\"assetState\":\"%s\",\"requestedAssetState\":\"%s\","
                 "\"assetStates\":%d,\"preloadVersion\":%d,"
                 "\"frames\":%d,\"frame\":%d,\"frameMs\":%d,"
-                "\"preloadedBytes\":%lu,\"uiTicks\":%lu,\"loaderPhase\":%d,"
+                "\"preloadedBytes\":%lu,\"residentCompressedBytes\":%lu,"
+                "\"uiTicks\":%lu,\"loaderPhase\":%d,"
                 "\"queuedFlows\":%lu,\"droppedFlows\":%lu,"
                 "\"indicator\":\"%s\",\"rgb\":\"%s\"}",
                 VB_PET_STATUS_API,
@@ -3490,6 +3663,7 @@ int vb_codex_pet_status_json(char *dst, rt_size_t cap)
                 snapshot.custom_frame_index,
                 snapshot.custom_frame_ms,
                 (unsigned long)snapshot.preloaded_data_size,
+                (unsigned long)snapshot.preload_resident_compressed_bytes,
                 (unsigned long)snapshot.ui_tick_count,
                 g_vb_pet_loader_phase,
                 (unsigned long)snapshot.queued_flows,

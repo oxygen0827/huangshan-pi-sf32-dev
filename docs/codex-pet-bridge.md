@@ -1,6 +1,6 @@
 # Codex Pet Bridge 与 pet/v1
 
-更新时间：2026-07-24
+更新时间：2026-08-26
 
 ## 进程边界
 
@@ -216,11 +216,13 @@ Bridge 每 10 秒重发项目名和可继续任务能力。板端 30 秒没有�
 
 ## 恢复与 BLE 重连
 
-Bridge 启动时先加载 `~/.vibeboard/codex_pet_tasks.json` 和最近的状态/审批快照，连接通过
-Codex Pet ready gate（`active=1`、至少一个宠物、五个状态帧数大于 0、Flow 队列为空，并连续观察到
-`uiTicks` 前进）后，再按顺序回放任务和审批。冷启动 gate 最多等待 30 秒，覆盖
-Petdex 九状态源图库中的五个任务语义状态压缩包的 PSRAM 预载。Monitor 启动时不做可选的项目广播，
-避免启动阶段的 BLE 队列竞争；任务 Hook 到达后才发送新的项目/任务快照。
+Bridge 启动时先加载 `~/.vibeboard/codex_pet_tasks.json` 和最近的状态/审批快照。普通连接只有在
+板端报告 `active=1`、`preloadVersion=2`、`assetStates=9`、`frames>=2`、`frameMs=120`、
+`preloadedBytes>0`、`residentCompressedBytes>0` 且 `uiTicks` 为数值时，才把现有任务快照标记为
+可回放。安装后的严格 ready gate 还要求至少一个宠物、Flow 队列为空，并连续观察到 `uiTicks`
+前进；它最多等待 30 秒，覆盖 Petdex 九状态目录、双原始帧缓存和五个任务语义状态压缩块的
+PSRAM 预载。Monitor 启动时不做可选的项目广播，避免启动阶段的 BLE 队列竞争；任务 Hook 到达
+后才发送新的项目/任务快照。
 
 Monitor 使用固定 CoreBluetooth 外设标识做身份校验，但每次连接先扫描到同一标识的实时广告
 对象，再建立 GATT 连接。这是为了绕过 macOS 在板子复位后缓存的旧服务表；地址不匹配仍会
@@ -346,19 +348,26 @@ PYTHONPATH=scripts .venv/bin/python scripts/codex_pet_soak.py \
 python3 scripts/codex_pet_mcp.py --self-test
 ```
 
-板端使用单一 active 宠物槽。更换宠物时，在桌面端重新生成 `preload.bin` 和 `catalog.txt`
+板端使用单一 active 宠物槽。更换宠物时，在桌面端重新生成 VBPC v2 资源和 `catalog.txt`
 后重新安装 App；安装器通过 `.runtimeignore` 排除桌面源帧和 Rocky 回退帧。板端不通过 BLE
-临时取帧，也不轮换多个宠物；状态切换由后台线程从 active 包读取到非活动缓存，稳定动画播放
-期间 LVGL 不访问 SD。后台 loader 每次被唤醒后会先清空已经排队的重复 semaphore token，再读取
-最新目标状态；否则快速点击或连续状态切换可能让陈旧请求再次写入已经交给 LVGL 使用的缓存槽，
-表现为跳跃动画卡帧或撕裂。
+临时取帧，也不轮换多个宠物。启动阶段将 `idle/waving/failed/waiting/running` 五个任务语义
+状态的压缩块常驻 PSRAM；这些状态切换时，后台 loader 直接从 RAM 解压到非活动缓存，不获取
+storage mutex，也不读取 SD。`runLeft/runRight/jumping/review` 预览状态仍可从 active 包按需
+流式读取，但只使用固定 8 KiB 输入缓冲，不再分配整块压缩态 scratch buffer；状态就绪后的稳定
+动画播放始终不访问 SD。
+
+后台 loader 每次被唤醒后会先清空已经排队的重复 semaphore token，再处理最新目标状态；否则
+快速点击或连续状态切换可能让陈旧请求再次写入已经交给 LVGL 使用的缓存槽，表现为跳跃动画
+卡帧或撕裂。架构审计同时强制五个任务状态走 resident 分支，并禁止该加载函数出现
+`open/read/lseek/storage_take`，防止任务状态切换重新引入 SD 争用。
 
 `huangshan_pet_status` 是只读诊断工具，直接返回板端实际显示状态。关键字段包括：
 `tasks`（保留的可见任务数）、`activeTasks`（正在执行、待人工输入或阻塞的任务数）、
 `recentTasks`（近期完成的真实任务数）、`syncAgeMs`（距最近一次 Bridge 同步的毫秒数）、
 `state`、`approval`、`indicator`、`pet`、`assetState`、`requestedAssetState`、`assetStates`、
-`preloadVersion`、`frames`、`frameMs` 和 `preloadedBytes`。后者必须大于 0，表示双状态缓存已在
-PSRAM 分配成功。它不返回任务正文、命令、
+`preloadVersion`、`frames`、`frameMs`、`preloadedBytes` 和 `residentCompressedBytes`。
+`preloadedBytes` 表示双原始帧缓存，`residentCompressedBytes` 表示五个任务语义状态的常驻
+压缩块；两者都必须大于 0。它不返回任务正文、命令、
 路径或审批内容。需要确认板子是否收到新任务时，优先查询这个工具，而不是根据桌面窗口推断。
 
 ## 验证清单
@@ -367,8 +376,10 @@ PSRAM 分配成功。它不返回任务正文、命令、
    Bridge 或另一个 BLE 客户端。
 2. 运行 `huangshan_pet_status`，确认 `connected=1`、`active=1`、`tasks` 与
    `activeTasks` 正确，且 `preloadVersion=2`、`assetStates=9`、`frames>=2`、所有状态
-   `frameMs=120`、`preloadedBytes>0`、`loaderPhase=0`。状态切换允许 loader 短暂进入 30/32，
-   但 `assetState` 最终必须追上 `requestedAssetState`，稳定播放时 loader 必须回到 0。
+   `frameMs=120`、`preloadedBytes>0`、`residentCompressedBytes>0`、`loaderPhase=0`。五个任务
+   语义状态切换允许 loader 短暂进入 31，但不得进入 storage 阶段 30/32；四个交互预览状态允许
+   进入 30/32。两类状态的 `assetState` 最终都必须追上 `requestedAssetState`，稳定播放时 loader
+   必须回到 0。
 3. 在 Codex 中开始一个任务，确认板端进入 `running`、RGB 变蓝、`activeTasks=1`；完成或
    等待输入时确认状态分别变为 `ready` 或 `needs_input`。
 4. 在一个任务从 idle 依次进入 running、needs_input、ready、blocked，确认语义动作不同；再用
